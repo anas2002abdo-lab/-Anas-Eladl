@@ -17,6 +17,8 @@ void main() {
   runApp(const OtlobhaCaptainApp());
 }
 
+typedef MyApp = OtlobhaCaptainApp;
+
 class OtlobhaCaptainApp extends StatelessWidget {
   const OtlobhaCaptainApp({super.key});
 

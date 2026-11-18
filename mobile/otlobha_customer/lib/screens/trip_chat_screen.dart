@@ -31,14 +31,11 @@ class _TripChatScreenState extends State<TripChatScreen> {
 
   Map<String, dynamic>? _trip;
   List<Map<String, dynamic>> _messages = [];
-  List<dynamic> _nearbyCaptains = [];
   LatLng? _captainCoords;
   double? _distanceToPickupKm;
   int? _etaMin;
   bool _loading = true;
   bool _sending = false;
-  bool _updatingFare = false;
-  bool _updatingCaptain = false;
   bool _actingTrip = false;
   bool _tripClosed = false;
   bool _wsConnected = false;
@@ -110,15 +107,6 @@ class _TripChatScreenState extends State<TripChatScreen> {
         }
         _loading = false;
       });
-      if (tripMap['status'] == 'searching' && tripMap['captain_id'] == null) {
-        final pLat = (tripMap['pickup_lat'] as num?)?.toDouble() ?? 31.1583;
-        final pLng = (tripMap['pickup_lng'] as num?)?.toDouble() ?? 31.9369;
-        widget.api.getNearbyCaptains(pLat, pLng, vehicleType: 'all').then((caps) {
-          if (mounted && !_tripClosed) {
-            setState(() => _nearbyCaptains = caps);
-          }
-        }).catchError((_) {});
-      }
       _scrollToBottom();
     } catch (e) {
       if (mounted && !_tripClosed) {

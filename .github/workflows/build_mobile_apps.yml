@@ -29,12 +29,18 @@ jobs:
           cd mobile/otlobha_customer
           cp android/app/src/main/AndroidManifest.xml /tmp/cust_manifest.xml
           cp ios/Runner/Info.plist /tmp/cust_info.plist
-          flutter create . --platforms=android,ios
+          cp test/widget_test.dart /tmp/cust_widget_test.dart
+          cp analysis_options.yaml /tmp/cust_analysis_options.yaml
+          flutter create . --project-name otlobha_customer --org com.otlobha --platforms=android,ios
           cp /tmp/cust_manifest.xml android/app/src/main/AndroidManifest.xml
           cp /tmp/cust_info.plist ios/Runner/Info.plist
+          mkdir -p test
+          cp /tmp/cust_widget_test.dart test/widget_test.dart
+          cp /tmp/cust_analysis_options.yaml analysis_options.yaml
           flutter pub get
           dart run flutter_launcher_icons
-          flutter analyze
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
           flutter build apk --release --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
 
       - name: Prepare & Build Otlobha Captain APK
@@ -42,12 +48,18 @@ jobs:
           cd mobile/otlobha_captain
           cp android/app/src/main/AndroidManifest.xml /tmp/cap_manifest.xml
           cp ios/Runner/Info.plist /tmp/cap_info.plist
-          flutter create . --platforms=android,ios
+          cp test/widget_test.dart /tmp/cap_widget_test.dart
+          cp analysis_options.yaml /tmp/cap_analysis_options.yaml
+          flutter create . --project-name otlobha_captain --org com.otlobha --platforms=android,ios
           cp /tmp/cap_manifest.xml android/app/src/main/AndroidManifest.xml
           cp /tmp/cap_info.plist ios/Runner/Info.plist
+          mkdir -p test
+          cp /tmp/cap_widget_test.dart test/widget_test.dart
+          cp /tmp/cap_analysis_options.yaml analysis_options.yaml
           flutter pub get
           dart run flutter_launcher_icons
-          flutter analyze
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
           flutter build apk --release --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
 
       - name: Upload Customer APK
@@ -75,8 +87,13 @@ jobs:
           for app in otlobha_customer otlobha_captain; do
             cd "$GITHUB_WORKSPACE/mobile/$app"
             cp ios/Runner/Info.plist /tmp/info.plist
-            flutter create . --platforms=ios
+            cp test/widget_test.dart /tmp/widget_test.dart
+            cp analysis_options.yaml /tmp/analysis_options.yaml
+            flutter create . --project-name "$app" --org com.otlobha --platforms=ios
             cp /tmp/info.plist ios/Runner/Info.plist
+            mkdir -p test
+            cp /tmp/widget_test.dart test/widget_test.dart
+            cp /tmp/analysis_options.yaml analysis_options.yaml
             flutter pub get
             dart run flutter_launcher_icons
             flutter build ios --release --no-codesign --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}

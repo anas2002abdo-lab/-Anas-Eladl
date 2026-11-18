@@ -20,6 +20,8 @@ void main() {
   runApp(const OtlobhaCustomerApp());
 }
 
+typedef MyApp = OtlobhaCustomerApp;
+
 class OtlobhaCustomerApp extends StatelessWidget {
   const OtlobhaCustomerApp({super.key});
 

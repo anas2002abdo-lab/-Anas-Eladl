@@ -36,7 +36,6 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
   bool _loading = true;
   bool _sending = false;
   bool _updatingStatus = false;
-  bool _updatingFare = false;
   bool _tripClosed = false;
   bool _wsConnected = false;
   bool _showMap = true;

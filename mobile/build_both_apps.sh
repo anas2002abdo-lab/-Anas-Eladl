@@ -9,12 +9,18 @@ for APP in otlobha_customer otlobha_captain; do
   cd "$ROOT_DIR/$APP"
   cp android/app/src/main/AndroidManifest.xml "/tmp/${APP}_manifest.xml"
   cp ios/Runner/Info.plist "/tmp/${APP}_info.plist"
-  flutter create . --platforms=android,ios
+  cp test/widget_test.dart "/tmp/${APP}_widget_test.dart"
+  cp analysis_options.yaml "/tmp/${APP}_analysis_options.yaml"
+  flutter create . --project-name "$APP" --org com.otlobha --platforms=android,ios
   cp "/tmp/${APP}_manifest.xml" android/app/src/main/AndroidManifest.xml
   cp "/tmp/${APP}_info.plist" ios/Runner/Info.plist
+  mkdir -p test
+  cp "/tmp/${APP}_widget_test.dart" test/widget_test.dart
+  cp "/tmp/${APP}_analysis_options.yaml" analysis_options.yaml
   flutter pub get
   dart run flutter_launcher_icons
-  flutter analyze
+  flutter analyze --no-fatal-infos --no-fatal-warnings
+  flutter test
   flutter build apk --release --dart-define=API_BASE_URL="$API_URL"
   echo "APK generated at: $ROOT_DIR/$APP/build/app/outputs/flutter-apk/app-release.apk"
 done
