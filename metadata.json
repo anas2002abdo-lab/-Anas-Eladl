@@ -1,0 +1,6 @@
+{
+  "name": "اطلبها – Otlobha",
+  "description": "منصة خدمات متكاملة (Super App) للتجارة المحلية والتوصيل والصيدليات والنقل الذكي والطرود والسوق والمحفظة الإلكترونية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

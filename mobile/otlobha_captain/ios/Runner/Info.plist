@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>اطلبها كابتن</string>
+	<key>CFBundleName</key>
+	<string>otlobha_captain</string>
+	<key>NSCameraUsageDescription</key>
+	<string>يحتاج تطبيق اطلبها كابتن إلى الكاميرا لتصوير المركبة من 4 جهات ورخصة القيادة والبطاقة لتوثيق الحساب.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>يحتاج تطبيق اطلبها كابتن إلى الصور لرفع مستندات التحقق المطلوبة.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>يحتاج تطبيق اطلبها كابتن إلى موقعك لتوجيه أقرب الطلبات والرحلات إليك في نطاق المنزلة.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+</dict>
+</plist>

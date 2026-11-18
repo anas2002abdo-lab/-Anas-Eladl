@@ -1,0 +1,70 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+@layer base {
+  body {
+    font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, sans-serif;
+    background-color: #f8fafc;
+    color: #0f172a;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Cairo', 'IBM Plex Sans Arabic', sans-serif;
+  }
+
+  .font-mono-num {
+    font-family: 'IBM Plex Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@keyframes otlobha-flash-sweep {
+  0% {
+    transform: translateX(-140%) rotate(25deg);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translateX(180%) rotate(25deg);
+    opacity: 0;
+  }
+}
+
+@keyframes otlobha-flash-pulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(245, 166, 35, 0.75), 0 0 0 0 rgba(255, 255, 255, 0.9);
+  }
+  45% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 8px rgba(245, 166, 35, 0.35), 0 0 22px 6px rgba(255, 230, 150, 0.9);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 14px rgba(245, 166, 35, 0), 0 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+.animate-otlobha-flash-pulse {
+  animation: otlobha-flash-pulse 0.45s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.animate-otlobha-flash-sweep {
+  animation: otlobha-flash-sweep 0.42s ease-out forwards;
+}
+

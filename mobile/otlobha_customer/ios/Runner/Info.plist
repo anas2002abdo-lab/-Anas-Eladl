@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>اطلبها – Otlobha</string>
+	<key>CFBundleName</key>
+	<string>otlobha_customer</string>
+	<key>NSCameraUsageDescription</key>
+	<string>يحتاج تطبيق اطلبها إلى الكاميرا لتصوير الروشتة الطبية أو قائمة الطلبات أو منتجات السوق.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>يحتاج تطبيق اطلبها إلى معرض الصور لإرفاق صورة الروشتة أو إعلانات سوق اطلبها.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>يحتاج تطبيق اطلبها إلى موقعك لتحديد عنوان التوصيل وحساب المسافة داخل المنزلة وقراها.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+</dict>
+</plist>

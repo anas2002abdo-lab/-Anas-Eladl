@@ -1,0 +1,38 @@
+name: otlobha_captain
+description: "اطلبها كابتن – Otlobha Captain App (Android & iOS) for El Manzala"
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  http: ^1.2.2
+  image_picker: ^1.1.2
+  geolocator: ^13.0.1
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  web_socket_channel: ^3.0.1
+  print_bluetooth_thermal: ^1.1.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.14.1
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/otlobha_logo.jpg"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/images/otlobha_logo.jpg"
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/otlobha_logo.jpg
