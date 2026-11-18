@@ -61,8 +61,6 @@ export const MerchantAuthPortal: React.FC<Props> = ({
   const [otpEmail, setOtpEmail] = useState('');
   const [otpStep, setOtpStep] = useState<'email' | 'code'>('email');
   const [otpCode, setOtpCode] = useState('');
-  const [demoOtp, setDemoOtp] = useState<string | null>(null);
-  const [otpChannel, setOtpChannel] = useState<'smtp' | 'sandbox'>('sandbox');
   const [resendIn, setResendIn] = useState(0);
   const [otpLoading, setOtpLoading] = useState(false);
 
@@ -71,8 +69,6 @@ export const MerchantAuthPortal: React.FC<Props> = ({
   const [regEmail, setRegEmail] = useState('');
   const [regOtpSent, setRegOtpSent] = useState(false);
   const [regOtpCode, setRegOtpCode] = useState('');
-  const [regDemoOtp, setRegDemoOtp] = useState<string | null>(null);
-  const [regOtpChannel, setRegOtpChannel] = useState<'smtp' | 'sandbox'>('sandbox');
   const [regOtpResendIn, setRegOtpResendIn] = useState(0);
   const [regOtpBusy, setRegOtpBusy] = useState(false);
   const [emailVerificationToken, setEmailVerificationToken] = useState<string | null>(null);
@@ -150,14 +146,8 @@ export const MerchantAuthPortal: React.FC<Props> = ({
       const res = await api.requestMerchantRegOtp(cleanEmail);
       setRegOtpSent(true);
       setRegOtpCode('');
-      setRegOtpChannel(res.delivery_channel);
-      setRegDemoOtp(res.demo_otp || null);
       setRegOtpResendIn(60);
-      onNotify(
-        res.delivery_channel === 'sandbox' && res.demo_otp
-          ? `تم إرسال رمز التحقق إلى بريدك ${res.email} (الرمز التجريبي: ${res.demo_otp})`
-          : `تم إرسال رمز التحقق إلى بريدك ${res.email}`
-      );
+      onNotify(`تم إرسال رمز التحقق المكون من 6 أرقام إلى بريدك على Gmail: ${res.email}`);
     } catch (err) {
       onNotify((err as Error).message);
     } finally {
@@ -269,16 +259,10 @@ export const MerchantAuthPortal: React.FC<Props> = ({
     try {
       const res = await api.requestEmailOtp(otpEmail.trim(), 'merchant');
       setOtpEmail(res.email);
-      setOtpChannel(res.delivery_channel);
-      setDemoOtp(res.demo_otp || null);
       setOtpCode('');
       setOtpStep('code');
       setResendIn(60);
-      onNotify(
-        res.delivery_channel === 'sandbox' && res.demo_otp
-          ? `تم إنشاء رمز الدخول للبريد ${res.email} (الرمز: ${res.demo_otp})`
-          : `تم إرسال رمز الدخول إلى بريدك ${res.email}`
-      );
+      onNotify(`تم إرسال رمز الدخول المكون من 6 أرقام إلى بريدك على Gmail: ${res.email}`);
     } catch (err) {
       onNotify((err as Error).message);
     } finally {
@@ -565,7 +549,6 @@ export const MerchantAuthPortal: React.FC<Props> = ({
                   onClick={() => {
                     setOtpStep('email');
                     setOtpCode('');
-                    setDemoOtp(null);
                   }}
                   className="inline-flex items-center gap-1 px-2.5 py-1 border border-slate-200 rounded-lg text-xs text-slate-700"
                 >
@@ -574,20 +557,10 @@ export const MerchantAuthPortal: React.FC<Props> = ({
                 </button>
               </div>
 
-              {otpChannel === 'sandbox' && demoOtp && (
-                <div className="bg-teal-50 border border-teal-200 rounded-xl p-3 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-teal-900 font-semibold">
-                    رمز التجربة: <strong dir="ltr" className="font-mono-num">{demoOtp}</strong>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setOtpCode(demoOtp)}
-                    className="px-2.5 py-1 bg-teal-700 text-white rounded-lg text-[11px] font-bold"
-                  >
-                    تعبئة الرمز
-                  </button>
-                </div>
-              )}
+              <div className="bg-teal-50 border border-teal-200 rounded-xl p-3 flex items-center gap-2 text-xs text-teal-900">
+                <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+                <span>تم إرسال رمز التأكيد إلى بريدك على Gmail. يرجى إدخال الكود المكون من 6 أرقام.</span>
+              </div>
 
               <input
                 type="text"
@@ -622,34 +595,6 @@ export const MerchantAuthPortal: React.FC<Props> = ({
                 </button>
               </div>
             </form>
-          )}
-
-          {/* Quick Test Accounts */}
-          {merchants.filter((m) => Boolean(m.email)).length > 0 && (
-            <div className="pt-4 border-t border-slate-100 space-y-2">
-              <p className="text-[11px] font-semibold text-slate-500">
-                {isAr ? 'حسابات مسجلة للتجربة السريعة (كلمة المرور الافتراضية: 123456):' : 'Quick test accounts (default password: 123456):'}
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {merchants
-                  .filter((m) => Boolean(m.email))
-                  .slice(0, 6)
-                  .map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => {
-                        setLoginEmail(m.email!);
-                        setLoginPassword('123456');
-                        setOtpEmail(m.email!);
-                      }}
-                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-orange-50 hover:text-orange-800 border border-slate-200 rounded-lg text-[11px] font-medium"
-                    >
-                      <span dir="ltr" className="font-mono-num font-bold">{m.email}</span> · {m.business_name_ar}
-                    </button>
-                  ))}
-              </div>
-            </div>
           )}
 
           <div className="bg-orange-50 border border-orange-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -786,14 +731,9 @@ export const MerchantAuthPortal: React.FC<Props> = ({
                   <div className="bg-white border border-orange-200 rounded-xl p-3 space-y-2">
                     <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
                       <span className="text-slate-700">
-                        أدخل رمز التحقق المكون من 6 أرقام المرسل إلى{' '}
+                        أدخل رمز التحقق المكون من 6 أرقام المرسل إلى بريدك على Gmail:{' '}
                         <strong dir="ltr" className="font-mono-num">{regEmail}</strong>
                       </span>
-                      {regOtpChannel === 'sandbox' && regDemoOtp && (
-                        <span className="px-2 py-0.5 bg-amber-100 text-amber-900 rounded font-bold font-mono-num">
-                          رمز التجربة: {regDemoOtp}
-                        </span>
-                      )}
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <input

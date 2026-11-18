@@ -3,29 +3,20 @@ import { ArrowRight, CheckCircle2, Mail, RefreshCw, ShieldCheck } from 'lucide-r
 import { api } from '../lib/api.ts';
 import type { Language } from '../shared/types.ts';
 
-interface QuickAccount {
-  label: string;
-  email: string;
-  phone?: string;
-}
-
 interface Props {
   role: 'customer' | 'merchant';
   lang: Language;
-  quickAccounts?: QuickAccount[];
   onVerified: (user: any) => void;
   onNotify: (msg: string) => void;
 }
 
-export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts = [], onVerified, onNotify }) => {
+export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, onVerified, onNotify }) => {
   const isAr = lang === 'ar';
   const [step, setStep] = useState<'email' | 'otp'>('email');
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
-  const [demoOtp, setDemoOtp] = useState<string | null>(null);
-  const [deliveryChannel, setDeliveryChannel] = useState<'smtp' | 'sandbox'>('sandbox');
   const [resendIn, setResendIn] = useState(0);
   const [loading, setLoading] = useState(false);
 
@@ -45,18 +36,12 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
     try {
       const res = await api.requestEmailOtp(email.trim(), role);
       setEmail(res.email);
-      setDeliveryChannel(res.delivery_channel);
-      setDemoOtp(res.demo_otp || null);
       setCode('');
       setStep('otp');
       setResendIn(60);
       onNotify(
-        res.delivery_channel === 'sandbox' && res.demo_otp
-          ? isAr
-            ? `تم إنشاء رمز التأكيد للبريد ${res.email} (رمز التجربة: ${res.demo_otp})`
-            : `OTP created for ${res.email} (Code: ${res.demo_otp})`
-          : isAr
-          ? `تم إرسال رسالة برقم التأكيد إلى بريدك ${res.email}`
+        isAr
+          ? `تم إرسال رسالة برقم التأكيد المكون من 6 أرقام إلى بريدك على Gmail: ${res.email}`
           : `Confirmation code sent to ${res.email}`
       );
     } catch (err) {
@@ -111,10 +96,10 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
           <h2 className="text-xl font-bold mt-0.5">
             {role === 'merchant'
               ? isAr
-                ? 'دخول التاجر بتأكيد البريد الإلكتروني'
+                ? 'دخول التاجر بتأكيد البريد الإلكتروني (Gmail)'
                 : 'Merchant Email OTP Sign In'
               : isAr
-              ? 'تسجيل الدخول بالبريد الإلكتروني'
+              ? 'تسجيل الدخول عبر البريد الإلكتروني (Gmail)'
               : 'Customer Email OTP Sign In'}
           </h2>
         </div>
@@ -124,23 +109,23 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
         <form onSubmit={handleRequestOtp} className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
           <div className="space-y-1">
             <p className="text-sm font-bold text-slate-900">
-              {isAr ? 'أدخل بريدك الإلكتروني لإرسال رمز التأكيد' : 'Enter your email for OTP verification'}
+              {isAr ? 'أدخل بريدك الإلكتروني (Gmail) لإرسال رمز التأكيد' : 'Enter your Gmail for OTP verification'}
             </p>
             <p className="text-xs text-slate-500">
               {role === 'merchant'
                 ? isAr
-                  ? 'أدخل البريد الإلكتروني المسجل لمتجرك أو صيدليتك وسنرسل لك كود التأكيد مجانًا.'
+                  ? 'أدخل البريد الإلكتروني المسجل لمتجرك أو صيدليتك وسنرسل لك كود التأكيد على Gmail.'
                   : 'Enter your registered merchant email to receive a confirmation code.'
                 : isAr
-                ? 'سيصلك كود تأكيد من 6 أرقام إلى بريدك الإلكتروني لتضعه هنا وتدخل مباشرة.'
-                : 'We will send a 6-digit confirmation code to your email.'}
+                ? 'سيصلك كود تأكيد من 6 أرقام إلى بريدك الإلكتروني على Gmail لتضعه هنا وتدخل مباشرة.'
+                : 'We will send a 6-digit confirmation code to your Gmail.'}
             </p>
           </div>
 
           <div className="space-y-3">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                {isAr ? 'البريد الإلكتروني (Email)' : 'Email Address'}
+                {isAr ? 'البريد الإلكتروني (Gmail)' : 'Email Address'}
               </label>
               <div className="relative">
                 <input
@@ -160,7 +145,7 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {isAr ? 'الاسم (اختياري / للعميل الجديد)' : 'Name (optional)'}
+                    {isAr ? 'الاسم الكامل' : 'Full Name'}
                   </label>
                   <input
                     type="text"
@@ -172,7 +157,7 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {isAr ? 'رقم الهاتف للتوصيل (اختياري)' : 'Delivery Phone (optional)'}
+                    {isAr ? 'رقم الهاتف للتوصيل' : 'Delivery Phone'}
                   </label>
                   <input
                     type="tel"
@@ -193,41 +178,15 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
             className="w-full flex items-center justify-center gap-2 py-3 bg-orange-600 hover:bg-orange-700 disabled:opacity-60 text-white rounded-xl text-sm font-bold min-h-[46px]"
           >
             <Mail className="w-4 h-4" />
-            <span>{loading ? 'جاري الإرسال...' : isAr ? 'إرسال رمز التأكيد إلى البريد الإلكتروني' : 'Send Email Code'}</span>
+            <span>{loading ? 'جاري الإرسال...' : isAr ? 'إرسال رمز التأكيد إلى Gmail' : 'Send Email Code'}</span>
           </button>
-
-          {quickAccounts.length > 0 && (
-            <div className="pt-3 border-t border-slate-100 space-y-2">
-              <p className="text-[11px] font-semibold text-slate-500">
-                {isAr ? 'حسابات جاهزة للتجربة السريعة:' : 'Quick test accounts:'}
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {quickAccounts.map((acc) => (
-                  <button
-                    key={acc.email}
-                    type="button"
-                    onClick={() => {
-                      setEmail(acc.email);
-                      if (role === 'customer') {
-                        setFullName(acc.label);
-                        if (acc.phone) setPhone(acc.phone);
-                      }
-                    }}
-                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-orange-50 hover:text-orange-800 border border-slate-200 rounded-lg text-[11px] font-medium"
-                  >
-                    <span dir="ltr" className="font-mono-num font-bold">{acc.email}</span> · {acc.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </form>
       ) : (
         <form onSubmit={handleVerifyOtp} className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
           <div className="flex items-center justify-between gap-2">
             <div>
               <p className="text-sm font-bold text-slate-900">
-                {isAr ? 'أدخل رمز التأكيد المرسل لبريدك' : 'Enter Verification Code'}
+                {isAr ? 'أدخل رمز التأكيد المرسل لبريدك على Gmail' : 'Enter Verification Code'}
               </p>
               <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
                 <span dir="ltr" className="font-mono-num font-semibold text-slate-700">
@@ -240,7 +199,6 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
               onClick={() => {
                 setStep('email');
                 setCode('');
-                setDemoOtp(null);
               }}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium text-slate-700"
             >
@@ -249,38 +207,14 @@ export const EmailOtpLoginCard: React.FC<Props> = ({ role, lang, quickAccounts =
             </button>
           </div>
 
-          {deliveryChannel === 'sandbox' && demoOtp ? (
-            <div className="bg-teal-50 border border-teal-200 rounded-xl p-3.5 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-bold text-teal-900">
-                  <Mail className="w-4 h-4 text-teal-700 shrink-0" />
-                  <span>{isAr ? 'رسالة البريد الواردة (وضع التجربة قبل ربط Gmail SMTP)' : 'Incoming Email Preview (Sandbox)'}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCode(demoOtp)}
-                  className="px-2.5 py-1 bg-teal-700 hover:bg-teal-800 text-white rounded-lg text-[11px] font-bold"
-                >
-                  {isAr ? 'تعبئة الرمز' : 'Auto-fill'}
-                </button>
-              </div>
-              <p className="text-xs text-teal-800 leading-relaxed">
-                رمز تأكيد الدخول لمنصة اطلبها هو:{' '}
-                <strong dir="ltr" className="font-mono-num text-sm tracking-widest bg-white px-2 py-0.5 rounded border border-teal-200">
-                  {demoOtp}
-                </strong>
-              </p>
-            </div>
-          ) : (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-700 flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
-              <span>
-                {isAr
-                  ? `تم إرسال رسالة بريد إلكتروني برقم التأكيد إلى ${email}. راجع البريد الوارد أو الرسائل غير المرغوب فيها (Spam).`
-                  : `Verification email sent to ${email}.`}
-              </span>
-            </div>
-          )}
+          <div className="bg-teal-50 border border-teal-200 rounded-xl p-3 text-xs text-teal-900 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+            <span>
+              {isAr
+                ? `تم إرسال رسالة بريد إلكتروني برقم التأكيد إلى ${email}. راجع البريد الوارد على Gmail أو قسم الرسائل غير المرغوب فيها (Spam).`
+                : `Verification email sent to ${email}.`}
+            </span>
+          </div>
 
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">

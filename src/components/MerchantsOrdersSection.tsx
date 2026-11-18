@@ -148,7 +148,7 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
   const [newOrder, setNewOrder] = useState({
     customer_name: '',
     customer_phone: '',
-    merchant_id: merchants[0]?.id || 'mer_1',
+    merchant_id: merchants[0]?.id || '',
     zone_id: zones[0]?.id || 'zn_city_center',
     address_landmark: '',
     order_channel: 'free_text',

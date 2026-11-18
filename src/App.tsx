@@ -173,21 +173,22 @@ export default function App() {
           }
           await refreshCore(false, merch);
         } else {
-          if (merchantSession) {
-            await refreshCore(false, merchantSession).catch(() => {});
-          } else {
-            setAdminUser(null);
-            try {
-              localStorage.removeItem(MERCHANT_SESSION_KEY);
-            } catch {
-              // ignore
-            }
-            await refreshCore(false, null);
+          setAdminUser(null);
+          setMerchantSession(null);
+          try {
+            localStorage.removeItem(MERCHANT_SESSION_KEY);
+          } catch {
+            // ignore
           }
+          await refreshCore(false, null);
         }
       } catch {
-        if (merchantSession) {
-          await refreshCore(false, merchantSession).catch(() => {});
+        setAdminUser(null);
+        setMerchantSession(null);
+        try {
+          localStorage.removeItem(MERCHANT_SESSION_KEY);
+        } catch {
+          // ignore
         }
       } finally {
         if (active) setAuthChecking(false);
@@ -242,7 +243,7 @@ export default function App() {
           { id: 'finance', label: isAr ? 'الدفتر المالي والمحافظ' : 'Ledger & Wallets', icon: Wallet },
           { id: 'governance', label: isAr ? 'الصلاحيات والشكاوى والتدقيق' : 'RBAC & Audit Logs', icon: ShieldCheck },
         ]
-      : portalMode === 'merchant'
+      : portalMode === 'merchant' && merchantSession
       ? [
           { id: 'orders', label: isAr ? 'طلبات متجري الواردة' : 'Store Orders', icon: Store },
           { id: 'catalog', label: isAr ? 'إدارة المنتجات والأقسام' : 'Products & Categories', icon: Package },
@@ -299,16 +300,16 @@ export default function App() {
                 );
               })}
 
-              {portalMode === 'admin' && !adminUser && (
+              {((portalMode === 'admin' && !adminUser) || (portalMode === 'merchant' && !merchantSession)) && (
                 <div className="p-3 bg-slate-800/70 rounded-lg text-xs text-slate-300 space-y-2">
                   <p className="font-bold text-white flex items-center gap-1.5">
                     <ShieldCheck className="w-4 h-4 text-orange-400 shrink-0" />
-                    <span>{isAr ? 'دخول إداري مطلوب' : 'Admin Login Required'}</span>
+                    <span>{isAr ? 'تسجيل الدخول مطلوب' : 'Login Required'}</span>
                   </p>
                   <p className="leading-relaxed text-slate-400">
                     {isAr
-                      ? 'لوحة الإدارة والبيانات المالية محمية. يجب تسجيل الدخول بحساب إداري معتمد.'
-                      : 'Admin dashboard and financial routes require verified administrator credentials.'}
+                      ? 'المنظومة محمية بالكامل. يجب تسجيل الدخول أولاً لتفعيل لوحة التحكم والخدمات.'
+                      : 'The system requires authentication before accessing control features.'}
                   </p>
                 </div>
               )}

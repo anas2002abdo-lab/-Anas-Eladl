@@ -75,13 +75,13 @@ export const CatalogSection: React.FC<Props> = ({
 
   // Store Photo state
   const [photoMerchantId, setPhotoMerchantId] = useState<string>(
-    lockedMerchantId || merchants[0]?.id || 'mer_1'
+    lockedMerchantId || merchants[0]?.id || ''
   );
   const [storeImageUrl, setStoreImageUrl] = useState<string>('');
   const [savingStorePhoto, setSavingStorePhoto] = useState<boolean>(false);
 
   const [importMerchantId, setImportMerchantId] = useState<string>(
-    lockedMerchantId || merchants[0]?.id || 'mer_1'
+    lockedMerchantId || merchants[0]?.id || ''
   );
   const [parsedExcelRows, setParsedExcelRows] = useState<ParsedExcelProductRow[]>([]);
   const [importFileName, setImportFileName] = useState<string>('');
@@ -96,7 +96,7 @@ export const CatalogSection: React.FC<Props> = ({
 
   const [productForm, setProductForm] = useState({
     product_code: '',
-    merchant_id: lockedMerchantId || merchants[0]?.id || 'mer_1',
+    merchant_id: lockedMerchantId || merchants[0]?.id || '',
     category_id: 'cat_grocery',
     name_ar: '',
     name_en: '',
@@ -162,7 +162,7 @@ export const CatalogSection: React.FC<Props> = ({
 
   const resetProductForm = () => {
     setEditingId(null);
-    const defaultMerId = lockedMerchantId || merchants[0]?.id || 'mer_1';
+    const defaultMerId = lockedMerchantId || merchants[0]?.id || '';
     setProductForm({
       product_code: '',
       merchant_id: defaultMerId,

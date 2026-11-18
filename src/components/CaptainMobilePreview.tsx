@@ -155,25 +155,23 @@ export const CaptainMobilePreview: React.FC<Props> = ({ lang, captains, orders, 
       .getMe()
       .then((res) => {
         if (cancelled) return;
-        if (res.user?.actorType === 'captain') {
+        if (res.authenticated && res.user?.actorType === 'captain') {
           setLoggedInCaptainProfile(res.user as CaptainRecord);
           setCaptainSession(String(res.user.id));
-        } else if (loggedCaptainId) {
-          const fromList = captains.find((c) => c.id === loggedCaptainId);
-          if (fromList) setLoggedInCaptainProfile(fromList);
+        } else {
+          setLoggedInCaptainProfile(null);
+          setCaptainSession('');
         }
       })
       .catch(() => {
         if (cancelled) return;
-        if (loggedCaptainId) {
-          const fromList = captains.find((c) => c.id === loggedCaptainId);
-          if (fromList) setLoggedInCaptainProfile(fromList);
-        }
+        setLoggedInCaptainProfile(null);
+        setCaptainSession('');
       });
     return () => {
       cancelled = true;
     };
-  }, [captains.length, loggedCaptainId]);
+  }, []);
 
   useEffect(() => {
     if (!loggedCaptainId) return;
@@ -1385,29 +1383,6 @@ export const CaptainMobilePreview: React.FC<Props> = ({ lang, captains, orders, 
               <LogIn className="w-4 h-4" />
               <span>{loggingIn ? 'جاري التحقق...' : isAr ? 'تسجيل الدخول' : 'Sign In'}</span>
             </button>
-
-            {captains.length > 0 && (
-              <div className="pt-3 border-t border-slate-100 space-y-2">
-                <p className="text-[11px] font-semibold text-slate-500">
-                  {isAr ? 'حسابات طيارين جاهزة للتجربة (كلمة المرور المبدئية: 123456):' : 'Demo captain accounts (password: 123456):'}
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {captains.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => {
-                        setLoginUsername(c.username || '');
-                        setLoginPassword('123456');
-                      }}
-                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-orange-50 hover:text-orange-800 border border-slate-200 rounded-lg text-[11px] font-medium"
-                    >
-                      <span dir="ltr" className="font-mono-num font-bold">@{c.username}</span> · {c.full_name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </form>
         ) : (
           renderRegistrationForm(() => setAuthMode('login'))

@@ -698,28 +698,6 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE captains ADD COLUMN total_penalties REAL NOT NULL DEFAULT 0');
   }
 
-  const unmigratedCaps = db
-    .prepare("SELECT id FROM captains WHERE username IS NULL OR TRIM(username) = '' OR password_hash IS NULL OR password_hash = ''")
-    .all() as Array<{ id: string }>;
-  if (unmigratedCaps.length > 0) {
-    const defaultSeedUsernames: Record<string, string> = {
-      cap_1: 'captain1',
-      cap_2: 'captain2',
-      cap_3: 'captain3',
-      cap_4: 'captain4',
-    };
-    const defaultPwHash = hashPassword('123456');
-    const updCapCred = db.prepare(`
-      UPDATE captains SET
-        username = COALESCE(NULLIF(TRIM(username), ''), ?),
-        password_hash = CASE WHEN password_hash IS NULL OR password_hash = '' THEN ? ELSE password_hash END
-      WHERE id = ?
-    `);
-    unmigratedCaps.forEach((row, idx) => {
-      const fallbackUser = defaultSeedUsernames[row.id] || `captain_${row.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}_${idx + 1}`;
-      updCapCred.run(fallbackUser, defaultPwHash, row.id);
-    });
-  }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_captains_username_lower ON captains(LOWER(username))');
 
   const countServices = db.prepare('SELECT COUNT(*) as c FROM service_configs').get() as { c: number };
@@ -735,33 +713,9 @@ export function initDatabase(): void {
   `).run();
   db.prepare("UPDATE pricing_rules SET commission_rate = 10 WHERE service_type = 'rides'").run();
 
-  // Ensure captains have a GPS timestamp and cap_1 can serve rides too
-  db.prepare("UPDATE captains SET location_updated_at = COALESCE(location_updated_at, datetime('now'))").run();
-  const cap1 = db.prepare('SELECT allowed_services_json FROM captains WHERE id = ?').get('cap_1') as
-    | { allowed_services_json: string }
-    | undefined;
-  if (cap1) {
-    const allowed = JSON.parse(cap1.allowed_services_json || '[]') as string[];
-    if (!allowed.includes('rides')) allowed.push('rides');
-    db.prepare('UPDATE captains SET is_eligible_for_rides = 1, allowed_services_json = ? WHERE id = ?').run(
-      JSON.stringify(allowed),
-      'cap_1'
-    );
-  }
-
-  const countCats = db.prepare('SELECT COUNT(*) as c FROM categories').get() as { c: number };
+  const countCats = db.prepare('SELECT COUNT(*) as c FROM categories WHERE merchant_id IS NULL').get() as { c: number };
   if (countCats.c === 0) {
     seedCatalogData();
-  }
-
-  const countNotifs = db.prepare('SELECT COUNT(*) as c FROM notifications').get() as { c: number };
-  if (countNotifs.c === 0) {
-    seedNotificationsData();
-  }
-
-  const countChats = db.prepare('SELECT COUNT(*) as c FROM order_chat_messages').get() as { c: number };
-  if (countChats.c === 0) {
-    seedOrderChatData();
   }
 
   const merCols = db.prepare("PRAGMA table_info('merchants')").all() as Array<{ name: string }>;
@@ -791,33 +745,6 @@ export function initDatabase(): void {
   }
   db.exec('UPDATE merchants SET is_email_verified = 1 WHERE terms_accepted = 1 AND is_email_verified = 0');
   db.exec('UPDATE merchants SET lat = COALESCE(lat, 31.1583), lng = COALESCE(lng, 31.9369) WHERE lat IS NULL OR lng IS NULL');
-  const defaultMerchantEmails: Record<string, string> = {
-    mer_1: 'baraka@otlobha.eg',
-    mer_2: 'manzala.fish@otlobha.eg',
-    mer_3: 'shifa.pharmacy@otlobha.eg',
-    mer_4: 'alnour.bakery@otlobha.eg',
-  };
-  const unmigratedMers = db
-    .prepare("SELECT id FROM merchants WHERE email IS NULL OR TRIM(email) = ''")
-    .all() as Array<{ id: string }>;
-  if (unmigratedMers.length > 0) {
-    const updMerEmail = db.prepare('UPDATE merchants SET email = ? WHERE id = ?');
-    unmigratedMers.forEach((row, idx) => {
-      updMerEmail.run(defaultMerchantEmails[row.id] || `merchant_${idx + 1}@otlobha.eg`, row.id);
-    });
-  }
-  const unhashedMers = db
-    .prepare("SELECT id FROM merchants WHERE password_hash IS NULL OR TRIM(password_hash) = ''")
-    .all() as Array<{ id: string }>;
-  if (unhashedMers.length > 0) {
-    const defaultMerPwHash = hashPassword('123456');
-    const updMerPw = db.prepare(
-      "UPDATE merchants SET password_hash = ?, terms_accepted = 1, terms_accepted_at = COALESCE(terms_accepted_at, datetime('now')) WHERE id = ?"
-    );
-    for (const row of unhashedMers) {
-      updMerPw.run(defaultMerPwHash, row.id);
-    }
-  }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_merchants_email_lower ON merchants(LOWER(email))');
 
   const catCols = db.prepare("PRAGMA table_info('categories')").all() as Array<{ name: string }>;
@@ -830,7 +757,33 @@ export function initDatabase(): void {
   if (!catCols.some((c) => c.name === 'is_offers_section')) {
     db.exec('ALTER TABLE categories ADD COLUMN is_offers_section INTEGER NOT NULL DEFAULT 0');
   }
-  // Ensure each merchant has a dedicated Offers section ("العروض")
+
+  // Purge any legacy demo accounts, demo orders, demo products, and demo transactions
+  const purgeDemoDataTx = db.transaction(() => {
+    db.exec(`
+      DELETE FROM order_chat_messages WHERE id IN ('msg_seed_1', 'msg_seed_2') OR order_id IN ('ord_1', 'ord_2', 'ord_3');
+      DELETE FROM order_stores WHERE order_id IN ('ord_1', 'ord_2', 'ord_3') OR merchant_id IN ('mer_1', 'mer_2', 'mer_3', 'mer_4');
+      DELETE FROM orders WHERE id IN ('ord_1', 'ord_2', 'ord_3') OR merchant_id IN ('mer_1', 'mer_2', 'mer_3', 'mer_4') OR customer_id IN ('cust_1', 'cust_2');
+      DELETE FROM products WHERE id IN ('prd_1', 'prd_2', 'prd_3', 'prd_4', 'prd_5', 'prd_6') OR merchant_id IN ('mer_1', 'mer_2', 'mer_3', 'mer_4');
+      DELETE FROM categories WHERE merchant_id IN ('mer_1', 'mer_2', 'mer_3', 'mer_4') OR id IN ('cat_offers_mer_1', 'cat_offers_mer_2', 'cat_offers_mer_3', 'cat_offers_mer_4');
+      DELETE FROM merchants WHERE id IN ('mer_1', 'mer_2', 'mer_3', 'mer_4') OR LOWER(email) IN ('baraka@otlobha.eg', 'manzala.fish@otlobha.eg', 'shifa.pharmacy@otlobha.eg', 'alnour.bakery@otlobha.eg');
+      DELETE FROM captain_documents WHERE captain_id IN ('cap_1', 'cap_2', 'cap_3', 'cap_4');
+      DELETE FROM captains WHERE id IN ('cap_1', 'cap_2', 'cap_3', 'cap_4') OR LOWER(username) IN ('captain1', 'captain2', 'captain3', 'captain4');
+      DELETE FROM support_messages WHERE id = 'sup_msg_1' OR ticket_id = 'sup_1';
+      DELETE FROM support_tickets WHERE id = 'sup_1' OR customer_id IN ('cust_1', 'cust_2');
+      DELETE FROM customers WHERE id IN ('cust_1', 'cust_2') OR LOWER(email) IN ('ahmed.awad@otlobha.eg', 'mona.ibrahim@otlobha.eg');
+      DELETE FROM market_listings WHERE id IN ('mkt_1', 'mkt_2', 'mkt_3');
+      DELETE FROM wallets WHERE id IN ('wal_cust_1', 'wal_cap_1', 'wal_mer_1', 'wal_mkt_2') OR user_id IN ('usr_cust_3', 'usr_cap_1', 'mer_1', 'usr_seller_2', 'cust_1', 'cust_2', 'cap_1', 'cap_2', 'cap_3', 'cap_4');
+      DELETE FROM ledger_entries WHERE reference_id IN ('ord_1', 'ord_2', 'ord_3', 'mkt_1', 'mkt_2', 'mkt_3') OR idempotency_key LIKE 'seed_%';
+      DELETE FROM settlements WHERE id IN ('set_1', 'set_2');
+      DELETE FROM complaints WHERE id = 'cmp_1';
+      DELETE FROM notifications WHERE id IN ('ntf_cust_1', 'ntf_cust_2', 'ntf_cap_1', 'ntf_cap_2');
+      DELETE FROM user_sessions WHERE user_id IN ('mer_1', 'mer_2', 'mer_3', 'mer_4', 'cap_1', 'cap_2', 'cap_3', 'cap_4', 'cust_1', 'cust_2');
+    `);
+  });
+  purgeDemoDataTx();
+
+  // Ensure each active real merchant has a dedicated Offers section ("العروض")
   const allMerchantsForOffers = db.prepare('SELECT id, merchant_type FROM merchants').all() as Array<{
     id: string;
     merchant_type: string;
@@ -851,63 +804,11 @@ export function initDatabase(): void {
     }
   }
 
-  const custCols = db.prepare("PRAGMA table_info('customers')").all() as Array<{ name: string }>;
-  if (!custCols.some((c) => c.name === 'email')) {
-    const migrateCustTx = db.transaction(() => {
-      db.exec(`
-        CREATE TABLE customers_new (
-          id TEXT PRIMARY KEY,
-          email TEXT UNIQUE,
-          phone TEXT,
-          full_name TEXT NOT NULL DEFAULT 'عميل اطلبها',
-          default_zone_id TEXT NOT NULL DEFAULT 'zn_city_center',
-          address_landmark TEXT NOT NULL DEFAULT '',
-          is_email_verified INTEGER NOT NULL DEFAULT 1,
-          last_login_at TEXT NOT NULL DEFAULT (datetime('now')),
-          created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-      `);
-      const oldRows = db.prepare('SELECT * FROM customers').all() as Array<Record<string, unknown>>;
-      const insNew = db.prepare(`
-        INSERT INTO customers_new (id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified, last_login_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
-      `);
-      const defaultCustEmails: Record<string, string> = {
-        cust_1: 'ahmed.awad@otlobha.eg',
-        cust_2: 'mona.ibrahim@otlobha.eg',
-      };
-      oldRows.forEach((r, idx) => {
-        const em = defaultCustEmails[String(r.id)] || `customer_${idx + 1}@otlobha.eg`;
-        insNew.run(
-          r.id,
-          em,
-          r.phone ?? null,
-          r.full_name ?? 'عميل اطلبها',
-          r.default_zone_id ?? 'zn_city_center',
-          r.address_landmark ?? '',
-          r.last_login_at ?? null,
-          r.created_at ?? null
-        );
-      });
-      db.exec('DROP TABLE customers; ALTER TABLE customers_new RENAME TO customers;');
-    });
-    migrateCustTx();
-  }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email_lower ON customers(LOWER(email))');
 
   const checkCustCols = db.prepare("PRAGMA table_info('customers')").all() as Array<{ name: string }>;
   if (!checkCustCols.some((c) => c.name === 'status')) {
     db.exec("ALTER TABLE customers ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
-  }
-
-  const countCustomers = db.prepare('SELECT COUNT(*) as c FROM customers').get() as { c: number };
-  if (countCustomers.c === 0) {
-    const insCust = db.prepare(`
-      INSERT OR IGNORE INTO customers (id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `);
-    insCust.run('cust_1', 'ahmed.awad@otlobha.eg', '01022334455', 'أحمد عوض', 'zn_city_center', 'شارع بورسعيد أمام مسجد الأنصار');
-    insCust.run('cust_2', 'mona.ibrahim@otlobha.eg', '01055112233', 'منى إبراهيم', 'zn_basrat', 'بجوار المسجد الكبير - البصراط');
   }
 
   const custColsGps = db.prepare("PRAGMA table_info('customers')").all() as Array<{ name: string }>;
@@ -920,16 +821,6 @@ export function initDatabase(): void {
   if (!custColsGps.some((c) => c.name === 'location_updated_at')) {
     db.exec('ALTER TABLE customers ADD COLUMN location_updated_at TEXT');
   }
-  db.prepare(`
-    UPDATE customers
-    SET last_lat = 31.1583, last_lng = 31.9369, location_updated_at = COALESCE(location_updated_at, datetime('now'))
-    WHERE id = 'cust_1' AND (last_lat IS NULL OR last_lng IS NULL)
-  `).run();
-  db.prepare(`
-    UPDATE customers
-    SET last_lat = 31.1240, last_lng = 31.9610, location_updated_at = COALESCE(location_updated_at, datetime('now'))
-    WHERE id = 'cust_2' AND (last_lat IS NULL OR last_lng IS NULL)
-  `).run();
 
   const prodCols = db.prepare("PRAGMA table_info('products')").all() as Array<{ name: string }>;
   if (!prodCols.some((c) => c.name === 'product_code')) {
@@ -1005,22 +896,6 @@ export function initDatabase(): void {
     `).run();
   }
 
-  const supportTicketCount = (db.prepare('SELECT COUNT(*) as c FROM support_tickets').get() as { c: number }).c;
-  if (supportTicketCount === 0) {
-    db.prepare(`
-      INSERT INTO support_tickets (
-        id, ticket_number, customer_id, customer_name, customer_phone, customer_email, subject, category, status, last_message_at
-      ) VALUES (
-        'sup_1', 'SUP-1001', 'cust_1', 'أحمد عوض', '01022334455', 'ahmed.awad@otlobha.eg',
-        'استفسار عن موعد توصيل طلب وتحديث العنوان', 'order_support', 'open', datetime('now')
-      )
-    `).run();
-    db.prepare(`
-      INSERT INTO support_messages (id, ticket_id, sender_role, sender_name, message_text)
-      VALUES ('sup_msg_1', 'sup_1', 'customer', 'أحمد عوض', 'مرحباً إدارة اطلبها، أحتاج التأكد من تحديث عنواني الجديد في شارع بورسعيد للطلبات القادمة.')
-    `).run();
-  }
-
   // Ensure token_version exists on user actor tables for session invalidation
   const capTvCols = db.prepare("PRAGMA table_info('captains')").all() as Array<{ name: string }>;
   if (!capTvCols.some((c) => c.name === 'token_version')) {
@@ -1092,88 +967,6 @@ export function ensureBootstrapSuperAdmin(): { created: boolean; reason?: string
   return { created: true };
 }
 
-function seedOrderChatData(): void {
-  const ord2 = db.prepare('SELECT id FROM orders WHERE id = ?').get('ord_2');
-  if (!ord2) return;
-  const ins = db.prepare(`
-    INSERT INTO order_chat_messages (id, order_id, sender_role, sender_name, message_text, image_url, is_delivery_proof)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  ins.run(
-    'msg_seed_1',
-    'ord_2',
-    'captain',
-    'محمود السيد عبده',
-    'تم استلام طلب الصيدلية وأنا في الطريق إلى عنوانك أمام مدرسة المنزلة الثانوية.',
-    null,
-    0
-  );
-  ins.run(
-    'msg_seed_2',
-    'ord_2',
-    'customer',
-    'خالد محمد حسن',
-    'شكرًا يا كابتن، لما توصل قدام البوابة ابعتلي صورة الطلب هنا.',
-    null,
-    0
-  );
-}
-
-function seedNotificationsData(): void {
-  const ins = db.prepare(`
-    INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, is_read, sent_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Super Admin')
-  `);
-  ins.run(
-    'ntf_cust_1',
-    'customer',
-    'وسط مدينة المنزلة',
-    null,
-    'promo',
-    'خصم 20 ج.م على أول طلب بقالة أو طرد في المنزلة',
-    'استخدم كود MANZALA20 عند إتمام الطلب من المتاجر أو خدمة اطلبها أي حاجة.',
-    'stores',
-    'otlobha_customer_manzala',
-    1240
-  );
-  ins.run(
-    'ntf_cust_2',
-    'customer',
-    'all',
-    null,
-    'operational',
-    'اطلب روشتتك من صيدليات المنزلة المعتمدة',
-    'صور الروشتة أو اكتب اسم الدواء وتواصل مباشرة مع الصيدلي المرخص.',
-    'pharmacy',
-    'otlobha_customer_all',
-    2180
-  );
-  ins.run(
-    'ntf_cap_1',
-    'captain',
-    'وسط مدينة المنزلة',
-    null,
-    'promo',
-    'ساعات ذروة نشطة في وسط المنزلة والبصراط',
-    'الطلب مرتفع الآن على توصيل المتاجر والطرود. فعّل حالة "متاح" لاستقبال أقرب طلب.',
-    'orders',
-    'otlobha_captain_manzala',
-    42
-  );
-  ins.run(
-    'ntf_cap_2',
-    'captain',
-    'all',
-    null,
-    'compliance',
-    'تذكير: حد الكاش الأقصى 1000 ج.م وتوثيق رخصة المركبة',
-    'يرجى مراجعة رصيد الكاش بيدك وتحديث صور المركبة السارية لتجنب إيقاف استقبال الطلبات.',
-    'kyc_upload',
-    'otlobha_captain_all',
-    58
-  );
-}
-
 function seedCatalogData(): void {
   const tx = db.transaction(() => {
     const cats: Array<[string, string, string, string, number]> = [
@@ -1190,22 +983,6 @@ function seedCatalogData(): void {
     ];
     const insCat = db.prepare('INSERT OR IGNORE INTO categories (id, scope, name_ar, name_en, sort_order, is_active) VALUES (?, ?, ?, ?, ?, 1)');
     for (const c of cats) insCat.run(...c);
-
-    const prods: Array<[string, string, string, string, string, string, string, number, number | null, number, number, number, string]> = [
-      ['prd_1', 'mer_1', 'cat_grocery', 'أرز مصري فاخر 5 كجم', 'Premium Egyptian Rice 5kg', 'تعبئة حديثة حبة عريضة', '', 175, 165, 40, 8, 0, ''],
-      ['prd_2', 'mer_1', 'cat_dairy', 'جبنة بيضاء طبيعي 500 جم', 'Natural White Cheese 500g', 'عبوة محكمة الغلق', '', 68, null, 25, 5, 0, 'عبوة 250 جم / 500 جم'],
-      ['prd_3', 'mer_2', 'cat_seafood', 'وجبة سمك بوري مشوي بالردة (كيلو)', 'Grilled Mullet Fish 1kg', 'يُقدم مع أرز صيادية وسلطة طحينة', '', 260, 245, 15, 3, 0, 'إضافة سلطة إضافية +15 ج.م | أرز زيادة +25 ج.م'],
-      ['prd_4', 'mer_3', 'cat_pharma_med', 'بنادول إكسترا 24 قرص', 'Panadol Extra 24 Tabs', 'مسكن وخافض حرارة', '', 54, null, 32, 6, 0, ''],
-      ['prd_5', 'mer_3', 'cat_pharma_med', 'مضاد حيوي واسع المجال (بوصفة)', 'Antibiotic Rx Only', 'لا يُصرف إلا بعد مراجعة الصيدلي للروشتة', '', 118, null, 4, 5, 1, ''],
-      ['prd_6', 'mer_4', 'cat_bakery', 'عيش فينو طازج (10 أرغفة)', 'Fresh Fino Bread (10 pcs)', 'مخبوز صباحي ساخن', '', 25, null, 60, 10, 0, ''],
-    ];
-    const insProd = db.prepare(`
-      INSERT OR IGNORE INTO products (
-        id, merchant_id, category_id, name_ar, name_en, description, image_url,
-        base_price, sale_price, stock_quantity, low_stock_threshold, requires_prescription, addons_text, is_available
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `);
-    for (const p of prods) insProd.run(...p);
   });
   tx();
 }
@@ -1371,144 +1148,7 @@ function seedInitialData(): void {
     const insertRole = db.prepare('INSERT INTO roles (code, name_ar, name_en, permissions_json) VALUES (?, ?, ?, ?)');
     for (const role of roles) insertRole.run(...role);
 
-    // 6. Captains + Docs
-    const defaultPwHash = hashPassword('123456');
-    const captains = [
-      ['cap_1', 'usr_cap_1', 'captain1', defaultPwHash, 'محمود السيد عبده', '01011223344', '29805121201451', 'المنزلة', 'وسط مدينة المنزلة', 'moto', 'هوجان 4 - 2023', 'د ق 4821', 1, JSON.stringify(['stores', 'pharmacy', 'parcels', 'rides']), 'approved', null, 'available', 31.1592, 31.9375, 240, 1000, 4.9, 96, 1.5, 42, 22],
-      ['cap_2', 'usr_cap_2', 'captain2', defaultPwHash, 'أحمد رضا الشربيني', '01099887766', '29509181203319', 'المنزلة', 'قرية البصراط', 'tuktuk', 'باجاج مرخص 2022', 'د هـ 9104', 1, JSON.stringify(['stores', 'parcels', 'rides']), 'approved', null, 'available', 31.1480, 31.9460, 480, 1000, 4.7, 91, 3.0, 29, 38],
-      ['cap_3', 'usr_cap_3', 'captain3', defaultPwHash, 'إسلام فتحي محمد', '01233445566', '30001051208812', 'المنزلة', 'قرية الطوابرة', 'moto', 'دايون 40 - 2024', 'د ط 1152', 0, JSON.stringify(['stores', 'parcels']), 'under_review', null, 'offline', 31.1440, 31.9150, 0, 1000, 5.0, 100, 0, 0, 0],
-      ['cap_4', 'usr_cap_4', 'captain4', defaultPwHash, 'كريم طارق العيسوي', '01144556677', '29211221204471', 'المنزلة', 'وسط مدينة المنزلة', 'car', 'هيونداي أكسنت 2021', 'د ص 7720', 1, JSON.stringify(['stores', 'parcels', 'rides']), 'approved', null, 'busy', 31.1605, 31.9340, 910, 1000, 4.8, 88, 2.0, 18, 5],
-    ];
-    const insertCap = db.prepare(`
-      INSERT INTO captains (
-        id, user_id, username, password_hash, full_name, phone, national_id, city, zone_name, vehicle_type, vehicle_model,
-        plate_number, is_eligible_for_rides, allowed_services_json, verification_status, rejection_reason,
-        availability_status, lat, lng, cash_on_hand, cash_limit, rating_avg, acceptance_rate,
-        cancellation_rate, completed_count, idle_minutes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const c of captains) insertCap.run(...c);
-
-    const docTypes = [
-      ['vehicle_front', 'صورة المركبة من الأمام'],
-      ['vehicle_back', 'صورة المركبة من الخلف'],
-      ['vehicle_right', 'الجانب الأيمن للمركبة'],
-      ['vehicle_left', 'الجانب الأيسر للمركبة'],
-      ['vehicle_plate', 'صورة لوحة المركبة'],
-      ['vehicle_license', 'رخصة المركبة السارية'],
-      ['driving_license', 'رخصة القيادة'],
-      ['national_id_front', 'الرقم القومي'],
-      ['selfie', 'الصورة الشخصية المباشرة'],
-    ];
-    const insertDoc = db.prepare(`
-      INSERT INTO captain_documents (id, captain_id, doc_type, label_ar, review_status, expires_at, review_note)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const [dt, label] of docTypes) {
-      insertDoc.run(uid('doc'), 'cap_1', dt, label, 'approved', '2027-08-01', null);
-      insertDoc.run(uid('doc'), 'cap_2', dt, label, 'approved', '2027-04-15', null);
-      insertDoc.run(uid('doc'), 'cap_3', dt, label, dt === 'vehicle_license' ? 'pending' : 'pending', '2026-12-30', dt === 'vehicle_plate' ? 'يُرجى التحقق من وضوح رقم اللوحة' : null);
-    }
-
-    // 7. Merchants & Pharmacies in El Manzala
-    const merchants = [
-      ['mer_1', 'baraka@otlobha.eg', 'سوبرماركت البركة', 'Al-Baraka Supermarket', 'supermarket', 'فرع شارع حسن طوبار', 'وسط مدينة المنزلة', '01020304050', 10, 'approved', 1, 1, null, null, null, 24],
-      ['mer_2', 'manzala.fish@otlobha.eg', 'أسماك ومشويات بحيرة المنزلة', 'Manzala Lake Grill & Fish', 'restaurant', 'فرع شارع بورسعيد', 'وسط مدينة المنزلة', '01060708090', 12, 'approved', 1, 1, null, null, null, 19],
-      ['mer_3', 'shifa.pharmacy@otlobha.eg', 'صيدلية الشفاء الحديثة', 'Al-Shifa Modern Pharmacy', 'pharmacy', 'فرع ميدان المحطة', 'وسط مدينة المنزلة', '01288990011', 8, 'approved', 1, 1, 'PH-DK-44912', 'د. سارة أحمد المتولي', 'SYN-18842', 14],
-      ['mer_4', 'alnour.bakery@otlobha.eg', 'مخبز وحلواني النور', 'Al-Nour Bakery', 'bakery', 'مدخل البصراط', 'قرية البصراط', '01122339988', 10, 'pending', 1, 1, null, null, null, 0],
-    ];
-    const insertMer = db.prepare(`
-      INSERT INTO merchants (
-        id, email, business_name_ar, business_name_en, merchant_type, branch_name, zone_name,
-        phone, commission_rate, verification_status, supports_free_order, is_open_now,
-        pharmacy_license_no, pharmacist_name, syndicate_no, orders_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const m of merchants) insertMer.run(...m);
-
-    // 8. Orders & Prescriptions
-    const orders = [
-      ['ord_1', 'OTL-1001', 'منى إبراهيم', '01055112233', 'mer_1', 'سوبرماركت البركة', 'supermarket', null, null, 'قرية البصراط', 'بجوار المسجد الكبير - البصراط', 'free_text', '2 كيلو سكر + زجاجة زيت + علبة جبنة عبور لاند كبيرة + عيش فينو', 0, 'awaiting_quote', 0, 24, 0, 24, 'cash', null, null, null],
-      ['ord_2', 'OTL-1002', 'خالد محمد حسن', '01277441122', 'mer_3', 'صيدلية الشفاء الحديثة', 'pharmacy', 'cap_1', 'محمود السيد عبده', 'وسط مدينة المنزلة', 'أمام مدرسة المنزلة الثانوية', 'prescription', 'صورة روشتة مرفقة (علاج ضغط ومكمل فيتامين د)', 1, 'preparing', 215, 22, 0, 237, 'cash', 'reviewed', 'الروشتة سارية ولا توجد أصناف جدول. تم تأكيد التوافر.', 'الشركة الأساسية غير متوفرة؛ وافق العميل على البديل المماثل بنفس المادة الفعالة'],
-      ['ord_3', 'OTL-1003', 'أحمد عوض', '01099114422', 'mer_2', 'أسماك ومشويات بحيرة المنزلة', 'restaurant', 'cap_1', 'محمود السيد عبده', 'وسط مدينة المنزلة', 'شارع المستشفى - عمارة 4', 'catalog', null, 0, 'delivered', 320, 14, 20, 314, 'cash', null, null, null],
-    ];
-    const insertOrd = db.prepare(`
-      INSERT INTO orders (
-        id, order_number, customer_name, customer_phone, merchant_id, merchant_name, merchant_type,
-        captain_id, captain_name, zone_name, address_landmark, order_channel, free_order_text,
-        is_express, status, subtotal, delivery_fee, discount_amount, total_amount, payment_method,
-        prescription_status, pharmacist_notes, substitution_note
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const o of orders) insertOrd.run(...o);
-
-    // 9. Market Listings
-    const listings = [
-      ['mkt_1', 'مصطفى جمال', '01033221199', 'هواتف وإلكترونيات', 'هاتف سامسونج A54 استخدام خفيف بالكرتونة', 'حالة ممتازة بدون خدوش - ضمان متبقي 4 شهور', 'used', 11500, 1, 'وسط مدينة المنزلة', 1, 'pending', 0, 0],
-      ['mkt_2', 'فاطمة حسن', '01199002233', 'منتجات يدوية ومنزلية', 'طقم مفارش كروشيه شغل يدوي 6 قطع', 'صناعة يدوية خيوط قطن مصري', 'new', 850, 3, 'قرية الطوابرة', 0, 'approved', 0, 850],
-      ['mkt_3', 'مستخدم غير موثق', '01511220099', 'أدوية ومكملات', 'علب مكملات مستوردة بدون ترخيص', 'عرض مشبوه مخالف لسياسة المواد المحظورة', 'new', 1200, 5, 'وسط مدينة المنزلة', 1, 'pending', 2, 0],
-    ];
-    const insertMkt = db.prepare(`
-      INSERT INTO market_listings (
-        id, seller_name, seller_phone, category_ar, title, description, condition, price,
-        quantity, zone_name, is_negotiable, moderation_status, reports_count, escrow_held_amount
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    for (const l of listings) insertMkt.run(...l);
-
-    // 10. Wallets & Ledger & Settlements
-    const wallets = [
-      ['wal_cust_1', 'usr_cust_3', 'أحمد عوض (عميل)', 'customer', 45, 0, 0],
-      ['wal_cap_1', 'usr_cap_1', 'محمود السيد عبده (كابتن)', 'captain', 610, 0, 0],
-      ['wal_mer_1', 'mer_1', 'سوبرماركت البركة (تاجر)', 'merchant', 1420, 215, 0],
-      ['wal_mkt_2', 'usr_seller_2', 'فاطمة حسن (بائع السوق)', 'market_seller', 0, 807.5, 0],
-    ];
-    const insertWal = db.prepare('INSERT INTO wallets (id, user_id, owner_name, owner_type, available_balance, pending_balance, is_frozen) VALUES (?, ?, ?, ?, ?, ?, ?)');
-    for (const w of wallets) insertWal.run(...w);
-
-    postDoubleEntryLedger({
-      idempotency_base: 'seed_ord_3_comm',
-      reference_type: 'order',
-      reference_id: 'ord_3',
-      description_ar: 'استحقاق عمولة طلب #OTL-1003 (أسماك بحيرة المنزلة)',
-      debit_account_code: 'CASH_CAPTAIN_cap_1',
-      debit_account_type: 'cash_clearing',
-      credit_account_code: 'PLATFORM_REVENUE_STORES',
-      credit_account_type: 'platform_revenue',
-      amount: 40.5,
-    });
-
-    postDoubleEntryLedger({
-      idempotency_base: 'seed_mkt_2_escrow',
-      reference_type: 'market_listing',
-      reference_id: 'mkt_2',
-      description_ar: 'حجز مبلغ الضمان المؤقت (Escrow) لصفقة طقم كروشيه',
-      debit_account_code: 'GATEWAY_CLEARING',
-      debit_account_type: 'gateway_clearing',
-      credit_account_code: 'ESCROW_HOLD_mkt_2',
-      credit_account_type: 'escrow_hold',
-      amount: 850,
-    });
-
-    const settlements = [
-      ['set_1', 'محمود السيد عبده', 'captain', 720, 110, 610, 'vodafone_cash', 'requested'],
-      ['set_2', 'سوبرماركت البركة', 'merchant', 1580, 160, 1420, 'instapay', 'approved'],
-    ];
-    const insertSet = db.prepare('INSERT INTO settlements (id, beneficiary_name, beneficiary_type, gross_earnings, deducted_commissions, net_payout, payout_method, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-    for (const st of settlements) insertSet.run(...st);
-
-    // 11. Coupons & Complaints
-    db.prepare(`
-      INSERT INTO coupons (id, code, applicable_services_json, discount_type, discount_value, max_discount, min_order_amount, funded_by, used_count, usage_limit_total, is_active)
-      VALUES ('cpn_1', 'MANZALA20', '["stores","parcels"]', 'fixed', 20, 20, 120, 'platform', 14, 200, 1)
-    `).run();
-
-    db.prepare(`
-      INSERT INTO complaints (id, ticket_number, complainant_name, service_type, category, description, status, resolution_notes)
-      VALUES ('cmp_1', 'TKT-401', 'علاء محمود', 'stores', 'late_delivery', 'تأخر الطلب 20 دقيقة بسبب زحام طريق البصراط', 'open', NULL)
-    `).run();
-
-    // 12. Financial Model Config
+    // 6. Financial Model Config
     db.prepare(`
       INSERT INTO financial_model_settings (id, config_json) VALUES ('default', ?)
     `).run(JSON.stringify({

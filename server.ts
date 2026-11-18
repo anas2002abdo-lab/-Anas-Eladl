@@ -1830,19 +1830,22 @@ app.post('/api/orders/:id/chat', allowAnyUserOrGuest, (req, res) => {
   res.status(201).json({ message: msgObj, delivery_proof_image_url: proofUrl });
 });
 
-function allowAnyUserOrGuest(req: any, _res: any, next: any) {
+function allowAnyUserOrGuest(req: any, res: any, next: any) {
   const auth = optionalAuth(req);
+  if (!auth) {
+    return res.status(401).json({ error: 'يرجى تسجيل الدخول أولاً للمتابعة' });
+  }
   const headerCustId = String(req.headers['x-otlobha-customer-id'] || req.body?.customer_id || '').trim();
-  if (headerCustId && (!auth || auth.role !== 'customer' || auth.id !== headerCustId)) {
+  if (headerCustId && (auth.role !== 'customer' || auth.id !== headerCustId)) {
     try {
       const custRow = db
         .prepare('SELECT id, full_name, phone, email, status FROM customers WHERE id = ?')
         .get(headerCustId) as { id: string; full_name: string; phone: string; email: string | null; status?: string } | undefined;
-      if (custRow) {
+      if (custRow && (auth.id === custRow.id || isAdminAuth(auth))) {
         req.auth = {
           id: custRow.id,
           role: 'customer',
-          sessionId: 'portal_ctx_customer',
+          sessionId: auth.sessionId || 'portal_ctx_customer',
           fullName: custRow.full_name,
           phone: custRow.phone,
           email: custRow.email,
@@ -1853,25 +1856,12 @@ function allowAnyUserOrGuest(req: any, _res: any, next: any) {
         return next();
       }
     } catch {
-      // safely fallback to guest auth if customer query fails
+      // ignore lookup error and use authenticated user context
     }
   }
-  if (!auth) {
-    req.auth = {
-      id: headerCustId || 'guest_customer_01',
-      user_id: headerCustId || 'guest_customer_01',
-      fullName: req.body?.customer_name || 'عميل اطلبها',
-      name: req.body?.customer_name || 'عميل اطلبها',
-      phone: req.body?.customer_phone || '01000000000',
-      email: 'guest@otlobha.local',
-      role: 'customer',
-      permissions: ['*'],
-      status: 'active',
-    };
-  } else {
-    if (!req.auth.role) req.auth.role = 'customer';
-    if (!req.auth.fullName) req.auth.fullName = req.auth.name || req.body?.customer_name || 'عميل اطلبها';
-  }
+  req.auth = auth;
+  if (!req.auth.role) req.auth.role = 'customer';
+  if (!req.auth.fullName) req.auth.fullName = req.auth.name || req.body?.customer_name || 'عميل اطلبها';
   next();
 }
 
@@ -4755,6 +4745,9 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
 // 11. Mobile Customer & Captain Endpoints (Flutter + Live Preview)
 app.get('/api/mobile/customer/bootstrap', (req, res) => {
   const auth = optionalAuth(req);
+  if (!auth) {
+    return res.status(401).json({ error: 'يرجى تسجيل الدخول أولاً للمتابعة' });
+  }
   const services = db.prepare('SELECT * FROM service_configs').all() as Array<Record<string, unknown>>;
   const zones = db.prepare('SELECT * FROM service_zones WHERE is_active = 1').all() as Array<Record<string, unknown>>;
   const merchants = db.prepare("SELECT * FROM merchants WHERE verification_status = 'approved'").all() as Array<Record<string, unknown>>;
@@ -6407,42 +6400,49 @@ function normalizeEmail(raw: string): string | null {
 async function dispatchEmailOtp(
   email: string,
   code: string
-): Promise<{ ok: true; delivery_channel: 'smtp' | 'sandbox' } | { ok: false; error: string }> {
+): Promise<{ ok: true; delivery_channel: 'smtp' } | { ok: false; error: string }> {
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
-  if (smtpUser && smtpPass) {
-    try {
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: Number(process.env.SMTP_PORT || 465),
-        secure: (process.env.SMTP_SECURE ?? 'true') !== 'false',
-        auth: { user: smtpUser, pass: smtpPass },
-      });
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || `اطلبها – Otlobha <${smtpUser}>`,
-        to: email,
-        subject: `رمز تأكيد الدخول إلى اطلبها: ${code}`,
-        text: `رمز تأكيد الدخول لمنصة اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
-        html: `
-          <div dir="rtl" style="font-family: Arial, sans-serif; padding: 20px; background: #f8fafc;">
-            <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 14px; padding: 24px; border: 1px solid #e2e8f0;">
-              <h2 style="color: #0f172a; margin-top: 0;">اطلبها – المنزلة</h2>
-              <p style="color: #334155; font-size: 14px;">مرحبًا بك، استخدم رمز التأكيد التالي لإتمام تسجيل الدخول (صالح لمدة 5 دقائق):</p>
-              <div style="text-align: center; margin: 20px 0; padding: 14px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; font-size: 28px; font-weight: bold; letter-spacing: 6px; color: #ea580c;">
-                ${code}
-              </div>
-              <p style="color: #64748b; font-size: 12px; margin-bottom: 0;">إذا لم تطلب هذا الرمز، يمكنك تجاهل هذه الرسالة.</p>
-            </div>
-          </div>
-        `,
-      });
-      return { ok: true, delivery_channel: 'smtp' };
-    } catch (err) {
-      const safeErrMsg = err instanceof Error ? err.message : 'SMTP transport failure';
-      console.error('[Email OTP SMTP Error]:', safeErrMsg);
-    }
+  if (!smtpUser || !smtpPass) {
+    return {
+      ok: false,
+      error: 'خدمة إرسال البريد الإلكتروني (Gmail SMTP) غير مفعلة حاليًا — يرجى التحقق من إعدادات البريد.',
+    };
   }
-  return { ok: true, delivery_channel: 'sandbox' };
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: (process.env.SMTP_SECURE ?? 'true') !== 'false',
+      auth: { user: smtpUser, pass: smtpPass },
+    });
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || `اطلبها – Otlobha <${smtpUser}>`,
+      to: email,
+      subject: `رمز تأكيد الدخول إلى اطلبها: ${code}`,
+      text: `رمز تأكيد الدخول لمنصة اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
+      html: `
+        <div dir="rtl" style="font-family: Arial, sans-serif; padding: 20px; background: #f8fafc;">
+          <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 14px; padding: 24px; border: 1px solid #e2e8f0;">
+            <h2 style="color: #0f172a; margin-top: 0;">اطلبها – المنزلة</h2>
+            <p style="color: #334155; font-size: 14px;">مرحبًا بك، استخدم رمز التأكيد التالي لإتمام تسجيل الدخول (صالح لمدة 5 دقائق):</p>
+            <div style="text-align: center; margin: 20px 0; padding: 14px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; font-size: 28px; font-weight: bold; letter-spacing: 6px; color: #ea580c;">
+              ${code}
+            </div>
+            <p style="color: #64748b; font-size: 12px; margin-bottom: 0;">إذا لم تطلب هذا الرمز، يمكنك تجاهل هذه الرسالة.</p>
+          </div>
+        </div>
+      `,
+    });
+    return { ok: true, delivery_channel: 'smtp' };
+  } catch (err) {
+    const safeErrMsg = err instanceof Error ? err.message : 'SMTP transport failure';
+    console.error('[Email OTP SMTP Error]:', safeErrMsg);
+    return {
+      ok: false,
+      error: 'تعذر إرسال رمز التأكيد عبر Gmail، يرجى التأكد من صحة البريد الإلكتروني والمحاولة مرة أخرى.',
+    };
+  }
 }
 
 function timingSafeHexEquals(hexA: string, hexB: string): boolean {
@@ -6470,8 +6470,6 @@ app.post('/api/auth/otp/request', async (req, res) => {
     return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
   }
 
-  const hasSmtp = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
-
   const recentReqCount = (
     db
       .prepare(
@@ -6490,21 +6488,15 @@ app.post('/api/auth/otp/request', async (req, res) => {
     return res.status(429).json({ error: 'تم إرسال عدة رموز لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق قبل إعادة المحاولة' });
   }
 
-  const unifiedSuccessMessage = 'إذا كان البريد الإلكتروني مؤهلًا، سيتم إرسال رمز التأكيد إليه خلال لحظات.';
+  const unifiedSuccessMessage = 'تم إرسال رمز التأكيد المكون من 6 أرقام إلى بريدك الإلكتروني على Gmail.';
 
   if (role === 'merchant') {
     const merchant = db.prepare('SELECT id FROM merchants WHERE LOWER(email) = LOWER(?)').get(email) as
       | { id: string }
       | undefined;
     if (!merchant) {
-      // Unified response to prevent merchant email enumeration
-      return res.json({
-        ok: true,
-        email,
-        role,
-        message: unifiedSuccessMessage,
-        expires_in_sec: 300,
-        delivery_channel: hasSmtp ? 'smtp' : 'sandbox',
+      return res.status(404).json({
+        error: 'لا يوجد حساب تاجر أو صيدلية مسجل بهذا البريد الإلكتروني — يرجى إنشاء حساب تاجر جديد أولًا',
       });
     }
   }
@@ -6532,7 +6524,7 @@ app.post('/api/auth/otp/request', async (req, res) => {
     action: 'EMAIL_OTP_SENT',
     entity_type: 'email_otp_codes',
     entity_id: email,
-    details: `إرسال رمز تأكيد OTP إلى البريد ${email} (${role === 'merchant' ? 'تاجر' : 'عميل'}) عبر ${mailRes.delivery_channel}`,
+    details: `إرسال رمز تأكيد OTP إلى البريد ${email} (${role === 'merchant' ? 'تاجر' : 'عميل'}) عبر Gmail SMTP`,
   });
 
   res.json({
@@ -6542,7 +6534,6 @@ app.post('/api/auth/otp/request', async (req, res) => {
     message: unifiedSuccessMessage,
     expires_in_sec: 300,
     delivery_channel: mailRes.delivery_channel,
-    ...(mailRes.delivery_channel === 'sandbox' ? { demo_otp: code } : {}),
   });
 });
 
@@ -7959,8 +7950,6 @@ app.post('/api/auth/merchant/register/request-otp', async (req, res) => {
     return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح أولًا' });
   }
 
-  const hasSmtp = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
-
   const recentReqCount = (
     db
       .prepare(
@@ -7979,16 +7968,11 @@ app.post('/api/auth/merchant/register/request-otp', async (req, res) => {
     return res.status(429).json({ error: 'تم إرسال عدة رموز لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق' });
   }
 
-  const unifiedRegMessage = 'إذا كان البريد الإلكتروني مؤهلًا للتسجيل، سيتم إرسال رمز التحقق إليه خلال لحظات.';
+  const unifiedRegMessage = 'تم إرسال رمز التحقق المكون من 6 أرقام إلى بريدك الإلكتروني على Gmail.';
   const existing = db.prepare('SELECT id FROM merchants WHERE LOWER(email) = LOWER(?)').get(email);
   if (existing) {
-    // Unified response to prevent merchant email enumeration
-    return res.json({
-      ok: true,
-      email,
-      message: unifiedRegMessage,
-      expires_in_sec: 600,
-      delivery_channel: hasSmtp ? 'smtp' : 'sandbox',
+    return res.status(409).json({
+      error: 'هذا البريد الإلكتروني مسجل بالفعل لحساب تاجر آخر — يمكنك تسجيل الدخول مباشرة',
     });
   }
 
@@ -8017,7 +8001,7 @@ app.post('/api/auth/merchant/register/request-otp', async (req, res) => {
     action: 'MERCHANT_REG_EMAIL_OTP_SENT',
     entity_type: 'email_otp_codes',
     entity_id: email,
-    details: `إرسال رمز التحقق من البريد للتسجيل (${email}) عبر ${mailRes.delivery_channel}`,
+    details: `إرسال رمز التحقق من البريد للتسجيل (${email}) عبر Gmail SMTP`,
   });
 
   res.json({
@@ -8026,7 +8010,6 @@ app.post('/api/auth/merchant/register/request-otp', async (req, res) => {
     message: unifiedRegMessage,
     expires_in_sec: 600,
     delivery_channel: mailRes.delivery_channel,
-    ...(mailRes.delivery_channel === 'sandbox' ? { demo_otp: code } : {}),
   });
 });
 

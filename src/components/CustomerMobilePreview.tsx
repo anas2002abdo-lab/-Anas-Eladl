@@ -398,14 +398,26 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       .getMe()
       .then((res) => {
         if (cancelled) return;
-        if (res.user?.actorType === 'customer') {
+        if (res.authenticated && res.user?.actorType === 'customer') {
           handleCustomerVerified(res.user);
+          loadBootstrap(true).catch(() => {});
+        } else {
+          setCustomerSession(null);
+          try {
+            localStorage.removeItem(CUSTOMER_SESSION_KEY);
+          } catch {
+            // ignore
+          }
         }
-        loadBootstrap(Boolean(res.user?.actorType === 'customer' || customerSession)).catch(() => {});
       })
       .catch(() => {
         if (cancelled) return;
-        loadBootstrap(Boolean(customerSession)).catch(() => {});
+        setCustomerSession(null);
+        try {
+          localStorage.removeItem(CUSTOMER_SESSION_KEY);
+        } catch {
+          // ignore
+        }
       });
     return () => {
       cancelled = true;
@@ -1190,10 +1202,6 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       <EmailOtpLoginCard
         role="customer"
         lang={lang}
-        quickAccounts={[
-          { label: 'أحمد عوض', email: 'ahmed.awad@otlobha.eg', phone: '01022334455' },
-          { label: 'منى إبراهيم', email: 'mona.ibrahim@otlobha.eg', phone: '01055112233' },
-        ]}
         onVerified={handleCustomerVerified}
         onNotify={onNotify}
       />
