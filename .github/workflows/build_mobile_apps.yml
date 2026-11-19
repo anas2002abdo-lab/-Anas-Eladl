@@ -108,6 +108,9 @@ jobs:
           if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
             printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
           fi
+          
+          printf '\nandroid.newDsl=false\nandroid.builtInKotlin=false\n' >> android/gradle.properties
+
 
           echo "--- Android Gradle / AGP / Kotlin Versions (Customer) ---"
           if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
@@ -275,6 +278,8 @@ jobs:
           if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
             printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
           fi
+
+          printf '\nandroid.newDsl=false\nandroid.builtInKotlin=false\n' >> android/gradle.properties
 
           echo "--- Android Gradle / AGP / Kotlin Versions (Captain) ---"
           if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
