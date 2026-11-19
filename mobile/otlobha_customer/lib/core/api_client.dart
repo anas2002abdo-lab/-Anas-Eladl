@@ -228,7 +228,21 @@ class OtlobhaCustomerApi {
         }),
       ),
     );
-    return _decode(res, endpointHint: '/api/mobile/customer/register/request-otp');
+    if (res.statusCode == 404) {
+      debugPrint(
+        '[OtlobhaCustomerApi] /api/mobile/customer/register/request-otp returned 404; falling back to /api/auth/otp/request',
+      );
+      final fallback = await requestOtp(email.trim(), role: 'customer');
+      return <String, dynamic>{
+        ...fallback,
+        'auth_flow': 'legacy_otp',
+      };
+    }
+    final data = _decode(res, endpointHint: '/api/mobile/customer/register/request-otp');
+    return <String, dynamic>{
+      ...data,
+      'auth_flow': 'register_otp',
+    };
   }
 
   Future<Map<String, dynamic>> registerCustomer({
@@ -239,7 +253,19 @@ class OtlobhaCustomerApi {
     required String code,
     String? addressLandmark,
     String? defaultZoneId,
+    bool useLegacyOtpFlow = false,
   }) async {
+    if (useLegacyOtpFlow) {
+      return verifyOtp(
+        email.trim(),
+        code.trim(),
+        role: 'customer',
+        fullName: fullName.trim(),
+        phone: phone?.trim(),
+        password: password,
+      );
+    }
+
     final res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/register'),
@@ -257,6 +283,19 @@ class OtlobhaCustomerApi {
         }),
       ),
     );
+    if (res.statusCode == 404) {
+      debugPrint(
+        '[OtlobhaCustomerApi] /api/mobile/customer/register returned 404; falling back to /api/auth/otp/verify',
+      );
+      return verifyOtp(
+        email.trim(),
+        code.trim(),
+        role: 'customer',
+        fullName: fullName.trim(),
+        phone: phone?.trim(),
+        password: password,
+      );
+    }
     final data = _decode(res, endpointHint: '/api/mobile/customer/register');
     final tokens = data['tokens'];
     if (tokens is Map) {
@@ -348,6 +387,7 @@ class OtlobhaCustomerApi {
     String role = 'customer',
     String? fullName,
     String? phone,
+    String? password,
   }) async {
     final res = await _execute(
       () => http.post(
@@ -359,6 +399,7 @@ class OtlobhaCustomerApi {
           'role': role,
           if (fullName != null && fullName.trim().isNotEmpty) 'full_name': fullName.trim(),
           if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
+          if (password != null && password.length >= 6) 'password': password,
         }),
       ),
     );

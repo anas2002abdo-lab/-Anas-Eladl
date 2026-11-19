@@ -38,6 +38,7 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
   final TextEditingController _regConfirmPassCtrl = TextEditingController();
   final TextEditingController _regCodeCtrl = TextEditingController();
   bool _regCodeSent = false;
+  bool _regUseLegacyOtp = false;
   String _regNormalizedEmail = '';
   int _regResendSec = 0;
   Timer? _regTimer;
@@ -198,6 +199,7 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
       if (mounted) {
         setState(() {
           _regCodeSent = true;
+          _regUseLegacyOtp = res['auth_flow']?.toString() == 'legacy_otp';
           _regNormalizedEmail = res['email']?.toString() ?? email.toLowerCase();
           _regCodeCtrl.clear();
         });
@@ -233,6 +235,7 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
         phone: phone,
         password: password,
         code: code,
+        useLegacyOtpFlow: _regUseLegacyOtp,
       );
       final user = Map<String, dynamic>.from((res['user'] as Map?) ?? {});
       if (mounted) {

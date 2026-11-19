@@ -259,20 +259,37 @@ export const api = {
     }),
   getCustomerBootstrap: () => request<any>('/api/mobile/customer/bootstrap'),
   getCustomerGuestBootstrap: () => request<any>('/api/mobile/customer/guest-bootstrap'),
-  requestCustomerRegisterOtp: (body: {
+  requestCustomerRegisterOtp: async (body: {
     full_name: string;
     email: string;
     phone?: string;
     password: string;
-  }) =>
-    request<{ ok: boolean; email: string; message?: string; expires_in_sec: number }>(
-      '/api/mobile/customer/register/request-otp',
-      {
-        method: 'POST',
-        body: JSON.stringify(body),
+  }) => {
+    try {
+      const res = await request<{ ok: boolean; email: string; message?: string; expires_in_sec: number }>(
+        '/api/mobile/customer/register/request-otp',
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }
+      );
+      return { ...res, auth_flow: 'register_otp' as const };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('404') || msg.includes('غير موجود')) {
+        const fallback = await request<{ ok: boolean; email: string; message?: string; expires_in_sec: number }>(
+          '/api/auth/otp/request',
+          {
+            method: 'POST',
+            body: JSON.stringify({ email: body.email, role: 'customer' }),
+          }
+        );
+        return { ...fallback, auth_flow: 'legacy_otp' as const };
       }
-    ),
-  registerCustomer: (body: {
+      throw err;
+    }
+  },
+  registerCustomer: async (body: {
     full_name: string;
     email: string;
     phone?: string;
@@ -280,11 +297,33 @@ export const api = {
     code: string;
     address_landmark?: string;
     default_zone_id?: string;
-  }) =>
-    request<{ ok: boolean; role: 'customer'; user: any; tokens?: any }>('/api/mobile/customer/register', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+  }) => {
+    try {
+      return await request<{ ok: boolean; role: 'customer'; user: any; tokens?: any }>(
+        '/api/mobile/customer/register',
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('404') || msg.includes('غير موجود')) {
+        return request<{ ok: boolean; role: 'customer'; user: any; tokens?: any }>('/api/auth/otp/verify', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: body.email,
+            code: body.code,
+            role: 'customer',
+            full_name: body.full_name,
+            phone: body.phone,
+            password: body.password,
+          }),
+        });
+      }
+      throw err;
+    }
+  },
   loginCustomer: (identifier: string, password: string) =>
     request<{ ok: boolean; role: 'customer'; user: any; tokens?: any }>('/api/mobile/customer/login', {
       method: 'POST',

@@ -6660,12 +6660,13 @@ app.post('/api/auth/otp/verify', (req, res) => {
     return res.status(429).json({ error: 'تم تجاوز عدد محاولات التحقق المسموح بها، يرجى المحاولة لاحقًا' });
   }
 
-  const { email: rawEmail, code: rawCode, role = 'customer', full_name, phone } = req.body as {
+  const { email: rawEmail, code: rawCode, role = 'customer', full_name, phone, password } = req.body as {
     email?: string;
     code?: string;
     role?: 'customer' | 'merchant';
     full_name?: string;
     phone?: string;
+    password?: string;
   };
   if (role !== 'customer' && role !== 'merchant') {
     return res.status(400).json({ error: 'نوع الحساب غير صالح' });
@@ -6756,21 +6757,30 @@ app.post('/api/auth/otp/verify', (req, res) => {
     | undefined;
   const trimmedName = typeof full_name === 'string' ? full_name.trim() : '';
   const trimmedPhone = typeof phone === 'string' ? phone.trim() : '';
+  const cleanOptionalPass = typeof password === 'string' && password.length >= 6 ? password : '';
   let customerRow: Record<string, unknown>;
   if (existingCust) {
     const nextName = trimmedName || String(existingCust.full_name || 'عميل اطلبها');
     const nextPhone = trimmedPhone || (existingCust.phone ? String(existingCust.phone) : null);
-    db.prepare(
-      "UPDATE customers SET full_name = ?, phone = ?, is_email_verified = 1, last_login_at = datetime('now') WHERE id = ?"
-    ).run(nextName, nextPhone, String(existingCust.id));
+    const hasExistingPw = Boolean(String(existingCust.password_hash || '').trim());
+    if (!hasExistingPw && cleanOptionalPass) {
+      db.prepare(
+        "UPDATE customers SET full_name = ?, phone = ?, password_hash = ?, is_email_verified = 1, last_login_at = datetime('now') WHERE id = ?"
+      ).run(nextName, nextPhone, hashPassword(cleanOptionalPass), String(existingCust.id));
+    } else {
+      db.prepare(
+        "UPDATE customers SET full_name = ?, phone = ?, is_email_verified = 1, last_login_at = datetime('now') WHERE id = ?"
+      ).run(nextName, nextPhone, String(existingCust.id));
+    }
     customerRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(existingCust.id)) as Record<string, unknown>;
   } else {
     const custId = uid('cust');
     const nextName = trimmedName || email.split('@')[0] || 'عميل اطلبها';
+    const pwHash = cleanOptionalPass ? hashPassword(cleanOptionalPass) : null;
     db.prepare(`
-      INSERT INTO customers (id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified)
-      VALUES (?, ?, ?, ?, 'zn_city_center', '', 1)
-    `).run(custId, email, trimmedPhone || null, nextName);
+      INSERT INTO customers (id, email, phone, password_hash, full_name, default_zone_id, address_landmark, is_email_verified)
+      VALUES (?, ?, ?, ?, ?, 'zn_city_center', '', 1)
+    `).run(custId, email, trimmedPhone || null, pwHash, nextName);
     customerRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(custId) as Record<string, unknown>;
   }
 
@@ -6812,7 +6822,7 @@ function sanitizeCustomerRow(row: Record<string, unknown>) {
   };
 }
 
-app.post('/api/mobile/customer/register/request-otp', async (req, res) => {
+const handleCustomerRegisterRequestOtp = async (req: express.Request, res: express.Response) => {
   const ip = getClientIp(req);
   const ipLimit = checkRateLimit(`cust_reg_otp_ip:${ip}`, 10, 10 * 60 * 1000);
   if (!ipLimit.allowed) {
@@ -6916,7 +6926,10 @@ app.post('/api/mobile/customer/register/request-otp', async (req, res) => {
     expires_in_sec: 300,
     delivery_channel: mailRes.delivery_channel,
   });
-});
+};
+
+app.post('/api/mobile/customer/register/request-otp', handleCustomerRegisterRequestOtp);
+app.post('/api/auth/customer/register/request-otp', handleCustomerRegisterRequestOtp);
 
 app.post('/api/mobile/customer/register', (req, res) => {
   const ip = getClientIp(req);
