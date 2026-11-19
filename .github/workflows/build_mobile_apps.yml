@@ -144,6 +144,8 @@ jobs:
           EOF
 
           if [ -f android/app/build.gradle.kts ]; then
+            sed -i '1i import java.util.Properties' android/app/build.gradle.kts
+
             cat >> android/app/build.gradle.kts <<'KOTLIN'
 
           val customerSigningProperties = java.util.Properties()
