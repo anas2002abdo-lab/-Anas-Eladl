@@ -7511,6 +7511,710 @@ const handleCustomerGoogleAuth = async (req: express.Request, res: express.Respo
 app.post('/api/mobile/customer/auth/google', handleCustomerGoogleAuth);
 app.post('/api/auth/customer/google', handleCustomerGoogleAuth);
 
+// Direct Customer Registration (NO prior email verification required — enters app immediately
+// and receives an in-app + push notification to verify email on external hosted page)
+const handleCustomerDirectRegister = async (req: express.Request, res: express.Response) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_direct_reg_ip:${ip}`, 15, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات التسجيل، يرجى المحاولة بعد قليل' });
+  }
+
+  const { full_name, email: rawEmail, password, phone: rawPhone } = (req.body || {}) as {
+    full_name?: string;
+    email?: string;
+    password?: string;
+    phone?: string;
+  };
+  const cleanName = String(full_name || '').trim();
+  const email = normalizeEmail(String(rawEmail || ''));
+  const cleanPass = String(password || '');
+  const cleanPhone = String(rawPhone || '').trim();
+
+  if (cleanName.length < 2 || cleanName.length > 100) {
+    return res.status(400).json({ error: 'يرجى إدخال الاسم الكامل (حرفين على الأقل)' });
+  }
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+  if (cleanPass.length < 6) {
+    return res.status(400).json({ error: 'كلمة المرور يجب أن لا تقل عن 6 أحرف' });
+  }
+  if (cleanPhone && !/^[+0-9\s-]{8,18}$/.test(cleanPhone)) {
+    return res.status(400).json({ error: 'رقم الهاتف غير صالح' });
+  }
+
+  const existing = db.prepare('SELECT id FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | { id: string }
+    | undefined;
+  if (existing) {
+    return res.status(409).json({
+      error: 'هذا البريد الإلكتروني مسجل بالفعل، يمكنك تسجيل الدخول أو استعادة كلمة المرور',
+    });
+  }
+
+  const custId = uid('cust');
+  db.prepare(
+    `INSERT INTO customers (id, email, phone, password_hash, full_name, status, default_zone_id, address_landmark, is_email_verified, auth_provider, profile_completed)
+     VALUES (?, ?, ?, ?, ?, 'active', 'zn_city_center', '', 0, 'email', 0)`
+  ).run(custId, email, cleanPhone || null, hashPassword(cleanPass), cleanName);
+
+  const customerRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(custId) as Record<string, unknown>;
+  const tokens = issueSessionForUser(req, res, {
+    userId: custId,
+    role: 'customer',
+    actorType: 'customer',
+    tokenVersion: Number(customerRow.token_version || 0),
+  });
+
+  // Create persistent in-app + push notification prompting email verification via external code page
+  enqueueSystemPushNotification({
+    targetApp: 'customer',
+    recipientId: custId,
+    category: 'alert',
+    titleAr: 'وثّق بريدك الإلكتروني الآن',
+    bodyAr: 'اضغط هنا لفتح صفحة التوثيق وإدخال الرمز المرسل على بريدك الإلكتروني لتأمين حسابك في اطلبها.',
+    deepLink: 'verify_email',
+    sentBy: 'نظام اطلبها',
+    extraData: { email },
+  });
+
+  recordAuditLog({
+    actor_name: cleanName,
+    actor_role: 'customer',
+    action: 'CUSTOMER_DIRECT_REGISTER',
+    entity_type: 'customers',
+    entity_id: custId,
+    details: `تسجيل فوري للعميل بدون تأكيد مسبق للبريد (${email}) وإرسال إشعار توثيق البريد`,
+  });
+
+  const sanitized = sanitizeCustomerRow(customerRow);
+  return res.status(201).json({
+    ok: true,
+    role: 'customer',
+    needs_profile_completion: sanitized.needs_profile_completion,
+    user: sanitized,
+    tokens: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
+    },
+  });
+};
+
+app.post('/api/mobile/customer/register-direct', handleCustomerDirectRegister);
+app.post('/api/auth/customer/register-direct', handleCustomerDirectRegister);
+
+// Request 6-digit OTP code for verifying an existing customer's email (used by /auth/verify-email external page)
+const handleCustomerEmailVerifyRequestCode = async (req: express.Request, res: express.Response) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_email_verify_req_ip:${ip}`, 15, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات إرسال الرمز، يرجى الانتظار قليلًا' });
+  }
+
+  const { email: rawEmail } = (req.body || {}) as { email?: string };
+  const email = normalizeEmail(String(rawEmail || ''));
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+
+  const customer = db
+    .prepare('SELECT id, full_name, status, is_email_verified FROM customers WHERE LOWER(email) = LOWER(?)')
+    .get(email) as { id: string; full_name: string; status: string; is_email_verified: number } | undefined;
+  if (!customer) {
+    return res.status(404).json({ error: 'لا يوجد حساب عميل مسجل بهذا البريد الإلكتروني' });
+  }
+  if (customer.status === 'suspended') {
+    return res.status(403).json({ error: 'هذا الحساب موقوف حاليًا، يرجى التواصل مع الدعم الفني' });
+  }
+  if (Boolean(customer.is_email_verified)) {
+    return res.json({
+      ok: true,
+      already_verified: true,
+      email,
+      redirect_url: `otlobha://verified?email=${encodeURIComponent(email)}`,
+      message: 'بريدك الإلكتروني موثّق بالفعل! جاري إعادتك إلى تطبيق اطلبها...',
+    });
+  }
+
+  const verifyRole = 'customer_verify_email';
+  const quota = checkEmailOtpQuota(email, verifyRole);
+  if (!quota.allowed) {
+    res.setHeader('Retry-After', String(quota.retryAfterSec));
+    return res.status(429).json({
+      error: quota.error,
+      reason: quota.reason,
+      retry_after_sec: quota.retryAfterSec,
+    });
+  }
+
+  const code = String(crypto.randomInt(100000, 1000000));
+  const codeHash = sha256Otp(email, verifyRole, code);
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const otpId = uid('otp');
+
+  db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE LOWER(email) = LOWER(?) AND role = ? AND is_used = 0').run(
+    email,
+    verifyRole
+  );
+  db.prepare(
+    `INSERT INTO email_otp_codes (id, email, role, code_hash, attempts, is_used, expires_at)
+     VALUES (?, ?, ?, ?, 0, 0, ?)`
+  ).run(otpId, email, verifyRole, codeHash, expiresAt);
+
+  const mailRes = await dispatchEmailOtp(email, code, {
+    subject: `رمز توثيق البريد الإلكتروني – اطلبها: ${code}`,
+    intro: `مرحبًا ${customer.full_name || 'عميلنا العزيز'}، أدخل الرمز التالي خلال 5 دقائق في صفحة توثيق البريد لتأمين حسابك في تطبيق اطلبها:`,
+    plainText: `رمز توثيق بريدك الإلكتروني في اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
+  });
+  if (!mailRes.ok) {
+    db.prepare('DELETE FROM email_otp_codes WHERE id = ?').run(otpId);
+    return res.status(503).json({ error: mailRes.error });
+  }
+
+  recordAuditLog({
+    actor_name: customer.full_name || email,
+    actor_role: 'customer',
+    action: 'CUSTOMER_EMAIL_VERIFY_CODE_SENT',
+    entity_type: 'customers',
+    entity_id: customer.id,
+    details: `إرسال رمز توثيق البريد الإلكتروني (${email}) عبر صفحة التوثيق الخارجية`,
+  });
+
+  return res.json({
+    ok: true,
+    email,
+    message: `تم إرسال رمز التوثيق المكون من 6 أرقام إلى بريدك الإلكتروني (${email}).`,
+    expires_in_sec: 300,
+    delivery_channel: mailRes.delivery_channel,
+  });
+};
+
+app.post('/api/auth/customer/email-verify/request-code', handleCustomerEmailVerifyRequestCode);
+app.post('/api/mobile/customer/email-verify/request-code', handleCustomerEmailVerifyRequestCode);
+
+// Confirm 6-digit OTP code on /auth/verify-email external page
+const handleCustomerEmailVerifyConfirmCode = (req: express.Request, res: express.Response) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_email_verify_confirm_ip:${ip}`, 20, 5 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات التحقق، يرجى المحاولة بعد قليل' });
+  }
+
+  const { email: rawEmail, code: rawCode } = (req.body || {}) as { email?: string; code?: string };
+  const email = normalizeEmail(String(rawEmail || ''));
+  const cleanCode = String(rawCode || '').trim();
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+  if (!/^[0-9]{6}$/.test(cleanCode)) {
+    return res.status(400).json({ error: 'يرجى إدخال رمز التوثيق المكون من 6 أرقام' });
+  }
+
+  const verifyRole = 'customer_verify_email';
+  const cumulativeFailures = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
+      )
+      .get(email, verifyRole) as { s: number }
+  ).s;
+  if (cumulativeFailures >= 10) {
+    return res.status(429).json({ error: 'تم حظر التحقق مؤقتًا بسبب تكرار المحاولات الخاطئة، حاول بعد 15 دقيقة' });
+  }
+
+  const otpRow = db
+    .prepare(
+      'SELECT * FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND is_used = 0 ORDER BY created_at DESC LIMIT 1'
+    )
+    .get(email, verifyRole) as { id: string; code_hash: string; attempts: number; expires_at: string } | undefined;
+
+  if (!otpRow) {
+    return res.status(400).json({ error: 'لا يوجد رمز توثيق نشط لهذا البريد، اضغط على إرسال رمز جديد' });
+  }
+  if (Date.now() > Date.parse(otpRow.expires_at)) {
+    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpRow.id);
+    return res.status(400).json({ error: 'انتهت صلاحية الرمز، اضغط على إعادة إرسال رمز جديد' });
+  }
+  if (otpRow.attempts >= 5) {
+    return res.status(429).json({ error: 'تم تجاوز الحد الأقصى لمحاولات الرمز، اطلب رمزًا جديدًا' });
+  }
+
+  const expectedHash = sha256Otp(email, verifyRole, cleanCode);
+  if (!timingSafeHexEquals(expectedHash, String(otpRow.code_hash || ''))) {
+    db.prepare('UPDATE email_otp_codes SET attempts = attempts + 1 WHERE id = ?').run(otpRow.id);
+    return res.status(401).json({ error: 'رمز التوثيق غير صحيح، راجع بريدك وحاول مرة أخرى' });
+  }
+
+  const customer = db.prepare('SELECT id, full_name FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | { id: string; full_name: string }
+    | undefined;
+  if (!customer) {
+    return res.status(404).json({ error: 'حساب العميل غير موجود' });
+  }
+
+  db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpRow.id);
+  db.prepare('UPDATE customers SET is_email_verified = 1 WHERE id = ?').run(customer.id);
+  db.prepare("UPDATE notifications SET is_read = 1 WHERE recipient_id = ? AND deep_link = 'verify_email'").run(
+    customer.id
+  );
+
+  recordAuditLog({
+    actor_name: customer.full_name || email,
+    actor_role: 'customer',
+    action: 'CUSTOMER_EMAIL_VERIFIED_BY_CODE',
+    entity_type: 'customers',
+    entity_id: customer.id,
+    details: `توثيق بريد العميل (${email}) بنجاح عبر رمز التحقق في الصفحة الخارجية`,
+  });
+
+  return res.json({
+    ok: true,
+    verified: true,
+    email,
+    redirect_url: `otlobha://verified?email=${encodeURIComponent(email)}`,
+    message: 'تم توثيق بريدك الإلكتروني بنجاح! جاري إغلاق الصفحة والعودة إلى تطبيق اطلبها...',
+  });
+};
+
+app.post('/api/auth/customer/email-verify/confirm-code', handleCustomerEmailVerifyConfirmCode);
+app.post('/api/mobile/customer/email-verify/confirm-code', handleCustomerEmailVerifyConfirmCode);
+
+// External Hosted RTL Page 1: Verify Customer Email via 6-digit Code -> Auto-close & Redirect back to App
+app.get('/auth/verify-email', (req, res) => {
+  const prefillEmail = normalizeEmail(String(req.query.email || '')) || String(req.query.email || '').trim();
+  const autoSend = String(req.query.auto || '') === '1';
+  const safeEmail = escapeHtmlSafe(prefillEmail);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(`<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>توثيق البريد الإلكتروني – اطلبها</title>
+</head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F8FAFC;font-family:Tahoma,Arial,sans-serif;padding:20px;color:#0F172A;">
+  <div style="width:100%;max-width:440px;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:22px;padding:28px 22px;box-shadow:0 14px 36px rgba(15,23,42,0.08);">
+    <div style="text-align:center;margin-bottom:18px;">
+      <div style="width:62px;height:62px;margin:0 auto 12px;border-radius:18px;background:#FEF2F2;border:1px solid #FECACA;display:flex;align-items:center;justify-content:center;">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#A92224" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+      </div>
+      <h1 style="margin:0 0 6px;font-size:20px;font-weight:800;color:#0F172A;">توثيق البريد الإلكتروني</h1>
+      <p style="margin:0;font-size:13.5px;line-height:1.65;color:#475569;">أرسل رمز التوثيق إلى بريدك الإلكتروني ثم أدخل الرمز المكون من 6 أرقام لتأمين حسابك في اطلبها.</p>
+    </div>
+
+    <div id="msgBox" style="display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;font-size:13.5px;line-height:1.6;"></div>
+
+    <div id="formWrap">
+      <div style="margin-bottom:14px;">
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">البريد الإلكتروني</label>
+        <input id="emailInput" type="email" dir="ltr" value="${safeEmail}" placeholder="name@gmail.com" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #CBD5E1;border-radius:12px;font-size:15px;background:#F8FAFC;" />
+      </div>
+
+      <button id="sendCodeBtn" type="button" style="width:100%;padding:12px;border:1px solid #A92224;border-radius:12px;background:#FFF5F5;color:#A92224;font-weight:700;font-size:14.5px;cursor:pointer;margin-bottom:16px;">إرسال رمز التوثيق على البريد</button>
+
+      <form id="verifyForm" style="display:flex;flex-direction:column;gap:14px;">
+        <div>
+          <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">رمز التوثيق (6 أرقام)</label>
+          <input id="codeInput" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" dir="ltr" placeholder="000000" style="width:100%;box-sizing:border-box;padding:14px;border:1px solid #CBD5E1;border-radius:12px;font-size:22px;font-weight:800;letter-spacing:8px;text-align:center;background:#F8FAFC;" />
+        </div>
+        <button id="confirmBtn" type="submit" style="padding:13px;border:none;border-radius:12px;background:#A92224;color:#FFFFFF;font-weight:800;font-size:15px;cursor:pointer;">تأكيد وتوثيق البريد</button>
+      </form>
+    </div>
+
+    <div id="doneBox" style="display:none;text-align:center;padding-top:6px;">
+      <div style="width:66px;height:66px;margin:0 auto 14px;border-radius:18px;background:#F0FDFA;display:flex;align-items:center;justify-content:center;">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#0D9488" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <h2 style="margin:0 0 8px;font-size:19px;font-weight:800;color:#0F766E;">تم توثيق بريدك بنجاح!</h2>
+      <p style="margin:0 0 18px;font-size:13.5px;color:#475569;line-height:1.65;">جاري إغلاق هذه الصفحة وإعادتك مباشرة إلى تطبيق اطلبها...</p>
+      <a id="returnAppLink" href="otlobha://verified" style="display:inline-block;width:100%;box-sizing:border-box;padding:13px 20px;border-radius:12px;background:#0D9488;color:#FFFFFF;text-decoration:none;font-weight:800;font-size:15px;">العودة إلى تطبيق اطلبها</a>
+    </div>
+
+    <p style="margin:20px 0 0;text-align:center;font-size:12px;color:#94A3B8;">اطلبها – Otlobha</p>
+  </div>
+  <script>
+    const emailInput = document.getElementById('emailInput');
+    const codeInput = document.getElementById('codeInput');
+    const sendCodeBtn = document.getElementById('sendCodeBtn');
+    const verifyForm = document.getElementById('verifyForm');
+    const confirmBtn = document.getElementById('confirmBtn');
+    const formWrap = document.getElementById('formWrap');
+    const doneBox = document.getElementById('doneBox');
+    const returnAppLink = document.getElementById('returnAppLink');
+    const msgBox = document.getElementById('msgBox');
+    let cooldown = 0;
+    let timerId = null;
+
+    function normalizeDigits(v) {
+      const map = {'٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9','۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9'};
+      return String(v || '').replace(/[٠-٩۰-۹]/g, ch => map[ch] || ch).replace(/[^0-9]/g, '').slice(0, 6);
+    }
+
+    codeInput.addEventListener('input', () => {
+      codeInput.value = normalizeDigits(codeInput.value);
+    });
+
+    function showMsg(text, ok) {
+      msgBox.style.display = 'block';
+      msgBox.style.background = ok ? '#F0FDFA' : '#FEF2F2';
+      msgBox.style.color = ok ? '#0F766E' : '#B91C1C';
+      msgBox.style.border = ok ? '1px solid #99F6E4' : '1px solid #FECACA';
+      msgBox.textContent = text;
+    }
+
+    function startCooldown(sec) {
+      cooldown = sec;
+      if (timerId) clearInterval(timerId);
+      sendCodeBtn.disabled = true;
+      sendCodeBtn.textContent = 'إعادة إرسال الرمز بعد ' + cooldown + ' ث';
+      timerId = setInterval(() => {
+        cooldown--;
+        if (cooldown <= 0) {
+          clearInterval(timerId);
+          sendCodeBtn.disabled = false;
+          sendCodeBtn.textContent = 'إعادة إرسال رمز التوثيق';
+        } else {
+          sendCodeBtn.textContent = 'إعادة إرسال الرمز بعد ' + cooldown + ' ث';
+        }
+      }, 1000);
+    }
+
+    function finishAndReturn(redirectUrl) {
+      const target = redirectUrl || ('otlobha://verified?email=' + encodeURIComponent(emailInput.value.trim()));
+      returnAppLink.href = target;
+      formWrap.style.display = 'none';
+      doneBox.style.display = 'block';
+      setTimeout(() => { window.location.href = target; }, 500);
+      setTimeout(() => { try { window.close(); } catch (_) {} }, 1300);
+    }
+
+    async function sendCode() {
+      const email = emailInput.value.trim();
+      if (!email || !email.includes('@')) {
+        showMsg('يرجى إدخال بريد إلكتروني صحيح أولًا', false);
+        return;
+      }
+      sendCodeBtn.disabled = true;
+      sendCodeBtn.textContent = 'جاري إرسال الرمز...';
+      try {
+        const res = await fetch('/api/auth/customer/email-verify/request-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showMsg(data.error || 'تعذر إرسال الرمز حاليًا', false);
+          if (data.retry_after_sec && Number(data.retry_after_sec) > 0) {
+            startCooldown(Math.min(Number(data.retry_after_sec), 120));
+          } else {
+            sendCodeBtn.disabled = false;
+            sendCodeBtn.textContent = 'إرسال رمز التوثيق على البريد';
+          }
+          return;
+        }
+        if (data.already_verified) {
+          showMsg(data.message || 'بريدك موثّق بالفعل!', true);
+          finishAndReturn(data.redirect_url);
+          return;
+        }
+        showMsg(data.message || 'تم إرسال رمز التوثيق إلى بريدك الإلكتروني', true);
+        startCooldown(60);
+        codeInput.focus();
+      } catch (_) {
+        showMsg('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى.', false);
+        sendCodeBtn.disabled = false;
+        sendCodeBtn.textContent = 'إرسال رمز التوثيق على البريد';
+      }
+    }
+
+    sendCodeBtn.addEventListener('click', sendCode);
+
+    verifyForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = emailInput.value.trim();
+      const code = normalizeDigits(codeInput.value);
+      codeInput.value = code;
+      if (!email || !email.includes('@')) {
+        showMsg('يرجى إدخال البريد الإلكتروني بشكل صحيح', false);
+        return;
+      }
+      if (code.length !== 6) {
+        showMsg('يرجى إدخال رمز التوثيق المكون من 6 أرقام', false);
+        return;
+      }
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'جاري التحقق...';
+      try {
+        const res = await fetch('/api/auth/customer/email-verify/confirm-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, code })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showMsg(data.error || 'تعذر التحقق من الرمز', false);
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'تأكيد وتوثيق البريد';
+          return;
+        }
+        showMsg(data.message || 'تم توثيق بريدك الإلكتروني بنجاح!', true);
+        finishAndReturn(data.redirect_url);
+      } catch (_) {
+        showMsg('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى.', false);
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'تأكيد وتوثيق البريد';
+      }
+    });
+
+    if (${autoSend ? 'true' : 'false'} && emailInput.value.trim().includes('@')) {
+      sendCode();
+    }
+  </script>
+</body>
+</html>`);
+});
+
+// External Hosted RTL Page 2: Forgot Password (Enter Email -> Receive 6-digit Code -> Reset Password -> Auto-close & Return to App)
+app.get('/auth/forgot-password', (req, res) => {
+  const prefillEmail = normalizeEmail(String(req.query.email || '')) || String(req.query.email || '').trim();
+  const safeEmail = escapeHtmlSafe(prefillEmail);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(`<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>استعادة كلمة المرور – اطلبها</title>
+</head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F8FAFC;font-family:Tahoma,Arial,sans-serif;padding:20px;color:#0F172A;">
+  <div style="width:100%;max-width:440px;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:22px;padding:28px 22px;box-shadow:0 14px 36px rgba(15,23,42,0.08);">
+    <div style="text-align:center;margin-bottom:18px;">
+      <div style="width:62px;height:62px;margin:0 auto 12px;border-radius:18px;background:#FEF2F2;border:1px solid #FECACA;display:flex;align-items:center;justify-content:center;">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#A92224" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <h1 style="margin:0 0 6px;font-size:20px;font-weight:800;color:#0F172A;">استعادة كلمة المرور</h1>
+      <p id="stepSubtitle" style="margin:0;font-size:13.5px;line-height:1.65;color:#475569;">أدخل بريدك الإلكتروني المسجل لنرسل لك رمز التحقق المكون من 6 أرقام لتغيير كلمة المرور.</p>
+    </div>
+
+    <div id="msgBox" style="display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;font-size:13.5px;line-height:1.6;"></div>
+
+    <form id="step1Form" style="display:flex;flex-direction:column;gap:14px;">
+      <div>
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">البريد الإلكتروني المسجل</label>
+        <input id="emailInput" type="email" required dir="ltr" value="${safeEmail}" placeholder="name@gmail.com" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #CBD5E1;border-radius:12px;font-size:15px;background:#F8FAFC;" />
+      </div>
+      <button id="sendBtn" type="submit" style="padding:13px;border:none;border-radius:12px;background:#A92224;color:#FFFFFF;font-weight:800;font-size:15px;cursor:pointer;">إرسال رمز التحقق</button>
+    </form>
+
+    <form id="step2Form" style="display:none;flex-direction:column;gap:14px;">
+      <div style="background:#F1F5F9;border-radius:10px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span id="emailBadge" dir="ltr" style="font-size:13px;font-weight:700;color:#0F172A;overflow:hidden;text-overflow:ellipsis;"></span>
+        <button id="changeEmailBtn" type="button" style="border:none;background:none;color:#A92224;font-weight:700;font-size:12.5px;cursor:pointer;">تعديل</button>
+      </div>
+      <div>
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">رمز التحقق (6 أرقام)</label>
+        <input id="codeInput" type="text" inputmode="numeric" autocomplete="one-time-code" required maxlength="6" dir="ltr" placeholder="000000" style="width:100%;box-sizing:border-box;padding:13px;border:1px solid #CBD5E1;border-radius:12px;font-size:21px;font-weight:800;letter-spacing:8px;text-align:center;background:#F8FAFC;" />
+      </div>
+      <div>
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">كلمة المرور الجديدة (6 أحرف على الأقل)</label>
+        <input id="pw1" type="password" required minlength="6" dir="ltr" placeholder="••••••••" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #CBD5E1;border-radius:12px;font-size:15px;background:#F8FAFC;" />
+      </div>
+      <div>
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">تأكيد كلمة المرور الجديدة</label>
+        <input id="pw2" type="password" required minlength="6" dir="ltr" placeholder="••••••••" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #CBD5E1;border-radius:12px;font-size:15px;background:#F8FAFC;" />
+      </div>
+      <button id="resetBtn" type="submit" style="padding:13px;border:none;border-radius:12px;background:#A92224;color:#FFFFFF;font-weight:800;font-size:15px;cursor:pointer;">تغيير كلمة المرور</button>
+      <button id="resendBtn" type="button" style="padding:10px;border:1px solid #CBD5E1;border-radius:10px;background:#FFFFFF;color:#334155;font-weight:700;font-size:13px;cursor:pointer;">إعادة إرسال الرمز</button>
+    </form>
+
+    <div id="doneBox" style="display:none;text-align:center;padding-top:6px;">
+      <div style="width:66px;height:66px;margin:0 auto 14px;border-radius:18px;background:#F0FDFA;display:flex;align-items:center;justify-content:center;">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#0D9488" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <h2 style="margin:0 0 8px;font-size:19px;font-weight:800;color:#0F766E;">تم تغيير كلمة المرور بنجاح!</h2>
+      <p style="margin:0 0 18px;font-size:13.5px;color:#475569;line-height:1.65;">جاري إغلاق الصفحة وإعادتك إلى تطبيق اطلبها لتسجيل الدخول بكلمة المرور الجديدة...</p>
+      <a id="returnAppLink" href="otlobha://password-reset-done" style="display:inline-block;width:100%;box-sizing:border-box;padding:13px 20px;border-radius:12px;background:#0D9488;color:#FFFFFF;text-decoration:none;font-weight:800;font-size:15px;">العودة إلى تطبيق اطلبها</a>
+    </div>
+
+    <p style="margin:20px 0 0;text-align:center;font-size:12px;color:#94A3B8;">اطلبها – Otlobha</p>
+  </div>
+  <script>
+    const step1Form = document.getElementById('step1Form');
+    const step2Form = document.getElementById('step2Form');
+    const stepSubtitle = document.getElementById('stepSubtitle');
+    const emailInput = document.getElementById('emailInput');
+    const emailBadge = document.getElementById('emailBadge');
+    const changeEmailBtn = document.getElementById('changeEmailBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const codeInput = document.getElementById('codeInput');
+    const pw1 = document.getElementById('pw1');
+    const pw2 = document.getElementById('pw2');
+    const resetBtn = document.getElementById('resetBtn');
+    const resendBtn = document.getElementById('resendBtn');
+    const doneBox = document.getElementById('doneBox');
+    const returnAppLink = document.getElementById('returnAppLink');
+    const msgBox = document.getElementById('msgBox');
+    let activeEmail = '';
+    let cooldown = 0;
+    let timerId = null;
+
+    function normalizeDigits(v) {
+      const map = {'٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9','۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9'};
+      return String(v || '').replace(/[٠-٩۰-۹]/g, ch => map[ch] || ch).replace(/[^0-9]/g, '').slice(0, 6);
+    }
+
+    codeInput.addEventListener('input', () => {
+      codeInput.value = normalizeDigits(codeInput.value);
+    });
+
+    function showMsg(text, ok) {
+      msgBox.style.display = 'block';
+      msgBox.style.background = ok ? '#F0FDFA' : '#FEF2F2';
+      msgBox.style.color = ok ? '#0F766E' : '#B91C1C';
+      msgBox.style.border = ok ? '1px solid #99F6E4' : '1px solid #FECACA';
+      msgBox.textContent = text;
+    }
+
+    function startCooldown(sec) {
+      cooldown = sec;
+      if (timerId) clearInterval(timerId);
+      resendBtn.disabled = true;
+      resendBtn.textContent = 'إعادة إرسال الرمز بعد ' + cooldown + ' ث';
+      timerId = setInterval(() => {
+        cooldown--;
+        if (cooldown <= 0) {
+          clearInterval(timerId);
+          resendBtn.disabled = false;
+          resendBtn.textContent = 'إعادة إرسال الرمز';
+        } else {
+          resendBtn.textContent = 'إعادة إرسال الرمز بعد ' + cooldown + ' ث';
+        }
+      }, 1000);
+    }
+
+    async function requestResetCode(email) {
+      const res = await fetch('/api/mobile/customer/forgot-password/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.retry_after_sec && Number(data.retry_after_sec) > 0) {
+          startCooldown(Math.min(Number(data.retry_after_sec), 120));
+        }
+        throw new Error(data.error || 'تعذر إرسال رمز الاستعادة');
+      }
+      return data;
+    }
+
+    step1Form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = emailInput.value.trim();
+      if (!email || !email.includes('@')) {
+        showMsg('يرجى إدخال بريد إلكتروني صحيح', false);
+        return;
+      }
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'جاري إرسال الرمز...';
+      try {
+        const data = await requestResetCode(email);
+        activeEmail = data.email || email;
+        emailBadge.textContent = activeEmail;
+        step1Form.style.display = 'none';
+        step2Form.style.display = 'flex';
+        stepSubtitle.textContent = 'أدخل الرمز المرسل إلى بريدك الإلكتروني ثم اختر كلمة مرور جديدة.';
+        showMsg(data.message || 'تم إرسال رمز التحقق إلى بريدك الإلكتروني', true);
+        startCooldown(60);
+        codeInput.focus();
+      } catch (err) {
+        showMsg(err.message || 'تعذر الاتصال بالخادم', false);
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'إرسال رمز التحقق';
+      }
+    });
+
+    resendBtn.addEventListener('click', async () => {
+      if (!activeEmail) return;
+      resendBtn.disabled = true;
+      resendBtn.textContent = 'جاري إعادة الإرسال...';
+      try {
+        const data = await requestResetCode(activeEmail);
+        showMsg(data.message || 'تم إعادة إرسال رمز التحقق إلى بريدك الإلكتروني', true);
+        startCooldown(60);
+      } catch (err) {
+        showMsg(err.message || 'تعذر إعادة إرسال الرمز', false);
+        if (cooldown <= 0) {
+          resendBtn.disabled = false;
+          resendBtn.textContent = 'إعادة إرسال الرمز';
+        }
+      }
+    });
+
+    changeEmailBtn.addEventListener('click', () => {
+      step2Form.style.display = 'none';
+      step1Form.style.display = 'flex';
+      stepSubtitle.textContent = 'أدخل بريدك الإلكتروني المسجل لنرسل لك رمز التحقق المكون من 6 أرقام لتغيير كلمة المرور.';
+      msgBox.style.display = 'none';
+    });
+
+    step2Form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = normalizeDigits(codeInput.value);
+      codeInput.value = code;
+      if (code.length !== 6) {
+        showMsg('يرجى إدخال رمز التحقق المكون من 6 أرقام', false);
+        return;
+      }
+      if (pw1.value.length < 6) {
+        showMsg('كلمة المرور الجديدة يجب أن لا تقل عن 6 أحرف', false);
+        return;
+      }
+      if (pw1.value !== pw2.value) {
+        showMsg('كلمتا المرور غير متطابقتين', false);
+        return;
+      }
+      resetBtn.disabled = true;
+      resetBtn.textContent = 'جاري تحديث كلمة المرور...';
+      try {
+        const res = await fetch('/api/mobile/customer/forgot-password/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: activeEmail, code, new_password: pw1.value })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showMsg(data.error || 'تعذر تحديث كلمة المرور', false);
+          resetBtn.disabled = false;
+          resetBtn.textContent = 'تغيير كلمة المرور';
+          return;
+        }
+        const target = 'otlobha://password-reset-done?email=' + encodeURIComponent(activeEmail);
+        returnAppLink.href = target;
+        showMsg('تم تغيير كلمة المرور بنجاح! جاري إعادتك إلى تطبيق اطلبها...', true);
+        step2Form.style.display = 'none';
+        doneBox.style.display = 'block';
+        setTimeout(() => { window.location.href = target; }, 500);
+        setTimeout(() => { try { window.close(); } catch (_) {} }, 1300);
+      } catch (_) {
+        showMsg('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى.', false);
+        resetBtn.disabled = false;
+        resetBtn.textContent = 'تغيير كلمة المرور';
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
 // Manual Email Registration via Clickable Verification Link (NO OTP Code)
 const handleCustomerSendVerificationLink = async (req: express.Request, res: express.Response) => {
   const ip = getClientIp(req);
@@ -8293,11 +8997,21 @@ app.post('/api/mobile/customer/login', (req, res) => {
     return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
   }
   if (!Boolean(customerRow.is_email_verified)) {
-    return res.status(403).json({
-      error: 'حسابك غير مفعّل بعد — يرجى فتح رابط التأكيد المرسل إلى بريدك الإلكتروني أولًا',
-      code: 'EMAIL_NOT_VERIFIED',
-      email: String(customerRow.email || ''),
-    });
+    const existingVerifyNotif = db
+      .prepare("SELECT id FROM notifications WHERE recipient_id = ? AND deep_link = 'verify_email' AND is_read = 0 LIMIT 1")
+      .get(String(customerRow.id)) as { id: string } | undefined;
+    if (!existingVerifyNotif) {
+      enqueueSystemPushNotification({
+        targetApp: 'customer',
+        recipientId: String(customerRow.id),
+        category: 'alert',
+        titleAr: 'وثّق بريدك الإلكتروني الآن',
+        bodyAr: 'اضغط هنا لفتح صفحة التوثيق وإدخال الرمز المرسل على بريدك الإلكتروني لتأمين حسابك في اطلبها.',
+        deepLink: 'verify_email',
+        sentBy: 'نظام اطلبها',
+        extraData: { email: String(customerRow.email || '') },
+      });
+    }
   }
 
   db.prepare("UPDATE customers SET last_login_at = datetime('now') WHERE id = ?").run(String(customerRow.id));
@@ -8484,6 +9198,9 @@ app.post('/api/mobile/customer/forgot-password/reset', (req, res) => {
   db.prepare(
     "UPDATE customers SET password_hash = ?, token_version = ?, is_email_verified = 1, last_login_at = datetime('now') WHERE id = ?"
   ).run(newHash, nextVersion, String(customer.id));
+  db.prepare(
+    "UPDATE notifications SET is_read = 1 WHERE recipient_id = ? AND deep_link = 'verify_email'"
+  ).run(String(customer.id));
 
   const updated = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(customer.id)) as Record<string, unknown>;
   const tokens = issueSessionForUser(req, res, {

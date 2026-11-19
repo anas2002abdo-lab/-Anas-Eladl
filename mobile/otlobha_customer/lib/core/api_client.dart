@@ -360,6 +360,68 @@ class OtlobhaCustomerApi {
     return data;
   }
 
+  /// External browser page for entering the 6-digit email verification code and returning to app.
+  Uri verifyEmailExternalUri({String? email, bool autoSend = true}) {
+    final cleanEmail = (email != null && email.trim().isNotEmpty)
+        ? (normalizeEmail(email) ?? sanitizeEmailInput(email))
+        : '';
+    return _apiUri(
+      '/auth/verify-email',
+      queryParameters: {
+        if (cleanEmail.isNotEmpty) 'email': cleanEmail,
+        if (autoSend) 'auto': '1',
+      },
+    );
+  }
+
+  /// External browser page for forgot password (email -> 6-digit code -> new password -> return to app).
+  Uri forgotPasswordExternalUri({String? email}) {
+    final cleanEmail = (email != null && email.trim().isNotEmpty)
+        ? (normalizeEmail(email) ?? sanitizeEmailInput(email))
+        : '';
+    return _apiUri(
+      '/auth/forgot-password',
+      queryParameters: {
+        if (cleanEmail.isNotEmpty) 'email': cleanEmail,
+      },
+    );
+  }
+
+  /// Direct account creation without prior email verification — enters the app immediately
+  /// and triggers a post-login notification to verify the email via external code page.
+  Future<Map<String, dynamic>> registerCustomerDirect({
+    required String fullName,
+    required String email,
+    String? phone,
+    required String password,
+  }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/customer/register-direct'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({
+          'full_name': fullName.trim(),
+          'email': cleanEmail,
+          if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
+          'password': password,
+        }),
+      ),
+    );
+    final data = _decode(res, endpointHint: '/api/mobile/customer/register-direct');
+    final tokens = data['tokens'];
+    if (tokens is Map) {
+      setTokens(
+        accessToken: tokens['access_token']?.toString(),
+        refreshToken: tokens['refresh_token']?.toString(),
+      );
+    }
+    if (data['user'] is Map) {
+      await persistUserSnapshot(Map<String, dynamic>.from(data['user'] as Map));
+    }
+    return data;
+  }
+
   Future<Map<String, dynamic>> sendRegisterVerificationLink({
     required String fullName,
     required String email,

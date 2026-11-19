@@ -426,6 +426,50 @@ class CustomerPushNotificationService {
     }
   }
 
+  /// Displays a tappable native notification prompting the customer to verify their email on the external code page.
+  Future<void> showEmailVerificationLocalNotification({required String email}) async {
+    if (email.trim().isEmpty) return;
+    final useSilent = !_soundEnabled && !_vibrationEnabled;
+    final effectiveChannel = useSilent ? OtlobhaPushChannels.silent : OtlobhaPushChannels.admin;
+    const title = 'وثّق بريدك الإلكتروني الآن';
+    const body = 'اضغط هنا لفتح صفحة التوثيق وإدخال رمز التحقق لتأمين حسابك في اطلبها.';
+    final data = <String, dynamic>{
+      'deep_link': 'verify_email',
+      'email': email.trim(),
+      'title_ar': title,
+      'body_ar': body,
+      'channel_id': effectiveChannel,
+    };
+    try {
+      await _localNotifications.show(
+        904201,
+        title,
+        body,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            effectiveChannel,
+            _channelDisplayName(effectiveChannel),
+            importance: Importance.max,
+            priority: Priority.high,
+            playSound: _soundEnabled,
+            enableVibration: _vibrationEnabled,
+            vibrationPattern: _vibrationEnabled ? Int64List.fromList([0, 250, 150, 250]) : null,
+            icon: '@mipmap/ic_launcher',
+            styleInformation: const BigTextStyleInformation(body),
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: _soundEnabled,
+          ),
+        ),
+        payload: jsonEncode(data),
+      );
+    } catch (e) {
+      debugPrint('[CustomerPush] Email verification local notification failed: $e');
+    }
+  }
+
   String _channelDisplayName(String channelId) {
     switch (channelId) {
       case OtlobhaPushChannels.chat:

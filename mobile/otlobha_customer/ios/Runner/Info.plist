@@ -16,5 +16,18 @@
 	<array>
 		<string>remote-notification</string>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.otlobha.otlobha_customer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>otlobha</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

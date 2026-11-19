@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'core/api_client.dart';
@@ -68,12 +69,14 @@ class CustomerShell extends StatefulWidget {
   State<CustomerShell> createState() => _CustomerShellState();
 }
 
-class _CustomerShellState extends State<CustomerShell> {
+class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserver {
   final OtlobhaCustomerApi api = OtlobhaCustomerApi();
   bool _isAuthenticated = false;
   bool _isGuest = false;
   bool _showAuthScreen = true;
   bool _needsProfileCompletion = false;
+  bool _isEmailVerified = true;
+  bool _verifyNotifShownForSession = false;
   Map<String, dynamic> _currentUserSnapshot = {};
   int _index = 0; // 0: الرئيسية | 1: العروض | 2: الخدمات (المنتصف) | 3: السلة | 4: الملف الشخصي
   String _serviceSubView = 'hub';
@@ -101,6 +104,7 @@ class _CustomerShellState extends State<CustomerShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     CustomerPushNotificationService.instance.initialize(
       onNotificationTap: _handlePushNotificationTap,
       onForegroundNotification: () {
@@ -111,6 +115,43 @@ class _CustomerShellState extends State<CustomerShell> {
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       if (_isAuthenticated && !_isGuest) _silentSync();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _isAuthenticated && !_isGuest) {
+      _silentSync();
+    }
+  }
+
+  Future<void> _openExternalVerifyEmailPage({String? email}) async {
+    final targetEmail = (email != null && email.trim().isNotEmpty) ? email.trim() : _customerEmail.trim();
+    final uri = api.verifyEmailExternalUri(email: targetEmail, autoSend: true);
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر فتح صفحة توثيق البريد في المتصفح')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر فتح صفحة توثيق البريد في المتصفح')),
+        );
+      }
+    }
+  }
+
+  void _maybeTriggerEmailVerificationNotification() {
+    if (_isAuthenticated &&
+        !_isGuest &&
+        !_isEmailVerified &&
+        _customerEmail.trim().isNotEmpty &&
+        !_verifyNotifShownForSession) {
+      _verifyNotifShownForSession = true;
+      CustomerPushNotificationService.instance.showEmailVerificationLocalNotification(email: _customerEmail);
+    }
   }
 
   Future<void> _persistNavState({int? tabIndex, String? subView, bool? guest}) async {
@@ -146,6 +187,7 @@ class _CustomerShellState extends State<CustomerShell> {
           _isGuest = false;
           _showAuthScreen = false;
           _needsProfileCompletion = needsProfile;
+          _isEmailVerified = savedUser['is_email_verified'] == true || savedUser['is_email_verified'] == 1;
           _currentUserSnapshot = savedUser;
           _customerEmail = savedUser['email']?.toString() ?? '';
           _customerName = savedUser['full_name']?.toString() ?? '';
@@ -160,6 +202,7 @@ class _CustomerShellState extends State<CustomerShell> {
           _connectRidesWs();
           _loadData();
           CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+          _maybeTriggerEmailVerificationNotification();
         }
       } else if (savedGuest) {
         setState(() {
@@ -186,6 +229,10 @@ class _CustomerShellState extends State<CustomerShell> {
     final orderId = (data['order_id'] ?? '').toString().trim();
     final tripId = (data['trip_id'] ?? '').toString().trim();
 
+    if (deepLink == 'verify_email') {
+      _openExternalVerifyEmailPage(email: data['email']?.toString());
+      return;
+    }
     if ((deepLink == 'order_chat' || deepLink == 'order') && orderId.isNotEmpty) {
       _openOrderChat(orderId);
       return;
@@ -215,6 +262,7 @@ class _CustomerShellState extends State<CustomerShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     _ridesSub?.cancel();
     _ridesWs?.sink.close();
@@ -340,6 +388,8 @@ class _CustomerShellState extends State<CustomerShell> {
   void _applyCustomerFromBootstrap(Map<String, dynamic> data) {
     final cust = data['customer'];
     if (cust is Map) {
+      final wasUnverified = !_isEmailVerified;
+      final nowVerified = cust['is_email_verified'] == true || cust['is_email_verified'] == 1;
       final name = cust['full_name']?.toString() ?? '';
       final email = cust['email']?.toString() ?? '';
       final phone = cust['phone']?.toString() ?? '';
@@ -349,7 +399,16 @@ class _CustomerShellState extends State<CustomerShell> {
       if (email.isNotEmpty) _customerEmail = email;
       _customerPhone = phone;
       _addressLandmark = addr;
+      _isEmailVerified = nowVerified;
       if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
+      api.persistUserSnapshot(Map<String, dynamic>.from(cust));
+      if (wasUnverified && nowVerified && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم توثيق بريدك الإلكتروني بنجاح ✓')),
+        );
+      } else if (!nowVerified) {
+        _maybeTriggerEmailVerificationNotification();
+      }
     }
   }
 
@@ -359,6 +418,9 @@ class _CustomerShellState extends State<CustomerShell> {
       if (mounted) {
         setState(() {
           _bootstrap = data;
+          if (!_isGuest) {
+            _applyCustomerFromBootstrap(data);
+          }
         });
       }
     } catch (_) {}
@@ -474,7 +536,13 @@ class _CustomerShellState extends State<CustomerShell> {
     }
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => NotificationsScreen(api: api)),
+      MaterialPageRoute(
+        builder: (_) => NotificationsScreen(
+          api: api,
+          customerEmail: _customerEmail,
+          onOpenVerifyEmail: () => _openExternalVerifyEmailPage(),
+        ),
+      ),
     );
     _loadData();
   }
@@ -522,6 +590,8 @@ class _CustomerShellState extends State<CustomerShell> {
       _isGuest = false;
       _showAuthScreen = true;
       _needsProfileCompletion = false;
+      _isEmailVerified = true;
+      _verifyNotifShownForSession = false;
       _currentUserSnapshot = {};
       _customerName = '';
       _customerEmail = '';
@@ -855,6 +925,8 @@ class _CustomerShellState extends State<CustomerShell> {
               _isGuest = false;
               _showAuthScreen = false;
               _needsProfileCompletion = needsProfile;
+              _isEmailVerified = user['is_email_verified'] == true || user['is_email_verified'] == 1;
+              _verifyNotifShownForSession = false;
               _currentUserSnapshot = Map<String, dynamic>.from(user);
               _customerEmail = user['email']?.toString() ?? '';
               _customerName = user['full_name']?.toString() ?? '';
@@ -870,6 +942,7 @@ class _CustomerShellState extends State<CustomerShell> {
               _connectRidesWs();
               _loadData();
               CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+              _maybeTriggerEmailVerificationNotification();
               if (_pendingPushTap != null) {
                 final pending = _pendingPushTap!;
                 _pendingPushTap = null;
@@ -889,6 +962,7 @@ class _CustomerShellState extends State<CustomerShell> {
         onCompleted: (updatedUser) {
           setState(() {
             _needsProfileCompletion = false;
+            _isEmailVerified = updatedUser['is_email_verified'] == true || updatedUser['is_email_verified'] == 1;
             _currentUserSnapshot = Map<String, dynamic>.from(updatedUser);
             _customerName = updatedUser['full_name']?.toString() ?? _customerName;
             _customerPhone = updatedUser['phone']?.toString() ?? _customerPhone;
@@ -900,6 +974,7 @@ class _CustomerShellState extends State<CustomerShell> {
           _connectRidesWs();
           _loadData();
           CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+          _maybeTriggerEmailVerificationNotification();
           if (_pendingPushTap != null) {
             final pending = _pendingPushTap!;
             _pendingPushTap = null;
@@ -1123,7 +1198,63 @@ class _CustomerShellState extends State<CustomerShell> {
         ),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
-            : IndexedStack(index: _index, children: screens),
+            : Column(
+                children: [
+                  if (_isAuthenticated && !_isGuest && !_isEmailVerified && _customerEmail.trim().isNotEmpty)
+                    Material(
+                      color: const Color(0xFFFFF7ED),
+                      child: InkWell(
+                        onTap: () => _openExternalVerifyEmailPage(),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: const BoxDecoration(
+                            border: Border(bottom: BorderSide(color: Color(0xFFFED7AA))),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.mark_email_unread_outlined, color: Color(0xFFC2410C), size: 20),
+                              const SizedBox(width: 10),
+                              const Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'وثّق بريدك الإلكتروني الآن',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 12.5,
+                                        color: Color(0xFF9A3412),
+                                      ),
+                                    ),
+                                    Text(
+                                      'اضغط هنا لفتح صفحة التوثيق وإدخال الرمز',
+                                      style: TextStyle(fontSize: 11, color: Color(0xFF7C2D12)),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFA92224),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Text(
+                                  'توثيق الآن',
+                                  style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  Expanded(child: IndexedStack(index: _index, children: screens)),
+                ],
+              ),
         bottomNavigationBar: _buildCustomerBottomBar(cartTotalQty),
       ),
     );

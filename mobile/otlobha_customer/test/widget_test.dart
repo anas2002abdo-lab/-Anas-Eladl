@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:otlobha_customer/core/api_client.dart';
 import 'package:otlobha_customer/main.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  testWidgets('OtlobhaCustomerApp shows Google Sign-In, Email Link Register, Reset Link, and Guest options', (WidgetTester tester) async {
+  testWidgets('OtlobhaCustomerApp shows Google Sign-In, Instant Register, Forgot Password, and Guest options', (WidgetTester tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(const OtlobhaCustomerApp());
     await tester.pumpAndSettle();
@@ -20,27 +21,23 @@ void main() {
     expect(find.text('هل نسيت كلمة المرور؟'), findsOneWidget);
     expect(find.text('الدخول كزائر'), findsOneWidget);
 
-    // Switch to Register mode (link-based, no OTP code)
+    // Switch to Register mode (instant registration without prior email verification)
     final registerTab = find.text('إنشاء حساب جديد');
     await tester.ensureVisible(registerTab);
     await tester.pumpAndSettle();
     await tester.tap(registerTab);
     await tester.pumpAndSettle();
-    expect(find.text('إرسال رابط تأكيد الحساب'), findsOneWidget);
+    expect(find.text('إنشاء الحساب والدخول فورًا'), findsOneWidget);
 
-    // Switch back to Login and open Forgot Password mode (link-based, no OTP code)
-    final loginTab = find.text('تسجيل الدخول').first;
-    await tester.ensureVisible(loginTab);
-    await tester.pumpAndSettle();
-    await tester.tap(loginTab);
-    await tester.pumpAndSettle();
+    // Verify external verification & forgot-password URI builders
+    final api = OtlobhaCustomerApi();
+    final verifyUri = api.verifyEmailExternalUri(email: 'Test@Gmail.com', autoSend: true);
+    expect(verifyUri.path, '/auth/verify-email');
+    expect(verifyUri.queryParameters['email'], 'test@gmail.com');
+    expect(verifyUri.queryParameters['auto'], '1');
 
-    final forgotBtn = find.text('هل نسيت كلمة المرور؟');
-    await tester.ensureVisible(forgotBtn);
-    await tester.pumpAndSettle();
-    await tester.tap(forgotBtn);
-    await tester.pumpAndSettle();
-    expect(find.text('استعادة كلمة المرور'), findsOneWidget);
-    expect(find.text('إرسال رابط تغيير كلمة المرور'), findsOneWidget);
+    final forgotUri = api.forgotPasswordExternalUri(email: 'Test@Gmail.com');
+    expect(forgotUri.path, '/auth/forgot-password');
+    expect(forgotUri.queryParameters['email'], 'test@gmail.com');
   });
 }
