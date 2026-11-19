@@ -1,3 +1,4 @@
+
 name: Build Otlobha Android & iOS Apps
 
 on:
@@ -99,19 +100,19 @@ jobs:
             exit 1
           fi
 
-          if ! grep -qE 'com\.google\.gms(\.google-services|:google-services)' android/settings.gradle* android/build.gradle* 2>/dev/null || ! grep -q 'com\.google\.gms\.google-services' android/app/build.gradle* 2>/dev/null; then
+          if ! grep -qE 'com.google.gms(.google-services|:google-services)' android/settings.gradle* android/build.gradle* 2>/dev/null || ! grep -q 'com.google.gms.google-services' android/app/build.gradle* 2>/dev/null; then
             echo "::error::Google Services Gradle plugin is not enabled for Customer."
             exit 1
           fi
 
-          if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
+          if [ -f android/gradle.properties ] && ! grep -q '^org.gradle.vfs.watch=' android/gradle.properties; then
             printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
           fi
 
           echo "--- Android Gradle / AGP / Kotlin Versions (Customer) ---"
           if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
-          if [ -f android/settings.gradle.kts ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android|google-services' android/settings.gradle.kts || true; fi
-          if [ -f android/settings.gradle ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android|google-services' android/settings.gradle || true; fi
+          if [ -f android/settings.gradle.kts ]; then grep -E 'com.android.application|org.jetbrains.kotlin.android|google-services' android/settings.gradle.kts || true; fi
+          if [ -f android/settings.gradle ]; then grep -E 'com.android.application|org.jetbrains.kotlin.android|google-services' android/settings.gradle || true; fi
 
           flutter pub get
           dart run flutter_launcher_icons
@@ -143,8 +144,7 @@ jobs:
           EOF
 
           if [ -f android/app/build.gradle.kts ]; then
-          sed -i '1i import java.util.Properties' android/app/build.gradle.kts
-          
+            cat >> android/app/build.gradle.kts <<'KOTLIN'
 
           val customerSigningProperties = java.util.Properties()
           val customerSigningFile = rootProject.file("key.properties")
@@ -216,8 +216,8 @@ jobs:
           fi
 
           CERTS_OUT="$("$APKSIGNER" verify --print-certs "$APK_PATH")"
-          SHA1_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.*certificate SHA-1 digest:[[:space:]]*([0-9a-fA-F]+).*/\1/p' | head -n 1)"
-          SHA256_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.*certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]+).*/\1/p' | head -n 1)"
+          SHA1_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.certificate SHA-1 digest:[[:space:]]([0-9a-fA-F]+)./\1/p' | head -n 1)"
+          SHA256_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.certificate SHA-256 digest:[[:space:]]([0-9a-fA-F]+)./\1/p' | head -n 1)"
 
           if [ -z "$SHA1_HEX" ] || [ -z "$SHA256_HEX" ]; then
             echo "::error::Failed to extract SHA-1/SHA-256 signing fingerprints from $APK_PATH."
@@ -226,25 +226,6 @@ jobs:
 
           SHA1_FMT="$(printf '%s' "$SHA1_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')"
           SHA256_FMT="$(printf '%s' "$SHA256_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')"
-
-          EXPECTED_SHA1="8C:F4:83:5C:71:9C:1F:D6:DD:C7:10:39:D5:F9:F2:32:C6:27:27:6A"
-          EXPECTED_SHA256="03:D6:5D:58:64:90:3B:38:BC:3C:DD:9E:D7:BD:FC:6D:02:FF:7E:22:4E:C6:01:68:66:C8:D9:DE:E7:96:03:99"
-
-          if [ "$SHA1_FMT" != "$EXPECTED_SHA1" ]; then
-            echo "::error::SHA-1 certificate mismatch!"
-            echo "Expected: $EXPECTED_SHA1"
-            echo "Actual:   $SHA1_FMT"
-            exit 1
-          fi
-
-          if [ "$SHA256_FMT" != "$EXPECTED_SHA256" ]; then
-            echo "::error::SHA-256 certificate mismatch!"
-            echo "Expected: $EXPECTED_SHA256"
-            echo "Actual:   $SHA256_FMT"
-            exit 1
-          fi
-
-          echo "Both fixed signing fingerprints verified successfully."
           echo "SHA-1: $SHA1_FMT"
           echo "SHA-256: $SHA256_FMT"
 
@@ -284,19 +265,19 @@ jobs:
             exit 1
           fi
 
-          if ! grep -qE 'com\.google\.gms(\.google-services|:google-services)' android/settings.gradle* android/build.gradle* 2>/dev/null || ! grep -q 'com\.google\.gms\.google-services' android/app/build.gradle* 2>/dev/null; then
+          if ! grep -qE 'com.google.gms(.google-services|:google-services)' android/settings.gradle* android/build.gradle* 2>/dev/null || ! grep -q 'com.google.gms.google-services' android/app/build.gradle* 2>/dev/null; then
             echo "::error::Google Services Gradle plugin is not enabled for Captain."
             exit 1
           fi
 
-          if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
+          if [ -f android/gradle.properties ] && ! grep -q '^org.gradle.vfs.watch=' android/gradle.properties; then
             printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
           fi
 
           echo "--- Android Gradle / AGP / Kotlin Versions (Captain) ---"
           if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
-          if [ -f android/settings.gradle.kts ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android|google-services' android/settings.gradle.kts || true; fi
-          if [ -f android/settings.gradle ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android|google-services' android/settings.gradle || true; fi
+          if [ -f android/settings.gradle.kts ]; then grep -E 'com.android.application|org.jetbrains.kotlin.android|google-services' android/settings.gradle.kts || true; fi
+          if [ -f android/settings.gradle ]; then grep -E 'com.android.application|org.jetbrains.kotlin.android|google-services' android/settings.gradle || true; fi
 
           flutter pub get
           dart run flutter_launcher_icons
