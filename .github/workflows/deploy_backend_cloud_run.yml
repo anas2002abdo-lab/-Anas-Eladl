@@ -1,0 +1,193 @@
+name: Deploy Otlobha Backend to Cloud Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Google Cloud Run Region"
+        required: true
+        default: "europe-west2"
+      service_name:
+        description: "Cloud Run Service Name"
+        required: true
+        default: "otlobha"
+      min_instances:
+        description: "Minimum instances (0 = scale to zero, 1 = always warm)"
+        required: true
+        default: "0"
+      require_existing_db:
+        description: "Refuse to start if gs://<bucket>/otlobha.db is missing (prevents empty DB creation)"
+        required: true
+        default: "true"
+
+jobs:
+  deploy_backend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required GCP auth inputs
+        run: |
+          if [ -z "${{ secrets.GCP_PROJECT_ID }}" ]; then
+            echo "::error::Missing GCP_PROJECT_ID in GitHub Repository Secrets."
+            exit 1
+          fi
+          if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ] && [ -z "${{ secrets.GCP_SA_KEY }}" ]; then
+            echo "::error::Configure either GCP_WORKLOAD_IDENTITY_PROVIDER (+ GCP_DEPLOYER_SA) or GCP_SA_KEY in GitHub Repository Secrets."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Authenticate to Google Cloud (Service Account Key fallback)
+        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER == '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Verify Secret Manager, Runtime SA, and Versioned GCS Bucket
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ github.event.inputs.region || 'europe-west2' }}
+          GCS_BUCKET: ${{ vars.OTLOBHA_GCS_BUCKET || format('{0}-otlobha-data', secrets.GCP_PROJECT_ID) }}
+          RUNTIME_SA_NAME: ${{ vars.OTLOBHA_RUNTIME_SA_NAME || 'otlobha-backend-runner' }}
+          REQUIRE_EXISTING_DB: ${{ github.event.inputs.require_existing_db || 'true' }}
+        run: |
+          set -euo pipefail
+          RUNTIME_SA_EMAIL="${RUNTIME_SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+
+          if ! gcloud iam service-accounts describe "$RUNTIME_SA_EMAIL" >/dev/null 2>&1; then
+            echo "::error::Runtime service account ${RUNTIME_SA_EMAIL} not found. Run deploy/setup_gcp_secrets.sh in Cloud Shell first."
+            exit 1
+          fi
+
+          if ! gcloud storage buckets describe "gs://${GCS_BUCKET}" >/dev/null 2>&1; then
+            echo "::error::GCS bucket gs://${GCS_BUCKET} not found. Run deploy/setup_gcp_secrets.sh in Cloud Shell first."
+            exit 1
+          fi
+
+          gcloud storage buckets update "gs://${GCS_BUCKET}" --versioning >/dev/null
+
+          if [ "$REQUIRE_EXISTING_DB" = "true" ]; then
+            if ! gcloud storage ls "gs://${GCS_BUCKET}/otlobha.db" >/dev/null 2>&1; then
+              echo "::error::gs://${GCS_BUCKET}/otlobha.db not found and require_existing_db=true. Refusing to deploy an empty database."
+              exit 1
+            fi
+            STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+            gcloud storage cp "gs://${GCS_BUCKET}/otlobha.db" "gs://${GCS_BUCKET}/pre-deploy-backups/otlobha-before-deploy-${STAMP}.db" >/dev/null
+            echo "Saved pre-deploy snapshot to gs://${GCS_BUCKET}/pre-deploy-backups/otlobha-before-deploy-${STAMP}.db"
+          fi
+
+          for secret_name in otlobha-smtp-pass otlobha-jwt-access-secret otlobha-jwt-refresh-secret otlobha-super-admin-password; do
+            if ! gcloud secrets describe "$secret_name" >/dev/null 2>&1; then
+              echo "::error::Required Google Secret Manager secret '${secret_name}' not found. Run deploy/setup_gcp_secrets.sh first."
+              exit 1
+            fi
+          done
+
+      - name: Deploy Otlobha Unified Backend to Cloud Run (Secret Manager + Safe SQLite Sync)
+        id: deploy
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ github.event.inputs.region || 'europe-west2' }}
+          SERVICE_NAME: ${{ github.event.inputs.service_name || 'otlobha' }}
+          MIN_INSTANCES: ${{ github.event.inputs.min_instances || '0' }}
+          REQUIRE_EXISTING_DB: ${{ github.event.inputs.require_existing_db || 'true' }}
+          GCS_BUCKET: ${{ vars.OTLOBHA_GCS_BUCKET || format('{0}-otlobha-data', secrets.GCP_PROJECT_ID) }}
+          RUNTIME_SA_NAME: ${{ vars.OTLOBHA_RUNTIME_SA_NAME || 'otlobha-backend-runner' }}
+          SMTP_HOST: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '465' }}
+          SMTP_SECURE: ${{ vars.SMTP_SECURE || 'true' }}
+          SMTP_USER: ${{ vars.SMTP_USER }}
+          SMTP_FROM: ${{ vars.SMTP_FROM }}
+          SUPER_ADMIN_EMAIL: ${{ vars.SUPER_ADMIN_EMAIL }}
+          SUPER_ADMIN_NAME: ${{ vars.SUPER_ADMIN_NAME }}
+        run: |
+          set -euo pipefail
+          RUNTIME_SA_EMAIL="${RUNTIME_SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+
+          SECRET_BINDINGS="SMTP_PASS=otlobha-smtp-pass:latest,JWT_ACCESS_SECRET=otlobha-jwt-access-secret:latest,JWT_REFRESH_SECRET=otlobha-jwt-refresh-secret:latest,SUPER_ADMIN_PASSWORD=otlobha-super-admin-password:latest"
+          if gcloud secrets describe "otlobha-gemini-api-key" >/dev/null 2>&1; then
+            SECRET_BINDINGS="${SECRET_BINDINGS},GEMINI_API_KEY=otlobha-gemini-api-key:latest"
+          fi
+
+          REQ_FLAG="0"
+          if [ "$REQUIRE_EXISTING_DB" = "true" ]; then
+            REQ_FLAG="1"
+          fi
+
+          ENV_VARS="NODE_ENV=production,DISABLE_VITE=1,OTLOBHA_DB_PATH=/tmp/otlobha-local/otlobha.db,OTLOBHA_GCS_PERSIST_DIR=/mnt/gcs-data,OTLOBHA_SQLITE_JOURNAL_MODE=WAL,OTLOBHA_SQLITE_SYNC_INTERVAL_MS=15000,OTLOBHA_REQUIRE_EXISTING_PERSISTED_DB=${REQ_FLAG}"
+          for key in SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER SMTP_FROM SUPER_ADMIN_EMAIL SUPER_ADMIN_NAME; do
+            val="${!key:-}"
+            if [ -n "$val" ]; then
+              ENV_VARS="${ENV_VARS},${key}=${val}"
+            fi
+          done
+
+          # Production SQLite database in GCS is NEVER overwritten by deployment.
+          # Uses --update-env-vars / --update-secrets to preserve existing service settings.
+          gcloud run deploy "$SERVICE_NAME" \
+            --source . \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account "$RUNTIME_SA_EMAIL" \
+            --execution-environment gen2 \
+            --port 8080 \
+            --memory 1Gi \
+            --cpu 1 \
+            --min-instances "$MIN_INSTANCES" \
+            --max-instances 1 \
+            --session-affinity \
+            --timeout 3600 \
+            --add-volume "name=otlobha-data,type=cloud-storage,bucket=${GCS_BUCKET}" \
+            --add-volume-mount "volume=otlobha-data,mount-path=/mnt/gcs-data" \
+            --update-env-vars "$ENV_VARS" \
+            --update-secrets "$SECRET_BINDINGS"
+
+          SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')"
+          gcloud run services update "$SERVICE_NAME" --region "$REGION" --update-env-vars "APP_URL=${SERVICE_URL}" >/dev/null
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Public JSON Endpoints (No Cookie Check / No HTML)
+        env:
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+        run: |
+          set -euo pipefail
+          HEALTH_BODY="$(curl -fsS -H 'Accept: application/json' "${SERVICE_URL}/api/health")"
+          echo "Health response: $HEALTH_BODY"
+          echo "$HEALTH_BODY" | grep -q '"ok":true'
+
+          GUEST_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/json' "${SERVICE_URL}/api/mobile/customer/guest-bootstrap")"
+          echo "Guest bootstrap HTTP status: $GUEST_STATUS"
+          test "$GUEST_STATUS" = "200"
+
+          {
+            echo "## Otlobha Unified Backend — Public Cloud Run URL"
+            echo ""
+            echo "**Public API Base URL:** \`${SERVICE_URL}\`"
+            echo ""
+            echo "- Region: \`europe-west2\`"
+            echo "- Secrets: **Google Secret Manager** (\`--set-secrets\`)"
+            echo "- SQLite Persistence: Local POSIX WAL + Verified Atomic Snapshots -> Versioned GCS (\`/mnt/gcs-data\`)"
+            echo "- Health Check: \`GET ${SERVICE_URL}/api/health\` -> **200 JSON**"
+            echo "- Guest Catalog: \`GET ${SERVICE_URL}/api/mobile/customer/guest-bootstrap\` -> **200 JSON**"
+            echo ""
+            echo "### Connect Customer & Captain APKs"
+            echo "Set GitHub Repository Variable \`OTLOBHA_API_BASE_URL\` to \`${SERVICE_URL}\`, then run **Build Otlobha Android & iOS Apps**."
+          } >> "$GITHUB_STEP_SUMMARY"

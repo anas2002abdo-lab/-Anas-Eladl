@@ -1,13 +1,24 @@
 import Database from 'better-sqlite3';
+import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { hydrateSqliteFromPersistDirIfNeeded } from './sqlitePersist.ts';
 
-const dbPath = process.env.OTLOBHA_DB_PATH
+export const dbPath = process.env.OTLOBHA_DB_PATH
   ? path.resolve(process.env.OTLOBHA_DB_PATH)
   : path.resolve(process.cwd(), 'otlobha.db');
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+hydrateSqliteFromPersistDirIfNeeded(dbPath);
 export const db = new Database(dbPath);
 
-db.pragma('journal_mode = WAL');
+const requestedJournalMode = String(process.env.OTLOBHA_SQLITE_JOURNAL_MODE || 'WAL')
+  .trim()
+  .toUpperCase();
+const allowedJournalModes = new Set(['WAL', 'DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY']);
+const safeJournalMode = allowedJournalModes.has(requestedJournalMode) ? requestedJournalMode : 'WAL';
+db.pragma(`journal_mode = ${safeJournalMode}`);
+db.pragma('synchronous = FULL');
+db.pragma('busy_timeout = 10000');
 db.pragma('foreign_keys = ON');
 
 export function uid(prefix = 'id'): string {
@@ -427,6 +438,7 @@ export function initDatabase(): void {
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE,
       phone TEXT,
+      password_hash TEXT NOT NULL DEFAULT '',
       full_name TEXT NOT NULL DEFAULT 'عميل اطلبها',
       status TEXT NOT NULL DEFAULT 'active',
       default_zone_id TEXT NOT NULL DEFAULT 'zn_city_center',
@@ -809,6 +821,9 @@ export function initDatabase(): void {
   const checkCustCols = db.prepare("PRAGMA table_info('customers')").all() as Array<{ name: string }>;
   if (!checkCustCols.some((c) => c.name === 'status')) {
     db.exec("ALTER TABLE customers ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  }
+  if (!checkCustCols.some((c) => c.name === 'password_hash')) {
+    db.exec("ALTER TABLE customers ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''");
   }
 
   const custColsGps = db.prepare("PRAGMA table_info('customers')").all() as Array<{ name: string }>;

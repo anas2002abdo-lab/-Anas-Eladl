@@ -1,11 +1,27 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+
+class ApiException implements Exception {
+  final String message;
+  final int? statusCode;
+  final String? contentType;
+
+  const ApiException(this.message, {this.statusCode, this.contentType});
+
+  @override
+  String toString() => message;
+}
 
 class OtlobhaCaptainApi {
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
     defaultValue: 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app',
   );
+
+  static const Duration _defaultTimeout = Duration(seconds: 30);
+  static const Duration _uploadTimeout = Duration(seconds: 60);
 
   String? _accessToken;
   String? _refreshToken;
@@ -17,6 +33,44 @@ class OtlobhaCaptainApi {
       (_accessToken != null && _accessToken!.isNotEmpty)
           ? {'Authorization': 'Bearer $_accessToken'}
           : const {};
+
+  /// Normalizes API_BASE_URL by removing trailing slashes and accidental trailing '/api'
+  /// so endpoints never resolve to '/api/api/...'.
+  static String normalizeBaseUrl(String raw) {
+    var clean = raw.trim();
+    while (clean.endsWith('/')) {
+      clean = clean.substring(0, clean.length - 1);
+    }
+    if (clean.toLowerCase().endsWith('/api')) {
+      clean = clean.substring(0, clean.length - 4);
+      while (clean.endsWith('/')) {
+        clean = clean.substring(0, clean.length - 1);
+      }
+    }
+    return clean;
+  }
+
+  static String get _resolvedBaseUrl => normalizeBaseUrl(baseUrl);
+
+  static Uri _apiUri(String path, {Map<String, String>? queryParameters}) {
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final uri = Uri.parse('$_resolvedBaseUrl$normalizedPath');
+    if (queryParameters == null || queryParameters.isEmpty) {
+      return uri;
+    }
+    return uri.replace(queryParameters: queryParameters);
+  }
+
+  static String get _wsBaseUrl {
+    final clean = _resolvedBaseUrl;
+    if (clean.startsWith('https://')) {
+      return clean.replaceFirst('https://', 'wss://');
+    }
+    if (clean.startsWith('http://')) {
+      return clean.replaceFirst('http://', 'ws://');
+    }
+    return clean;
+  }
 
   void setTokens({String? accessToken, String? refreshToken}) {
     if (accessToken != null && accessToken.isNotEmpty) {
@@ -32,11 +86,32 @@ class OtlobhaCaptainApi {
     _refreshToken = null;
   }
 
-  Map<String, String> _headers({bool json = false}) {
+  Map<String, String> _headers({bool json = false, bool includeAuth = true}) {
     return {
-      if (json) 'Content-Type': 'application/json',
-      if (_accessToken != null && _accessToken!.isNotEmpty) 'Authorization': 'Bearer $_accessToken',
+      'Accept': 'application/json',
+      if (json) 'Content-Type': 'application/json; charset=utf-8',
+      if (includeAuth && _accessToken != null && _accessToken!.isNotEmpty)
+        'Authorization': 'Bearer $_accessToken',
     };
+  }
+
+  Future<http.Response> _execute(
+    Future<http.Response> Function() requestFn, {
+    Duration timeout = _defaultTimeout,
+  }) async {
+    try {
+      return await requestFn().timeout(timeout);
+    } on TimeoutException {
+      throw const ApiException('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+    } on ApiException {
+      rethrow;
+    } on http.ClientException catch (e) {
+      debugPrint('[OtlobhaCaptainApi] ClientException: ${e.message}');
+      throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
+    } catch (e) {
+      debugPrint('[OtlobhaCaptainApi] Network error: ${e.runtimeType}');
+      throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
+    }
   }
 
   Future<bool> _refreshAccessToken() async {
@@ -45,13 +120,15 @@ class OtlobhaCaptainApi {
 
     _refreshFuture = () async {
       try {
-        final res = await http.post(
-          Uri.parse('$baseUrl/api/auth/refresh'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'refresh_token': _refreshToken}),
+        final res = await _execute(
+          () => http.post(
+            _apiUri('/api/auth/refresh'),
+            headers: _headers(json: true, includeAuth: false),
+            body: jsonEncode({'refresh_token': _refreshToken}),
+          ),
         );
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          final decoded = jsonDecode(res.body);
+          final decoded = parseJsonResponse(res, endpointHint: '/api/auth/refresh');
           if (decoded is Map<String, dynamic>) {
             final tokens = decoded['tokens'] is Map ? decoded['tokens'] as Map : decoded;
             final nextAccess = tokens['access_token']?.toString();
@@ -81,51 +158,55 @@ class OtlobhaCaptainApi {
     Future<http.Response> Function(Map<String, String> headers) sender, {
     bool json = false,
     bool allowRefresh = true,
+    Duration timeout = _defaultTimeout,
   }) async {
-    var res = await sender(_headers(json: json));
+    var res = await _execute(() => sender(_headers(json: json)), timeout: timeout);
     if (res.statusCode == 401 && allowRefresh && _refreshToken != null && _refreshToken!.isNotEmpty) {
       final ok = await _refreshAccessToken();
       if (ok) {
-        res = await sender(_headers(json: json));
+        res = await _execute(() => sender(_headers(json: json)), timeout: timeout);
       }
     }
     return res;
   }
 
   Future<Map<String, dynamic>> getMe() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/auth/me'), headers: h));
-    return _decode(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/auth/me'), headers: h));
+    return _decode(res, endpointHint: '/api/auth/me');
   }
 
   Future<List<dynamic>> getOrders() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/orders'), headers: h));
-    return _decodeList(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/orders'), headers: h));
+    return _decodeList(res, endpointHint: '/api/orders');
   }
 
   Future<List<dynamic>> getParcels() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/mobile/parcels'), headers: h));
-    return _decodeList(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/mobile/parcels'), headers: h));
+    return _decodeList(res, endpointHint: '/api/mobile/parcels');
   }
 
   Future<List<dynamic>> getTrips() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/trips'), headers: h));
-    return _decodeList(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/trips'), headers: h));
+    return _decodeList(res, endpointHint: '/api/trips');
   }
 
   Future<Map<String, dynamic>> getSettlements(String captainId) async {
     final res = await _sendWithAuth(
-      (h) => http.get(Uri.parse('$baseUrl/api/mobile/captain/$captainId/settlements'), headers: h),
+      (h) => http.get(_apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/settlements'), headers: h),
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/mobile/captain/$captainId/settlements');
   }
 
   Future<Map<String, dynamic>> registerCaptain(Map<String, dynamic> payload) async {
-    final res = await http.post(
-      Uri.parse('$baseUrl/api/mobile/captain/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(payload),
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/captain/register'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode(payload),
+      ),
+      timeout: _uploadTimeout,
     );
-    final data = _decode(res);
+    final data = _decode(res, endpointHint: '/api/mobile/captain/register');
     final tokens = data['tokens'];
     if (tokens is Map) {
       setTokens(
@@ -137,12 +218,14 @@ class OtlobhaCaptainApi {
   }
 
   Future<Map<String, dynamic>> loginCaptain(String username, String password) async {
-    final res = await http.post(
-      Uri.parse('$baseUrl/api/mobile/captain/login'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': username, 'password': password}),
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/captain/login'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({'username': username, 'password': password}),
+      ),
     );
-    final data = _decode(res);
+    final data = _decode(res, endpointHint: '/api/mobile/captain/login');
     final tokens = data['tokens'];
     if (tokens is Map) {
       setTokens(
@@ -155,15 +238,18 @@ class OtlobhaCaptainApi {
 
   Future<void> logout() async {
     try {
-      await http.post(
-        Uri.parse('$baseUrl/api/auth/logout'),
-        headers: _headers(json: true),
-        body: jsonEncode({
-          if (_refreshToken != null && _refreshToken!.isNotEmpty) 'refresh_token': _refreshToken,
-        }),
+      await _execute(
+        () => http.post(
+          _apiUri('/api/auth/logout'),
+          headers: _headers(json: true),
+          body: jsonEncode({
+            if (_refreshToken != null && _refreshToken!.isNotEmpty) 'refresh_token': _refreshToken,
+          }),
+        ),
+        timeout: const Duration(seconds: 10),
       );
     } catch (_) {
-      // ignore
+      // ignore logout transport errors; always clear local tokens
     } finally {
       clearTokens();
     }
@@ -172,147 +258,144 @@ class OtlobhaCaptainApi {
   Future<void> setAvailability(String captainId, String status) async {
     final res = await _sendWithAuth(
       (h) => http.patch(
-        Uri.parse('$baseUrl/api/mobile/captain/$captainId/availability'),
+        _apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/availability'),
         headers: h,
         body: jsonEncode({'availability_status': status}),
       ),
       json: true,
     );
-    _decode(res);
+    _decode(res, endpointHint: '/api/mobile/captain/$captainId/availability');
   }
 
   Future<void> updateOrderStatus(String captainId, String orderId, String status) async {
     final res = await _sendWithAuth(
       (h) => http.patch(
-        Uri.parse('$baseUrl/api/mobile/captain/$captainId/order-status'),
+        _apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/order-status'),
         headers: h,
         body: jsonEncode({'order_id': orderId, 'status': status}),
       ),
       json: true,
     );
-    _decode(res);
+    _decode(res, endpointHint: '/api/mobile/captain/$captainId/order-status');
   }
 
   Future<Map<String, dynamic>> updateCaptainLocation(String captainId, double lat, double lng) async {
     final res = await _sendWithAuth(
       (h) => http.patch(
-        Uri.parse('$baseUrl/api/mobile/captain/$captainId/location'),
+        _apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/location'),
         headers: h,
         body: jsonEncode({'lat': lat, 'lng': lng}),
       ),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/mobile/captain/$captainId/location');
   }
 
   Future<Map<String, dynamic>> updateTripStatus(String captainId, String tripId, String status) async {
     final res = await _sendWithAuth(
       (h) => http.patch(
-        Uri.parse('$baseUrl/api/mobile/captain/$captainId/trip-status'),
+        _apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/trip-status'),
         headers: h,
         body: jsonEncode({'trip_id': tripId, 'status': status}),
       ),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/mobile/captain/$captainId/trip-status');
   }
 
   Future<Map<String, dynamic>> completeParcelWithOtp(String captainId, String deliveryId, String otp) async {
     final res = await _sendWithAuth(
       (h) => http.post(
-        Uri.parse('$baseUrl/api/mobile/captain/$captainId/complete-parcel'),
+        _apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/complete-parcel'),
         headers: h,
         body: jsonEncode({'delivery_id': deliveryId, 'otp': otp}),
       ),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/mobile/captain/$captainId/complete-parcel');
   }
 
   Future<Map<String, dynamic>> requestSettlement(String captainId, double amount, String method) async {
     final res = await _sendWithAuth(
       (h) => http.post(
-        Uri.parse('$baseUrl/api/mobile/captain/$captainId/settlement-request'),
+        _apiUri('/api/mobile/captain/${Uri.encodeComponent(captainId)}/settlement-request'),
         headers: h,
         body: jsonEncode({'amount': amount, 'payout_method': method}),
       ),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/mobile/captain/$captainId/settlement-request');
   }
 
   Future<List<dynamic>> getNotifications(String captainId) async {
     final res = await _sendWithAuth(
-      (h) => http.get(Uri.parse('$baseUrl/api/mobile/notifications?app=captain&recipient_id=$captainId'), headers: h),
+      (h) => http.get(
+        _apiUri('/api/mobile/notifications', queryParameters: {'app': 'captain', 'recipient_id': captainId}),
+        headers: h,
+      ),
     );
-    return _decodeList(res);
+    return _decodeList(res, endpointHint: '/api/mobile/notifications');
   }
 
   Future<void> markNotificationRead(String id) async {
-    await _sendWithAuth(
-      (h) => http.patch(Uri.parse('$baseUrl/api/mobile/notifications/$id/read'), headers: h),
+    final res = await _sendWithAuth(
+      (h) => http.patch(_apiUri('/api/mobile/notifications/${Uri.encodeComponent(id)}/read'), headers: h),
     );
+    _ensureSuccess(res, endpointHint: '/api/mobile/notifications/$id/read');
   }
 
   Uri orderChatWsUri(String orderId) {
-    final wsBase = baseUrl.startsWith('https://')
-        ? baseUrl.replaceFirst('https://', 'wss://')
-        : baseUrl.replaceFirst('http://', 'ws://');
-    return Uri.parse('$wsBase/ws/order-chat?orderId=${Uri.encodeComponent(orderId)}');
+    return Uri.parse('$_wsBaseUrl/ws/order-chat?orderId=${Uri.encodeComponent(orderId)}');
   }
 
   Uri tripChatWsUri(String tripId) {
-    final wsBase = baseUrl.startsWith('https://')
-        ? baseUrl.replaceFirst('https://', 'wss://')
-        : baseUrl.replaceFirst('http://', 'ws://');
-    return Uri.parse('$wsBase/ws/order-chat?tripId=${Uri.encodeComponent(tripId)}');
+    return Uri.parse('$_wsBaseUrl/ws/order-chat?tripId=${Uri.encodeComponent(tripId)}');
   }
 
   Uri ridesChannelWsUri() {
-    final wsBase = baseUrl.startsWith('https://')
-        ? baseUrl.replaceFirst('https://', 'wss://')
-        : baseUrl.replaceFirst('http://', 'ws://');
-    return Uri.parse('$wsBase/ws/order-chat?channel=rides');
+    return Uri.parse('$_wsBaseUrl/ws/order-chat?channel=rides');
   }
 
   Uri captainChannelWsUri(String captainId) {
-    final wsBase = baseUrl.startsWith('https://')
-        ? baseUrl.replaceFirst('https://', 'wss://')
-        : baseUrl.replaceFirst('http://', 'ws://');
-    return Uri.parse('$wsBase/ws/order-chat?channel=captain&captainId=${Uri.encodeComponent(captainId)}');
+    return Uri.parse('$_wsBaseUrl/ws/order-chat?channel=captain&captainId=${Uri.encodeComponent(captainId)}');
   }
 
   Future<Map<String, dynamic>> getOrderChat(String orderId) async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/orders/$orderId/chat'), headers: h));
-    return _decode(res);
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/orders/${Uri.encodeComponent(orderId)}/chat'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/orders/$orderId/chat');
   }
 
   Future<Map<String, dynamic>> sendOrderChatMessage(String orderId, Map<String, dynamic> payload) async {
     final res = await _sendWithAuth(
-      (h) => http.post(Uri.parse('$baseUrl/api/orders/$orderId/chat'), headers: h, body: jsonEncode(payload)),
+      (h) => http.post(_apiUri('/api/orders/${Uri.encodeComponent(orderId)}/chat'), headers: h, body: jsonEncode(payload)),
       json: true,
+      timeout: _uploadTimeout,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/orders/$orderId/chat');
   }
 
   Future<Map<String, dynamic>> getRideTracking(String tripId) async {
     final res = await _sendWithAuth(
-      (h) => http.get(Uri.parse('$baseUrl/api/mobile/rides/$tripId/tracking'), headers: h),
+      (h) => http.get(_apiUri('/api/mobile/rides/${Uri.encodeComponent(tripId)}/tracking'), headers: h),
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/mobile/rides/$tripId/tracking');
   }
 
   Future<Map<String, dynamic>> getRideChat(String tripId) async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/rides/$tripId/chat'), headers: h));
-    return _decode(res);
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/rides/${Uri.encodeComponent(tripId)}/chat'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/chat');
   }
 
   Future<Map<String, dynamic>> sendRideChatMessage(String tripId, Map<String, dynamic> payload) async {
     final res = await _sendWithAuth(
-      (h) => http.post(Uri.parse('$baseUrl/api/rides/$tripId/chat'), headers: h, body: jsonEncode(payload)),
+      (h) => http.post(_apiUri('/api/rides/${Uri.encodeComponent(tripId)}/chat'), headers: h, body: jsonEncode(payload)),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/rides/$tripId/chat');
   }
 
   Future<Map<String, dynamic>> finishTrip(
@@ -323,7 +406,7 @@ class OtlobhaCaptainApi {
   }) async {
     final res = await _sendWithAuth(
       (h) => http.post(
-        Uri.parse('$baseUrl/api/trips/$tripId/finish'),
+        _apiUri('/api/trips/${Uri.encodeComponent(tripId)}/finish'),
         headers: h,
         body: jsonEncode({
           'actor_role': actorRole,
@@ -333,7 +416,7 @@ class OtlobhaCaptainApi {
       ),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/trips/$tripId/finish');
   }
 
   Future<Map<String, dynamic>> cancelTrip(
@@ -345,7 +428,7 @@ class OtlobhaCaptainApi {
   }) async {
     final res = await _sendWithAuth(
       (h) => http.post(
-        Uri.parse('$baseUrl/api/trips/$tripId/cancel'),
+        _apiUri('/api/trips/${Uri.encodeComponent(tripId)}/cancel'),
         headers: h,
         body: jsonEncode({
           'actor_role': actorRole,
@@ -356,52 +439,187 @@ class OtlobhaCaptainApi {
       ),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/trips/$tripId/cancel');
   }
 
   Future<List<dynamic>> getProducts() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/products'), headers: h));
-    return _decodeList(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/products'), headers: h));
+    return _decodeList(res, endpointHint: '/api/products');
   }
 
   Future<List<dynamic>> getCategories() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/categories'), headers: h));
-    return _decodeList(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/categories'), headers: h));
+    return _decodeList(res, endpointHint: '/api/categories');
   }
 
   Future<Map<String, dynamic>> getInvoiceDesign() async {
-    final res = await _sendWithAuth((h) => http.get(Uri.parse('$baseUrl/api/invoice-design'), headers: h));
-    return _decode(res);
+    final res = await _sendWithAuth((h) => http.get(_apiUri('/api/invoice-design'), headers: h));
+    return _decode(res, endpointHint: '/api/invoice-design');
   }
 
   Future<List<dynamic>> getPosInvoices(String captainId) async {
     final res = await _sendWithAuth(
-      (h) => http.get(Uri.parse('$baseUrl/api/pos/invoices?captain_id=$captainId'), headers: h),
+      (h) => http.get(_apiUri('/api/pos/invoices', queryParameters: {'captain_id': captainId}), headers: h),
     );
-    return _decodeList(res);
+    return _decodeList(res, endpointHint: '/api/pos/invoices');
   }
 
   Future<Map<String, dynamic>> createPosInvoice(Map<String, dynamic> payload) async {
     final res = await _sendWithAuth(
-      (h) => http.post(Uri.parse('$baseUrl/api/pos/invoices'), headers: h, body: jsonEncode(payload)),
+      (h) => http.post(_apiUri('/api/pos/invoices'), headers: h, body: jsonEncode(payload)),
       json: true,
     );
-    return _decode(res);
+    return _decode(res, endpointHint: '/api/pos/invoices');
   }
 
-  Map<String, dynamic> _decode(http.Response res) {
-    final data = jsonDecode(res.body) as Map<String, dynamic>;
-    if (res.statusCode >= 400) {
-      throw Exception(data['error'] ?? 'حدث خطأ في الاتصال بالخادم');
-    }
-    return data;
+  static String _safeBodySnippet(String body) {
+    final singleLine = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final clipped = singleLine.length > 140 ? '${singleLine.substring(0, 140)}...' : singleLine;
+    return clipped.replaceAll(RegExp(r'(token|password|secret|cookie|authorization)[^,\s}&]*', caseSensitive: false), '[REDACTED]');
   }
 
-  List<dynamic> _decodeList(http.Response res) {
-    final data = jsonDecode(res.body);
-    if (res.statusCode >= 400) {
-      throw Exception((data is Map ? data['error'] : null) ?? 'حدث خطأ في الاتصال بالخادم');
+  static bool _looksLikeHtml(String trimmedBody, String contentType) {
+    final lowerCt = contentType.toLowerCase();
+    if (lowerCt.contains('text/html') || lowerCt.contains('application/xhtml')) {
+      return true;
     }
-    return data as List<dynamic>;
+    final lowerStart = trimmedBody.length > 32 ? trimmedBody.substring(0, 32).toLowerCase() : trimmedBody.toLowerCase();
+    return lowerStart.startsWith('<!doctype') ||
+        lowerStart.startsWith('<html') ||
+        lowerStart.startsWith('<head') ||
+        lowerStart.startsWith('<body') ||
+        lowerStart.startsWith('<?xml');
+  }
+
+  static String _friendlyStatusError(int statusCode, {String? fallbackError}) {
+    if (statusCode == 400) return fallbackError ?? 'البيانات المدخلة غير مكتملة أو غير صالحة';
+    if (statusCode == 401) return 'انتهت الجلسة أو بيانات الدخول غير صحيحة، يرجى تسجيل الدخول مرة أخرى';
+    if (statusCode == 403) return 'غير مصرح لك بتنفيذ هذا الإجراء';
+    if (statusCode == 404) return 'الخدمة المطلوبة غير متوفرة حاليًا على الخادم';
+    if (statusCode == 413) return 'حجم الصور أو المستندات المرفوعة كبير جدًا، يرجى تقليل حجم الصور والمحاولة مرة أخرى';
+    if (statusCode == 429) return 'تم إرسال طلبات كثيرة، يرجى الانتظار قليلًا ثم المحاولة مرة أخرى';
+    if (statusCode >= 500) return 'حدث خطأ مؤقت في الخادم، يرجى المحاولة مرة أخرى بعد قليل';
+    return fallbackError ?? 'حدث خطأ في الاتصال بالخادم';
+  }
+
+  static String _friendlyNonJsonError(int statusCode, String trimmedBody, String contentType, {String? fallbackError}) {
+    final lowerBody = trimmedBody.toLowerCase();
+    if (statusCode == 301 ||
+        statusCode == 302 ||
+        statusCode == 303 ||
+        statusCode == 307 ||
+        statusCode == 308 ||
+        lowerBody.contains('__cookie_check') ||
+        lowerBody.contains('302 found') ||
+        lowerBody.contains('accounts.google.com')) {
+      return 'تعذر الاتصال بخادم التطبيق لأن رابط الخادم الحالي محمي ببوابة تحقق متصفح وليس رابط API عام. يرجى تحديث عنوان الخادم وإعادة المحاولة.';
+    }
+    if (statusCode == 413) {
+      return 'حجم الصور أو المستندات المرفوعة كبير جدًا، يرجى تقليل حجم الصور والمحاولة مرة أخرى';
+    }
+    if (statusCode == 404) {
+      return 'تعذر العثور على الخدمة المطلوبة على الخادم، يرجى التأكد من تحديث التطبيق وعنوان الخادم';
+    }
+    if (statusCode == 502 || statusCode == 503 || statusCode == 504) {
+      return 'الخادم غير متاح مؤقتًا، يرجى المحاولة مرة أخرى بعد قليل';
+    }
+    if (statusCode >= 400) {
+      return _friendlyStatusError(statusCode, fallbackError: fallbackError);
+    }
+    return fallbackError ?? 'تعذر قراءة استجابة الخادم (الاستجابة ليست بصيغة بيانات صالحة). يرجى التأكد من عنوان الخادم والمحاولة مرة أخرى.';
+  }
+
+  /// Safely validates status code, Content-Type, and response body before decoding JSON.
+  /// Never calls jsonDecode on HTML responses and never exposes internal server details.
+  static dynamic parseJsonResponse(
+    http.Response res, {
+    String? endpointHint,
+    String? fallbackError,
+  }) {
+    final statusCode = res.statusCode;
+    final contentType = res.headers['content-type'] ?? '';
+    final rawBody = utf8.decode(res.bodyBytes, allowMalformed: true);
+    final trimmed = rawBody.trimLeft();
+    final endpoint = endpointHint ?? res.request?.url.path ?? 'unknown';
+
+    if (trimmed.isEmpty) {
+      if (statusCode >= 200 && statusCode < 300) {
+        return <String, dynamic>{};
+      }
+      debugPrint('[OtlobhaCaptainApi] Empty error response: $endpoint status=$statusCode contentType=$contentType');
+      throw ApiException(_friendlyStatusError(statusCode, fallbackError: fallbackError), statusCode: statusCode, contentType: contentType);
+    }
+
+    final isHtml = _looksLikeHtml(trimmed, contentType);
+    final isJsonHeader = contentType.toLowerCase().contains('application/json') || contentType.toLowerCase().contains('+json');
+    final looksLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+
+    if (isHtml || (!isJsonHeader && !looksLikeJson)) {
+      debugPrint(
+        '[OtlobhaCaptainApi] Non-JSON response: $endpoint status=$statusCode contentType="$contentType" preview="${_safeBodySnippet(trimmed)}"',
+      );
+      throw ApiException(
+        _friendlyNonJsonError(statusCode, trimmed, contentType, fallbackError: fallbackError),
+        statusCode: statusCode,
+        contentType: contentType,
+      );
+    }
+
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(trimmed);
+    } on FormatException {
+      debugPrint(
+        '[OtlobhaCaptainApi] Malformed JSON: $endpoint status=$statusCode contentType="$contentType" preview="${_safeBodySnippet(trimmed)}"',
+      );
+      throw ApiException(
+        _friendlyNonJsonError(statusCode, trimmed, contentType, fallbackError: fallbackError),
+        statusCode: statusCode,
+        contentType: contentType,
+      );
+    }
+
+    if (statusCode < 200 || statusCode >= 300) {
+      String? serverMsg;
+      if (decoded is Map) {
+        final rawErr = decoded['error'] ?? decoded['message'];
+        if (rawErr != null && rawErr.toString().trim().isNotEmpty) {
+          serverMsg = rawErr.toString().trim();
+        }
+      }
+      debugPrint('[OtlobhaCaptainApi] API error: $endpoint status=$statusCode contentType="$contentType"');
+      throw ApiException(
+        serverMsg ?? _friendlyStatusError(statusCode, fallbackError: fallbackError),
+        statusCode: statusCode,
+        contentType: contentType,
+      );
+    }
+
+    return decoded;
+  }
+
+  Map<String, dynamic> _decode(http.Response res, {String? endpointHint, String? fallbackError}) {
+    final data = parseJsonResponse(res, endpointHint: endpointHint, fallbackError: fallbackError);
+    if (data is Map<String, dynamic>) {
+      return data;
+    }
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    debugPrint('[OtlobhaCaptainApi] Expected JSON object on ${endpointHint ?? res.request?.url.path} status=${res.statusCode}');
+    throw ApiException(fallbackError ?? 'استجابة غير متوقعة من الخادم، يرجى المحاولة مرة أخرى', statusCode: res.statusCode);
+  }
+
+  List<dynamic> _decodeList(http.Response res, {String? endpointHint, String? fallbackError}) {
+    final data = parseJsonResponse(res, endpointHint: endpointHint, fallbackError: fallbackError);
+    if (data is List<dynamic>) {
+      return data;
+    }
+    debugPrint('[OtlobhaCaptainApi] Expected JSON list on ${endpointHint ?? res.request?.url.path} status=${res.statusCode}');
+    throw ApiException(fallbackError ?? 'استجابة غير متوقعة من الخادم، يرجى المحاولة مرة أخرى', statusCode: res.statusCode);
+  }
+
+  void _ensureSuccess(http.Response res, {String? endpointHint, String? fallbackError}) {
+    parseJsonResponse(res, endpointHint: endpointHint, fallbackError: fallbackError);
   }
 }

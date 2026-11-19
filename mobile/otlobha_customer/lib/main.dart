@@ -66,6 +66,8 @@ class CustomerShell extends StatefulWidget {
 class _CustomerShellState extends State<CustomerShell> {
   final OtlobhaCustomerApi api = OtlobhaCustomerApi();
   bool _isAuthenticated = false;
+  bool _isGuest = false;
+  bool _showAuthScreen = true;
   int _index = 0; // 0: الرئيسية | 1: العروض | 2: الخدمات (المنتصف) | 3: السلة | 4: الملف الشخصي
   String _serviceSubView = 'hub';
   bool _loading = true;
@@ -88,7 +90,7 @@ class _CustomerShellState extends State<CustomerShell> {
   void initState() {
     super.initState();
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
-      if (_isAuthenticated) _silentSync();
+      if (_isAuthenticated && !_isGuest) _silentSync();
     });
   }
 
@@ -234,7 +236,7 @@ class _CustomerShellState extends State<CustomerShell> {
 
   Future<void> _silentSync() async {
     try {
-      final data = await api.bootstrap();
+      final data = _isGuest ? await api.guestBootstrap() : await api.bootstrap();
       if (mounted) {
         setState(() {
           _bootstrap = data;
@@ -246,11 +248,13 @@ class _CustomerShellState extends State<CustomerShell> {
   Future<void> _loadData() async {
     setState(() => _loading = true);
     try {
-      final data = await api.bootstrap();
+      final data = _isGuest ? await api.guestBootstrap() : await api.bootstrap();
       if (mounted) {
         setState(() {
           _bootstrap = data;
-          _applyCustomerFromBootstrap(data);
+          if (!_isGuest) {
+            _applyCustomerFromBootstrap(data);
+          }
           final merchants = ((data['merchants'] as List?) ?? [])
               .where((m) => m['merchant_type'] != 'pharmacy')
               .toList();
@@ -260,9 +264,37 @@ class _CustomerShellState extends State<CustomerShell> {
           _loading = false;
         });
       }
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
     }
+  }
+
+  void _enterGuestMode() {
+    final wasAlreadyGuest = _isGuest && _bootstrap.isNotEmpty;
+    setState(() {
+      _isGuest = true;
+      _isAuthenticated = false;
+      _showAuthScreen = false;
+      if (!wasAlreadyGuest) {
+        _customerName = 'زائر اطلبها';
+        _customerEmail = '';
+        _customerPhone = '';
+      }
+    });
+    if (!wasAlreadyGuest) {
+      _loadData();
+    }
+  }
+
+  void _openAuthFromGuest() {
+    setState(() {
+      _showAuthScreen = true;
+    });
   }
 
   void _onQuickAdd(Map<String, dynamic> product, int delta) {
@@ -312,6 +344,13 @@ class _CustomerShellState extends State<CustomerShell> {
   }
 
   Future<void> _openNotifications() async {
+    if (_isGuest) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('سجّل الدخول لعرض إشعاراتك الخاصة')),
+      );
+      _openAuthFromGuest();
+      return;
+    }
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => NotificationsScreen(api: api)),
@@ -353,6 +392,8 @@ class _CustomerShellState extends State<CustomerShell> {
     api.logout();
     setState(() {
       _isAuthenticated = false;
+      _isGuest = false;
+      _showAuthScreen = true;
       _customerName = '';
       _customerEmail = '';
       _customerPhone = '';
@@ -579,13 +620,19 @@ class _CustomerShellState extends State<CustomerShell> {
                   SizedBox(
                     width: double.infinity,
                     child: TextButton.icon(
-                      style: TextButton.styleFrom(foregroundColor: Colors.red.shade700),
+                      style: TextButton.styleFrom(
+                        foregroundColor: _isGuest ? const Color(0xFFA92224) : Colors.red.shade700,
+                      ),
                       onPressed: () {
                         Navigator.pop(ctx);
-                        _logout();
+                        if (_isGuest) {
+                          _openAuthFromGuest();
+                        } else {
+                          _logout();
+                        }
                       },
-                      icon: const Icon(Icons.logout, size: 18),
-                      label: const Text('تسجيل الخروج'),
+                      icon: Icon(_isGuest ? Icons.login : Icons.logout, size: 18),
+                      label: Text(_isGuest ? 'تسجيل الدخول أو إنشاء حساب' : 'تسجيل الخروج'),
                     ),
                   ),
                 ],
@@ -599,21 +646,26 @@ class _CustomerShellState extends State<CustomerShell> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_isAuthenticated) {
+    if (_showAuthScreen || (!_isAuthenticated && !_isGuest)) {
       return Directionality(
         textDirection: TextDirection.rtl,
         child: CustomerOtpLoginScreen(
           api: api,
+          openedFromGuest: _isGuest,
+          onContinueAsGuest: _enterGuestMode,
           onVerified: (user) {
+            final wasGuest = _isGuest;
             setState(() {
               _isAuthenticated = true;
+              _isGuest = false;
+              _showAuthScreen = false;
               _customerEmail = user['email']?.toString() ?? '';
               _customerName = user['full_name']?.toString() ?? '';
               _customerPhone = user['phone']?.toString() ?? '';
               _addressLandmark = user['address_landmark']?.toString() ?? '';
               final zoneId = user['default_zone_id']?.toString() ?? '';
               if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
-              _index = 0;
+              if (!wasGuest) _index = 0;
             });
             _connectRidesWs();
             _loadData();
@@ -697,6 +749,8 @@ class _CustomerShellState extends State<CustomerShell> {
           if (mounted) setState(() => _index = 4);
         },
         onBrowseHome: () => setState(() => _index = 0),
+        isGuest: _isGuest,
+        onRequireAuth: _openAuthFromGuest,
       ),
       ProfileScreen(
         bootstrap: _bootstrap,
@@ -704,6 +758,8 @@ class _CustomerShellState extends State<CustomerShell> {
         customerName: _customerName,
         customerPhone: _customerPhone,
         addressLandmark: _addressLandmark,
+        isGuest: _isGuest,
+        onRequireAuth: _openAuthFromGuest,
         onSaveProfile: (n, p, a) async {
           final res = await api.updateProfile(
             fullName: n,
@@ -857,11 +913,13 @@ class _CustomerShellState extends State<CustomerShell> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          _customerName,
+                          _isGuest ? 'زائر اطلبها' : _customerName,
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
                         ),
                         Text(
-                          _customerPhone.isNotEmpty ? _customerPhone : _customerEmail,
+                          _isGuest
+                              ? 'تصفح كزائر · سجّل لإتمام الطلبات'
+                              : (_customerPhone.isNotEmpty ? _customerPhone : _customerEmail),
                           style: const TextStyle(color: Color(0xFFFDE68A), fontSize: 11),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -958,6 +1016,13 @@ class _CustomerShellState extends State<CustomerShell> {
               subtitle: const Text('أرسل استفسارك وتابع رد الإدارة', style: TextStyle(fontSize: 11)),
               onTap: () {
                 Navigator.pop(context);
+                if (_isGuest) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('يرجى تسجيل الدخول أولًا للتواصل مع الدعم الفني')),
+                  );
+                  _openAuthFromGuest();
+                  return;
+                }
                 Navigator.push(
                   context,
                   MaterialPageRoute(
@@ -1005,11 +1070,18 @@ class _CustomerShellState extends State<CustomerShell> {
             ),
             ListTile(
               dense: true,
-              leading: Icon(Icons.logout, color: Colors.red.shade700),
-              title: Text('تسجيل الخروج', style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.bold)),
+              leading: Icon(_isGuest ? Icons.login : Icons.logout, color: _isGuest ? const Color(0xFFA92224) : Colors.red.shade700),
+              title: Text(
+                _isGuest ? 'تسجيل الدخول أو إنشاء حساب' : 'تسجيل الخروج',
+                style: TextStyle(color: _isGuest ? const Color(0xFFA92224) : Colors.red.shade700, fontWeight: FontWeight.bold),
+              ),
               onTap: () {
                 Navigator.pop(context);
-                _logout();
+                if (_isGuest) {
+                  _openAuthFromGuest();
+                } else {
+                  _logout();
+                }
               },
             ),
           ],

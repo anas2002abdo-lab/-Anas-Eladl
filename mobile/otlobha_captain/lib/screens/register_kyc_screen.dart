@@ -42,15 +42,23 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
   };
 
   Future<void> _pickPhoto(String key) async {
-    final file = await _picker.pickImage(source: ImageSource.camera, maxWidth: 1000, imageQuality: 78);
-    if (file != null) {
-      final bytes = await file.readAsBytes();
-      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+    try {
+      final file = await _picker.pickImage(source: ImageSource.camera, maxWidth: 1000, imageQuality: 78);
+      if (file != null) {
+        final bytes = await file.readAsBytes();
+        final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+        if (mounted) {
+          setState(() {
+            _capturedBytes[key] = bytes;
+            _capturedDataUrls[key] = dataUrl;
+          });
+        }
+      }
+    } catch (_) {
       if (mounted) {
-        setState(() {
-          _capturedBytes[key] = bytes;
-          _capturedDataUrls[key] = dataUrl;
-        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر فتح الكاميرا أو قراءة الصورة، تأكد من منح صلاحية الكاميرا وحاول مرة أخرى')),
+        );
       }
     }
   }
@@ -105,13 +113,20 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
         },
       });
       if (mounted) {
+        final newId = res['id']?.toString() ?? '';
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('تم إرسال التسجيل وصور المركبة والمستندات للمراجعة')),
         );
-        widget.onRegistered(res['id']);
+        if (newId.isNotEmpty) {
+          widget.onRegistered(newId);
+        }
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
     } finally {
       if (mounted) setState(() => _submitting = false);
     }

@@ -18,16 +18,16 @@ for APP in otlobha_customer otlobha_captain; do
   if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
     if [ -f android/app/src/main/AndroidManifest.xml ]; then cp android/app/src/main/AndroidManifest.xml "/tmp/${APP}_manifest.xml"; fi
     if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist "/tmp/${APP}_info.plist"; fi
-    if [ -f test/widget_test.dart ]; then cp test/widget_test.dart "/tmp/${APP}_widget_test.dart"; fi
+    if [ -d test ]; then rm -rf "/tmp/${APP}_test" && cp -r test "/tmp/${APP}_test"; fi
     if [ -f analysis_options.yaml ]; then cp analysis_options.yaml "/tmp/${APP}_analysis_options.yaml"; fi
 
     flutter create . --project-name "$APP" --org com.otlobha --platforms=android,ios
 
     if [ -f "/tmp/${APP}_manifest.xml" ]; then cp "/tmp/${APP}_manifest.xml" android/app/src/main/AndroidManifest.xml; fi
     if [ -f "/tmp/${APP}_info.plist" ]; then cp "/tmp/${APP}_info.plist" ios/Runner/Info.plist; fi
-    if [ -f "/tmp/${APP}_widget_test.dart" ]; then
-      mkdir -p test
-      cp "/tmp/${APP}_widget_test.dart" test/widget_test.dart
+    if [ -d "/tmp/${APP}_test" ]; then
+      rm -rf test
+      cp -r "/tmp/${APP}_test" test
     fi
     if [ -f "/tmp/${APP}_analysis_options.yaml" ]; then cp "/tmp/${APP}_analysis_options.yaml" analysis_options.yaml; fi
   fi

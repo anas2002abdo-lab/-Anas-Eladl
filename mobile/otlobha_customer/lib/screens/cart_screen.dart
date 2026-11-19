@@ -21,6 +21,8 @@ class CartScreen extends StatefulWidget {
   final VoidCallback onClearCart;
   final Future<void> Function() onOrderPlaced;
   final VoidCallback onBrowseHome;
+  final bool isGuest;
+  final VoidCallback? onRequireAuth;
 
   const CartScreen({
     super.key,
@@ -43,6 +45,8 @@ class CartScreen extends StatefulWidget {
     required this.onClearCart,
     required this.onOrderPlaced,
     required this.onBrowseHome,
+    this.isGuest = false,
+    this.onRequireAuth,
   });
 
   @override
@@ -363,6 +367,13 @@ class _CartScreenState extends State<CartScreen> {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أضف منتجًا واحدًا على الأقل للسلة')));
                     return;
                   }
+                  if (widget.isGuest) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('يرجى تسجيل الدخول أو إنشاء حساب لإتمام الطلب (سلتك محفوظة)')),
+                    );
+                    widget.onRequireAuth?.call();
+                    return;
+                  }
                   if (widget.orderChannel != 'catalog' && _freeTextCtrl.text.trim().isEmpty) {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اكتب تفاصيل الطلب الحر')));
                     return;
@@ -440,11 +451,17 @@ class _CartScreenState extends State<CartScreen> {
                         ),
                       );
                     }
+                  } catch (e) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+                      );
+                    }
                   } finally {
                     if (mounted) setState(() => _submitting = false);
                   }
                 },
-          child: Text(_submitting ? 'جاري الإرسال...' : 'تأكيد وإرسال الطلب الآن'),
+          child: Text(_submitting ? 'جاري الإرسال...' : (widget.isGuest ? 'سجّل الدخول لإتمام الطلب' : 'تأكيد وإرسال الطلب الآن')),
         ),
       ],
     );

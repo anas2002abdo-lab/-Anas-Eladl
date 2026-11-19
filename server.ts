@@ -8,6 +8,7 @@ import { createServer as createViteServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   db,
+  dbPath,
   ensureBootstrapSuperAdmin,
   hashPassword,
   initDatabase,
@@ -17,6 +18,7 @@ import {
   uid,
   verifyPassword,
 } from './src/server/db.ts';
+import { startSqlitePersistSync } from './src/server/sqlitePersist.ts';
 import {
   ALL_ADMIN_ROLES,
   authenticateWsUpgrade,
@@ -178,7 +180,7 @@ function getClientIp(req: express.Request): string {
   return fwd || req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 function parseLocalizedNumber(val: unknown): number {
   if (typeof val === 'number') return val;
@@ -4743,6 +4745,73 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
 });
 
 // 11. Mobile Customer & Captain Endpoints (Flutter + Live Preview)
+app.get('/api/mobile/customer/guest-bootstrap', (_req, res) => {
+  const services = db.prepare('SELECT * FROM service_configs').all() as Array<Record<string, unknown>>;
+  const zones = db.prepare('SELECT * FROM service_zones WHERE is_active = 1').all() as Array<Record<string, unknown>>;
+  const merchants = db.prepare("SELECT * FROM merchants WHERE verification_status = 'approved'").all() as Array<Record<string, unknown>>;
+  const categories = db
+    .prepare(
+      `SELECT c.*
+       FROM categories c
+       LEFT JOIN merchants m ON m.id = c.merchant_id
+       WHERE c.is_active = 1
+         AND (c.merchant_id IS NULL OR m.verification_status = 'approved')
+       ORDER BY c.is_offers_section DESC, c.sort_order ASC`
+    )
+    .all() as Array<Record<string, unknown>>;
+  const products = db
+    .prepare(
+      `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, c.is_offers_section as category_is_offers
+       FROM products p
+       JOIN merchants m ON m.id = p.merchant_id
+       JOIN categories c ON c.id = p.category_id
+       WHERE p.is_available = 1
+         AND m.verification_status = 'approved'
+         AND c.is_active = 1`
+    )
+    .all() as Array<Record<string, unknown>>;
+  const market = db.prepare("SELECT * FROM market_listings WHERE moderation_status = 'approved' ORDER BY created_at DESC").all() as Array<Record<string, unknown>>;
+  const coupons = db
+    .prepare('SELECT id, code, applicable_services_json, discount_type, discount_value, max_discount, min_order_amount, is_active FROM coupons WHERE is_active = 1')
+    .all() as Array<Record<string, unknown>>;
+
+  res.json({
+    is_guest: true,
+    customer: null,
+    services: services.map((s) => ({ ...s, is_enabled: Boolean(s.is_enabled) })),
+    zones,
+    merchants: merchants.map(sanitizePublicMerchantRow),
+    categories: categories.map((c) => ({
+      ...c,
+      is_active: Boolean(c.is_active),
+      is_offers_section: Boolean(c.is_offers_section),
+    })),
+    products: products.map((p) => {
+      const hasDiscount = p.sale_price !== null && p.sale_price !== undefined && Number(p.sale_price) < Number(p.base_price);
+      return {
+        ...p,
+        is_offer: Boolean(p.is_offer) || Boolean(p.category_is_offers) || hasDiscount,
+        requires_prescription: Boolean(p.requires_prescription),
+        is_available: Boolean(p.is_available),
+      };
+    }),
+    market: market.map((m) => ({ ...m, is_negotiable: Boolean(m.is_negotiable) })),
+    orders: [],
+    trips: [],
+    parcels: [],
+    ratings: [],
+    pending_ratings: [],
+    coupons: coupons.map((c) => ({
+      ...c,
+      is_active: Boolean(c.is_active),
+      applicable_services: JSON.parse(String(c.applicable_services_json || '[]')),
+    })),
+    wallet: { available_balance: 0, pending_balance: 0, is_frozen: false },
+    notifications: [],
+    payment_settings: getPaymentSettingsRow(),
+  });
+});
+
 app.get('/api/mobile/customer/bootstrap', (req, res) => {
   const auth = optionalAuth(req);
   if (!auth) {
@@ -6397,35 +6466,81 @@ function normalizeEmail(raw: string): string | null {
   return clean;
 }
 
+function resolveSmtpConfig(): {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  pass: string;
+  from: string;
+} | null {
+  const smtpUser = String(process.env.SMTP_USER || '').trim();
+  let smtpPass = String(process.env.SMTP_PASS || '').trim();
+  if (!smtpUser || !smtpPass) {
+    return null;
+  }
+
+  const rawHost = String(process.env.SMTP_HOST || '').trim();
+  const isValidAsciiHost = /^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/.test(rawHost);
+  if (rawHost && !isValidAsciiHost) {
+    console.warn('[Email OTP SMTP Config] Invalid SMTP_HOST value detected; falling back to smtp.gmail.com');
+  }
+  const host = isValidAsciiHost ? rawHost : 'smtp.gmail.com';
+
+  if (host.toLowerCase() === 'smtp.gmail.com' && /^[a-z]{4}(?: [a-z]{4}){3}$/i.test(smtpPass)) {
+    smtpPass = smtpPass.replace(/\s+/g, '');
+  }
+
+  const parsedPort = Number(String(process.env.SMTP_PORT || '').trim());
+  const port = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 465;
+
+  const rawSecure = String(process.env.SMTP_SECURE || '').trim().toLowerCase();
+  const secure = port === 465 ? rawSecure !== 'false' : rawSecure === 'true';
+
+  const rawFrom = String(process.env.SMTP_FROM || '').trim();
+  const from = rawFrom
+    ? rawFrom.includes('@')
+      ? rawFrom
+      : `${rawFrom} <${smtpUser}>`
+    : `اطلبها – Otlobha <${smtpUser}>`;
+
+  return { host, port, secure, user: smtpUser, pass: smtpPass, from };
+}
+
 async function dispatchEmailOtp(
   email: string,
-  code: string
+  code: string,
+  options?: { subject?: string; intro?: string; plainText?: string }
 ): Promise<{ ok: true; delivery_channel: 'smtp' } | { ok: false; error: string }> {
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-  if (!smtpUser || !smtpPass) {
+  const smtpCfg = resolveSmtpConfig();
+  if (!smtpCfg) {
     return {
       ok: false,
       error: 'خدمة إرسال البريد الإلكتروني (Gmail SMTP) غير مفعلة حاليًا — يرجى التحقق من إعدادات البريد.',
     };
   }
+  const mailSubject = options?.subject || `رمز تأكيد الدخول إلى اطلبها: ${code}`;
+  const mailIntro =
+    options?.intro || 'مرحبًا بك، استخدم رمز التأكيد التالي لإتمام تسجيل الدخول (صالح لمدة 5 دقائق):';
+  const mailText =
+    options?.plainText || `رمز تأكيد الدخول لمنصة اطلبها هو: ${code} (صالح لمدة 5 دقائق).`;
   try {
     const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: Number(process.env.SMTP_PORT || 465),
-      secure: (process.env.SMTP_SECURE ?? 'true') !== 'false',
-      auth: { user: smtpUser, pass: smtpPass },
+      host: smtpCfg.host,
+      port: smtpCfg.port,
+      secure: smtpCfg.secure,
+      auth: { user: smtpCfg.user, pass: smtpCfg.pass },
     });
     await transporter.sendMail({
-      from: process.env.SMTP_FROM || `اطلبها – Otlobha <${smtpUser}>`,
+      from: smtpCfg.from,
       to: email,
-      subject: `رمز تأكيد الدخول إلى اطلبها: ${code}`,
-      text: `رمز تأكيد الدخول لمنصة اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
+      subject: mailSubject,
+      text: mailText,
       html: `
         <div dir="rtl" style="font-family: Arial, sans-serif; padding: 20px; background: #f8fafc;">
           <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 14px; padding: 24px; border: 1px solid #e2e8f0;">
             <h2 style="color: #0f172a; margin-top: 0;">اطلبها – المنزلة</h2>
-            <p style="color: #334155; font-size: 14px;">مرحبًا بك، استخدم رمز التأكيد التالي لإتمام تسجيل الدخول (صالح لمدة 5 دقائق):</p>
+            <p style="color: #334155; font-size: 14px;">${mailIntro}</p>
             <div style="text-align: center; margin: 20px 0; padding: 14px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px; font-size: 28px; font-weight: bold; letter-spacing: 6px; color: #ea580c;">
               ${code}
             </div>
@@ -6678,10 +6793,529 @@ app.post('/api/auth/otp/verify', (req, res) => {
   res.json({
     ok: true,
     role: 'customer',
-    user: {
-      ...customerRow,
-      is_email_verified: Boolean(customerRow.is_email_verified),
+    user: sanitizeCustomerRow(customerRow),
+    tokens: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
     },
+  });
+});
+
+function sanitizeCustomerRow(row: Record<string, unknown>) {
+  const { password_hash: _pw, ...rest } = row;
+  return {
+    ...rest,
+    is_email_verified: Boolean(row.is_email_verified),
+    has_password: Boolean(String(row.password_hash || '').trim()),
+  };
+}
+
+app.post('/api/mobile/customer/register/request-otp', async (req, res) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_reg_otp_ip:${ip}`, 10, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات إرسال رمز التحقق، يرجى المحاولة بعد قليل' });
+  }
+
+  const {
+    full_name,
+    email: rawEmail,
+    phone: rawPhone,
+    password,
+  } = (req.body || {}) as {
+    full_name?: string;
+    email?: string;
+    phone?: string;
+    password?: string;
+  };
+
+  const cleanName = String(full_name || '').trim();
+  const email = normalizeEmail(String(rawEmail || ''));
+  const cleanPhone = String(rawPhone || '').trim();
+  const cleanPass = String(password || '');
+
+  if (cleanName.length < 2 || cleanName.length > 100) {
+    return res.status(400).json({ error: 'يرجى إدخال الاسم الكامل (حرفين على الأقل)' });
+  }
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+  if (cleanPhone && !/^[+0-9\s-]{8,18}$/.test(cleanPhone)) {
+    return res.status(400).json({ error: 'رقم الهاتف غير صالح' });
+  }
+  if (cleanPass.length < 6) {
+    return res.status(400).json({ error: 'كلمة المرور يجب أن لا تقل عن 6 أحرف' });
+  }
+
+  const dupEmail = db.prepare('SELECT id FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | { id: string }
+    | undefined;
+  if (dupEmail) {
+    return res.status(409).json({ error: 'هذا البريد الإلكتروني مسجل بالفعل، يمكنك تسجيل الدخول أو استعادة كلمة السر' });
+  }
+
+  const regRole = 'customer_register';
+  const recentReqCount = (
+    db
+      .prepare(
+        "SELECT COUNT(*) as c FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-10 minutes')"
+      )
+      .get(email, regRole) as { c: number }
+  ).c;
+  const recentFailCount = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
+      )
+      .get(email, regRole) as { s: number }
+  ).s;
+  if (recentReqCount >= 3 || recentFailCount >= 10) {
+    return res.status(429).json({ error: 'تم إرسال عدة رموز تأكيد لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق' });
+  }
+
+  const code = String(crypto.randomInt(100000, 1000000));
+  const codeHash = sha256Otp(email, regRole, code);
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const otpId = uid('otp');
+
+  db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE LOWER(email) = LOWER(?) AND role = ? AND is_used = 0').run(
+    email,
+    regRole
+  );
+  db.prepare(`
+    INSERT INTO email_otp_codes (id, email, role, code_hash, attempts, is_used, expires_at)
+    VALUES (?, ?, ?, ?, 0, 0, ?)
+  `).run(otpId, email, regRole, codeHash, expiresAt);
+
+  const mailRes = await dispatchEmailOtp(email, code, {
+    subject: `رمز تأكيد البريد الإلكتروني – اطلبها: ${code}`,
+    intro: `مرحبًا ${cleanName}، أدخل الرمز التالي خلال 5 دقائق لتأكيد بريدك الإلكتروني وإتمام إنشاء حسابك في تطبيق اطلبها:`,
+    plainText: `رمز تأكيد البريد الإلكتروني لإنشاء حسابك في اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
+  });
+  if (!mailRes.ok) {
+    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpId);
+    return res.status(503).json({ error: mailRes.error });
+  }
+
+  recordAuditLog({
+    actor_name: cleanName,
+    actor_role: 'customer',
+    action: 'CUSTOMER_REGISTER_OTP_SENT',
+    entity_type: 'customers',
+    entity_id: otpId,
+    details: `إرسال رمز تأكيد البريد لإنشاء حساب عميل جديد (${email}) عبر Gmail SMTP`,
+  });
+
+  return res.json({
+    ok: true,
+    email,
+    message: `تم إرسال رمز تأكيد البريد المكون من 6 أرقام إلى ${email}`,
+    expires_in_sec: 300,
+    delivery_channel: mailRes.delivery_channel,
+  });
+});
+
+app.post('/api/mobile/customer/register', (req, res) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_reg_ip:${ip}`, 15, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات التسجيل، يرجى المحاولة بعد قليل' });
+  }
+
+  const {
+    full_name,
+    email: rawEmail,
+    phone: rawPhone,
+    password,
+    code: rawCode,
+    address_landmark,
+    default_zone_id,
+  } = (req.body || {}) as {
+    full_name?: string;
+    email?: string;
+    phone?: string;
+    password?: string;
+    code?: string;
+    address_landmark?: string;
+    default_zone_id?: string;
+  };
+
+  const cleanName = String(full_name || '').trim();
+  const email = normalizeEmail(String(rawEmail || ''));
+  const cleanPhone = String(rawPhone || '').trim();
+  const cleanPass = String(password || '');
+  const cleanCode = String(rawCode || '').trim();
+  const cleanAddr = String(address_landmark || '').trim();
+  const cleanZone = String(default_zone_id || '').trim() || 'zn_city_center';
+
+  if (cleanName.length < 2 || cleanName.length > 100) {
+    return res.status(400).json({ error: 'يرجى إدخال الاسم الكامل (حرفين على الأقل)' });
+  }
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+  if (cleanPhone && !/^[+0-9\s-]{8,18}$/.test(cleanPhone)) {
+    return res.status(400).json({ error: 'رقم الهاتف غير صالح' });
+  }
+  if (cleanPass.length < 6) {
+    return res.status(400).json({ error: 'كلمة المرور يجب أن لا تقل عن 6 أحرف' });
+  }
+  if (!/^[0-9]{6}$/.test(cleanCode)) {
+    return res.status(400).json({ error: 'يرجى إدخال رمز تأكيد البريد الإلكتروني المكون من 6 أرقام' });
+  }
+
+  const dupEmail = db.prepare('SELECT id FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | { id: string }
+    | undefined;
+  if (dupEmail) {
+    return res.status(409).json({ error: 'هذا البريد الإلكتروني مسجل بالفعل، يمكنك تسجيل الدخول أو استعادة كلمة السر' });
+  }
+
+  const regRole = 'customer_register';
+  const cumulativeFailures = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
+      )
+      .get(email, regRole) as { s: number }
+  ).s;
+  if (cumulativeFailures >= 10) {
+    return res.status(429).json({ error: 'تم حظر التحقق مؤقتًا بسبب تكرار المحاولات الخاطئة، حاول بعد 15 دقيقة' });
+  }
+
+  const otpRow = db
+    .prepare(
+      'SELECT * FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND is_used = 0 ORDER BY created_at DESC LIMIT 1'
+    )
+    .get(email, regRole) as
+    | { id: string; code_hash: string; attempts: number; expires_at: string }
+    | undefined;
+
+  if (!otpRow) {
+    return res.status(400).json({ error: 'لا يوجد رمز تأكيد نشط لهذا البريد، يرجى طلب رمز تأكيد جديد أولًا' });
+  }
+  if (Date.now() > Date.parse(otpRow.expires_at)) {
+    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpRow.id);
+    return res.status(400).json({ error: 'انتهت صلاحية رمز التأكيد، اطلب رمزًا جديدًا' });
+  }
+  if (otpRow.attempts >= 5) {
+    return res.status(429).json({ error: 'تم تجاوز الحد الأقصى لمحاولات الرمز، اطلب رمزًا جديدًا' });
+  }
+
+  const expectedHash = sha256Otp(email, regRole, cleanCode);
+  if (!timingSafeHexEquals(expectedHash, String(otpRow.code_hash || ''))) {
+    db.prepare('UPDATE email_otp_codes SET attempts = attempts + 1 WHERE id = ?').run(otpRow.id);
+    return res.status(401).json({ error: 'رمز تأكيد البريد غير صحيح، راجع بريدك وحاول مرة أخرى' });
+  }
+
+  db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpRow.id);
+
+  const custId = uid('cust');
+  const pwHash = hashPassword(cleanPass);
+  db.prepare(`
+    INSERT INTO customers (id, email, phone, password_hash, full_name, status, default_zone_id, address_landmark, is_email_verified)
+    VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 1)
+  `).run(custId, email, cleanPhone || null, pwHash, cleanName, cleanZone, cleanAddr);
+
+  const customerRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(custId) as Record<string, unknown>;
+  const tokens = issueSessionForUser(req, res, {
+    userId: custId,
+    role: 'customer',
+    actorType: 'customer',
+    tokenVersion: Number(customerRow.token_version || 0),
+  });
+
+  recordAuditLog({
+    actor_name: cleanName,
+    actor_role: 'customer',
+    action: 'CUSTOMER_REGISTER',
+    entity_type: 'customers',
+    entity_id: custId,
+    details: `إنشاء حساب عميل جديد بعد تأكيد البريد الإلكتروني: ${cleanName} (${email})`,
+  });
+
+  return res.status(201).json({
+    ok: true,
+    role: 'customer',
+    user: sanitizeCustomerRow(customerRow),
+    tokens: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
+    },
+  });
+});
+
+app.post('/api/mobile/customer/login', (req, res) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_login_ip:${ip}`, 20, 5 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات تسجيل الدخول، يرجى الانتظار قليلًا' });
+  }
+
+  const { identifier, email, phone, password } = (req.body || {}) as {
+    identifier?: string;
+    email?: string;
+    phone?: string;
+    password?: string;
+  };
+  const rawIdent = String(identifier || email || phone || '').trim();
+  const cleanPass = String(password || '');
+
+  if (!rawIdent || !cleanPass) {
+    return res.status(400).json({ error: 'يرجى إدخال البريد الإلكتروني أو رقم الهاتف وكلمة المرور' });
+  }
+
+  let customerRow: Record<string, unknown> | undefined;
+  if (rawIdent.includes('@')) {
+    const normalized = normalizeEmail(rawIdent);
+    if (normalized) {
+      customerRow = db.prepare('SELECT * FROM customers WHERE LOWER(email) = LOWER(?)').get(normalized) as
+        | Record<string, unknown>
+        | undefined;
+    }
+  } else {
+    customerRow = db.prepare('SELECT * FROM customers WHERE phone = ?').get(rawIdent) as
+      | Record<string, unknown>
+      | undefined;
+  }
+
+  if (!customerRow) {
+    return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
+  }
+  if (String(customerRow.status || 'active') === 'suspended') {
+    return res.status(403).json({ error: 'هذا الحساب موقوف حاليًا، يرجى التواصل مع الدعم الفني' });
+  }
+
+  const storedHash = String(customerRow.password_hash || '').trim();
+  if (!storedHash) {
+    return res.status(400).json({
+      error: 'هذا الحساب مسجل بدون كلمة مرور — اضغط على "هل نسيت كلمة السر؟" لتعيين كلمة مرور جديدة أو استخدم رمز البريد',
+    });
+  }
+  if (!verifyPassword(cleanPass, storedHash)) {
+    return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
+  }
+
+  db.prepare("UPDATE customers SET last_login_at = datetime('now') WHERE id = ?").run(String(customerRow.id));
+  const freshRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(customerRow.id)) as Record<string, unknown>;
+
+  const tokens = issueSessionForUser(req, res, {
+    userId: String(freshRow.id),
+    role: 'customer',
+    actorType: 'customer',
+    tokenVersion: Number(freshRow.token_version || 0),
+  });
+
+  recordAuditLog({
+    actor_name: String(freshRow.full_name || 'عميل اطلبها'),
+    actor_role: 'customer',
+    action: 'CUSTOMER_PASSWORD_LOGIN',
+    entity_type: 'customers',
+    entity_id: String(freshRow.id),
+    details: `تسجيل دخول العميل ${String(freshRow.full_name)} بكلمة المرور`,
+  });
+
+  return res.json({
+    ok: true,
+    role: 'customer',
+    user: sanitizeCustomerRow(freshRow),
+    tokens: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
+    },
+  });
+});
+
+app.post('/api/mobile/customer/forgot-password/request', async (req, res) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_reset_req_ip:${ip}`, 10, 5 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز الحد المسموح لطلبات استعادة كلمة المرور، حاول بعد قليل' });
+  }
+
+  const { email: rawEmail } = (req.body || {}) as { email?: string };
+  const email = normalizeEmail(String(rawEmail || ''));
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+
+  const customer = db.prepare('SELECT id, full_name, status FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | { id: string; full_name: string; status: string }
+    | undefined;
+  if (!customer) {
+    return res.status(404).json({ error: 'لا يوجد حساب عميل مسجل بهذا البريد الإلكتروني' });
+  }
+  if (customer.status === 'suspended') {
+    return res.status(403).json({ error: 'هذا الحساب موقوف حاليًا، يرجى التواصل مع الدعم الفني' });
+  }
+
+  const resetRole = 'customer_reset';
+  const recentReqCount = (
+    db
+      .prepare(
+        "SELECT COUNT(*) as c FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-10 minutes')"
+      )
+      .get(email, resetRole) as { c: number }
+  ).c;
+  const recentFailCount = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
+      )
+      .get(email, resetRole) as { s: number }
+  ).s;
+  if (recentReqCount >= 3 || recentFailCount >= 10) {
+    return res.status(429).json({ error: 'تم إرسال عدة رموز استعادة لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق' });
+  }
+
+  const code = String(crypto.randomInt(100000, 1000000));
+  const codeHash = sha256Otp(email, resetRole, code);
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const otpId = uid('otp');
+
+  db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE LOWER(email) = LOWER(?) AND role = ? AND is_used = 0').run(email, resetRole);
+  db.prepare(`
+    INSERT INTO email_otp_codes (id, email, role, code_hash, attempts, is_used, expires_at)
+    VALUES (?, ?, ?, ?, 0, 0, ?)
+  `).run(otpId, email, resetRole, codeHash, expiresAt);
+
+  const mailRes = await dispatchEmailOtp(email, code, {
+    subject: `رمز إعادة تعيين كلمة المرور – اطلبها: ${code}`,
+    intro: 'تلقينا طلبًا لإعادة تعيين كلمة المرور لحسابك في تطبيق اطلبها. أدخل الرمز التالي خلال 5 دقائق لتعيين كلمة مرور جديدة:',
+    plainText: `رمز إعادة تعيين كلمة المرور لحسابك في اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
+  });
+  if (!mailRes.ok) {
+    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpId);
+    return res.status(503).json({ error: mailRes.error });
+  }
+
+  recordAuditLog({
+    actor_name: customer.full_name || email,
+    actor_role: 'customer',
+    action: 'CUSTOMER_PASSWORD_RESET_OTP_SENT',
+    entity_type: 'customers',
+    entity_id: customer.id,
+    details: `إرسال رمز إعادة تعيين كلمة المرور للعميل (${email}) عبر Gmail SMTP`,
+  });
+
+  return res.json({
+    ok: true,
+    email,
+    message: 'تم إرسال رمز إعادة تعيين كلمة المرور المكون من 6 أرقام إلى بريدك الإلكتروني.',
+    expires_in_sec: 300,
+    delivery_channel: mailRes.delivery_channel,
+  });
+});
+
+app.post('/api/mobile/customer/forgot-password/reset', (req, res) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_reset_verify_ip:${ip}`, 15, 5 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات إعادة التعيين المسموح بها، يرجى المحاولة لاحقًا' });
+  }
+
+  const { email: rawEmail, code: rawCode, new_password } = (req.body || {}) as {
+    email?: string;
+    code?: string;
+    new_password?: string;
+  };
+  const email = normalizeEmail(String(rawEmail || ''));
+  if (!email) {
+    return res.status(400).json({ error: 'البريد الإلكتروني غير صحيح' });
+  }
+  const cleanCode = String(rawCode || '').trim();
+  if (!/^[0-9]{6}$/.test(cleanCode)) {
+    return res.status(400).json({ error: 'أدخل رمز التحقق المكون من 6 أرقام' });
+  }
+  const cleanNewPass = String(new_password || '');
+  if (cleanNewPass.length < 6) {
+    return res.status(400).json({ error: 'كلمة المرور الجديدة يجب أن لا تقل عن 6 أحرف' });
+  }
+
+  const resetRole = 'customer_reset';
+  const cumulativeFailures = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
+      )
+      .get(email, resetRole) as { s: number }
+  ).s;
+  if (cumulativeFailures >= 10) {
+    return res.status(429).json({ error: 'تم حظر التحقق مؤقتًا بسبب تكرار المحاولات الخاطئة، حاول بعد 15 دقيقة' });
+  }
+
+  const otpRow = db
+    .prepare(
+      'SELECT * FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND is_used = 0 ORDER BY created_at DESC LIMIT 1'
+    )
+    .get(email, resetRole) as
+    | { id: string; code_hash: string; attempts: number; expires_at: string }
+    | undefined;
+
+  if (!otpRow) {
+    return res.status(400).json({ error: 'لا يوجد رمز استعادة نشط لهذا البريد، اطلب رمزًا جديدًا' });
+  }
+  if (Date.now() > Date.parse(otpRow.expires_at)) {
+    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpRow.id);
+    return res.status(400).json({ error: 'انتهت صلاحية رمز الاستعادة، اطلب رمزًا جديدًا' });
+  }
+  if (otpRow.attempts >= 5) {
+    return res.status(429).json({ error: 'تم تجاوز الحد الأقصى للمحاولات، اطلب رمز استعادة جديد' });
+  }
+
+  const expectedHash = sha256Otp(email, resetRole, cleanCode);
+  if (!timingSafeHexEquals(expectedHash, String(otpRow.code_hash || ''))) {
+    db.prepare('UPDATE email_otp_codes SET attempts = attempts + 1 WHERE id = ?').run(otpRow.id);
+    return res.status(401).json({ error: 'رمز التحقق غير صحيح، راجع بريدك وحاول مرة أخرى' });
+  }
+
+  const customer = db.prepare('SELECT * FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | Record<string, unknown>
+    | undefined;
+  if (!customer) {
+    return res.status(404).json({ error: 'حساب العميل غير موجود' });
+  }
+
+  db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpRow.id);
+  const newHash = hashPassword(cleanNewPass);
+  const nextVersion = Number(customer.token_version || 0) + 1;
+  db.prepare(
+    "UPDATE customers SET password_hash = ?, token_version = ?, is_email_verified = 1, last_login_at = datetime('now') WHERE id = ?"
+  ).run(newHash, nextVersion, String(customer.id));
+
+  const updated = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(customer.id)) as Record<string, unknown>;
+  const tokens = issueSessionForUser(req, res, {
+    userId: String(updated.id),
+    role: 'customer',
+    actorType: 'customer',
+    tokenVersion: nextVersion,
+  });
+
+  recordAuditLog({
+    actor_name: String(updated.full_name || email),
+    actor_role: 'customer',
+    action: 'CUSTOMER_PASSWORD_RESET_COMPLETED',
+    entity_type: 'customers',
+    entity_id: String(updated.id),
+    details: `إعادة تعيين كلمة المرور للعميل (${email}) بنجاح`,
+  });
+
+  return res.json({
+    ok: true,
+    message: 'تم تحديث كلمة المرور بنجاح وتسجيل دخولك',
+    role: 'customer',
+    user: sanitizeCustomerRow(updated),
     tokens: {
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
@@ -8419,10 +9053,61 @@ async function startServer() {
     });
   });
 
+  // Ensure every unmatched /api route returns structured JSON (never index.html or Express HTML 404)
+  app.use('/api', (req, res) => {
+    console.warn(`[API 404] ${req.method} ${req.originalUrl}`);
+    return res.status(404).json({
+      error: 'المسار المطلوب غير موجود على الخادم',
+    });
+  });
+
+  // Ensure every Express/body-parser/runtime error on /api returns structured JSON (never HTML)
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!req.path.startsWith('/api')) {
+      return next(err);
+    }
+    const e = err as { status?: number; statusCode?: number; type?: string; message?: string };
+    const status = typeof e?.status === 'number' ? e.status : typeof e?.statusCode === 'number' ? e.statusCode : 500;
+    console.error(`[API Error] ${req.method} ${req.originalUrl} -> status=${status} type=${e?.type || 'error'}`);
+    if (e?.type === 'entity.too.large' || status === 413) {
+      return res.status(413).json({
+        error: 'حجم الصور أو البيانات المرفوعة أكبر من الحد المسموح، يرجى تقليل حجم الصور والمحاولة مرة أخرى',
+      });
+    }
+    if (status === 400 && (e?.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
+      return res.status(400).json({
+        error: 'صيغة البيانات المرسلة غير صالحة',
+      });
+    }
+    return res.status(status >= 400 && status < 600 ? status : 500).json({
+      error: 'حدث خطأ مؤقت في الخادم، يرجى المحاولة مرة أخرى بعد قليل',
+    });
+  });
+
   const distPath = path.resolve(process.cwd(), 'dist');
   const fs = await import('fs');
 
-  app.use(express.static(distPath));
+  const setNoCacheHeaders = (res: express.Response) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  };
+
+  app.use(
+    express.static(distPath, {
+      setHeaders: (res, filePath) => {
+        const base = path.basename(filePath);
+        if (
+          base === 'index.html' ||
+          base === 'sw.js' ||
+          base === 'registerSW.js' ||
+          base === 'manifest.webmanifest'
+        ) {
+          setNoCacheHeaders(res);
+        }
+      },
+    })
+  );
 
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
@@ -8430,6 +9115,7 @@ async function startServer() {
     }
     const indexPath = path.join(distPath, 'index.html');
     if (fs.existsSync(indexPath)) {
+      setNoCacheHeaders(res);
       return res.sendFile(indexPath);
     }
     next();
@@ -8447,8 +9133,44 @@ async function startServer() {
     }
   }
 
+  const sqlitePersist = startSqlitePersistSync(db, dbPath);
+
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Otlobha Full-Stack & WebSocket Server running on http://0.0.0.0:${PORT}`);
+  });
+
+  let shuttingDown = false;
+  const gracefulShutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Shutdown] Received ${signal}; draining HTTP server and flushing SQLite snapshot...`);
+    sqlitePersist.stop();
+    try {
+      await new Promise<void>((resolve) => {
+        httpServer.close(() => resolve());
+        setTimeout(resolve, 3500);
+      });
+    } catch {
+      // ignore close errors
+    }
+    try {
+      await sqlitePersist.flushNow(`shutdown:${signal}`, { force: true, createRollingBackup: false });
+    } catch {
+      // already logged inside flushNow
+    }
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => {
+    gracefulShutdown('SIGTERM').catch(() => process.exit(1));
+  });
+  process.on('SIGINT', () => {
+    gracefulShutdown('SIGINT').catch(() => process.exit(1));
   });
 }
 

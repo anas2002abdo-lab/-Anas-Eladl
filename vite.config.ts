@@ -70,10 +70,31 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/api\//, /^\/ws\//],
+          globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
+          navigateFallback: null,
           runtimeCaching: [
+            {
+              urlPattern: ({ request, url }) =>
+                request.mode === 'navigate' &&
+                !url.pathname.startsWith('/api/') &&
+                !url.pathname.startsWith('/ws/'),
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'pages-cache',
+                networkTimeoutSeconds: 3,
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24,
+                },
+                cacheableResponse: {
+                  statuses: [200],
+                },
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

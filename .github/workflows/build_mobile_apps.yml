@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       api_base_url:
-        description: "Backend API Base URL"
-        required: true
-        default: "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"
+        description: "Public Backend API Base URL (e.g. https://otlobha-backend-xxxx.a.run.app)"
+        required: false
+        default: ""
   push:
     paths:
       - "mobile/**"
@@ -46,16 +46,16 @@ jobs:
           if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
             if [ -f android/app/src/main/AndroidManifest.xml ]; then cp android/app/src/main/AndroidManifest.xml /tmp/cust_manifest.xml; fi
             if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/cust_info.plist; fi
-            if [ -f test/widget_test.dart ]; then cp test/widget_test.dart /tmp/cust_widget_test.dart; fi
+            if [ -d test ]; then rm -rf /tmp/cust_test && cp -r test /tmp/cust_test; fi
             if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/cust_analysis_options.yaml; fi
 
             flutter create . --project-name otlobha_customer --org com.otlobha --platforms=android,ios
 
             if [ -f /tmp/cust_manifest.xml ]; then cp /tmp/cust_manifest.xml android/app/src/main/AndroidManifest.xml; fi
             if [ -f /tmp/cust_info.plist ]; then cp /tmp/cust_info.plist ios/Runner/Info.plist; fi
-            if [ -f /tmp/cust_widget_test.dart ]; then
-              mkdir -p test
-              cp /tmp/cust_widget_test.dart test/widget_test.dart
+            if [ -d /tmp/cust_test ]; then
+              rm -rf test
+              cp -r /tmp/cust_test test
             fi
             if [ -f /tmp/cust_analysis_options.yaml ]; then cp /tmp/cust_analysis_options.yaml analysis_options.yaml; fi
           fi
@@ -73,7 +73,12 @@ jobs:
           dart run flutter_launcher_icons
           flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter test
-          flutter build apk --release --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
+          RESOLVED_API_URL="${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}"
+          echo "Using Customer API_BASE_URL=$RESOLVED_API_URL"
+          if echo "$RESOLVED_API_URL" | grep -qE 'ais-dev-|ais-pre-'; then
+            echo "::warning::API_BASE_URL points to an AI Studio preview URL protected by Cookie Check. Set repository variable OTLOBHA_API_BASE_URL to your public Cloud Run URL."
+          fi
+          flutter build apk --release --dart-define="API_BASE_URL=$RESOLVED_API_URL"
 
           test -s build/app/outputs/flutter-apk/app-release.apk
           ls -lh build/app/outputs/flutter-apk/app-release.apk
@@ -87,16 +92,16 @@ jobs:
           if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
             if [ -f android/app/src/main/AndroidManifest.xml ]; then cp android/app/src/main/AndroidManifest.xml /tmp/cap_manifest.xml; fi
             if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/cap_info.plist; fi
-            if [ -f test/widget_test.dart ]; then cp test/widget_test.dart /tmp/cap_widget_test.dart; fi
+            if [ -d test ]; then rm -rf /tmp/cap_test && cp -r test /tmp/cap_test; fi
             if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/cap_analysis_options.yaml; fi
 
             flutter create . --project-name otlobha_captain --org com.otlobha --platforms=android,ios
 
             if [ -f /tmp/cap_manifest.xml ]; then cp /tmp/cap_manifest.xml android/app/src/main/AndroidManifest.xml; fi
             if [ -f /tmp/cap_info.plist ]; then cp /tmp/cap_info.plist ios/Runner/Info.plist; fi
-            if [ -f /tmp/cap_widget_test.dart ]; then
-              mkdir -p test
-              cp /tmp/cap_widget_test.dart test/widget_test.dart
+            if [ -d /tmp/cap_test ]; then
+              rm -rf test
+              cp -r /tmp/cap_test test
             fi
             if [ -f /tmp/cap_analysis_options.yaml ]; then cp /tmp/cap_analysis_options.yaml analysis_options.yaml; fi
           fi
@@ -114,7 +119,12 @@ jobs:
           dart run flutter_launcher_icons
           flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter test
-          flutter build apk --release --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
+          RESOLVED_API_URL="${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}"
+          echo "Using Captain API_BASE_URL=$RESOLVED_API_URL"
+          if echo "$RESOLVED_API_URL" | grep -qE 'ais-dev-|ais-pre-'; then
+            echo "::warning::API_BASE_URL points to an AI Studio preview URL protected by Cookie Check. Set repository variable OTLOBHA_API_BASE_URL to your public Cloud Run URL."
+          fi
+          flutter build apk --release --dart-define="API_BASE_URL=$RESOLVED_API_URL"
 
           test -s build/app/outputs/flutter-apk/app-release.apk
           ls -lh build/app/outputs/flutter-apk/app-release.apk
@@ -150,19 +160,20 @@ jobs:
             cd "$GITHUB_WORKSPACE/mobile/$app"
             if [ ! -d ios/Runner.xcodeproj ]; then
               if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/info.plist; fi
-              if [ -f test/widget_test.dart ]; then cp test/widget_test.dart /tmp/widget_test.dart; fi
+              if [ -d test ]; then rm -rf /tmp/app_test && cp -r test /tmp/app_test; fi
               if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/analysis_options.yaml; fi
 
               flutter create . --project-name "$app" --org com.otlobha --platforms=ios
 
               if [ -f /tmp/info.plist ]; then cp /tmp/info.plist ios/Runner/Info.plist; fi
-              if [ -f /tmp/widget_test.dart ]; then
-                mkdir -p test
-                cp /tmp/widget_test.dart test/widget_test.dart
+              if [ -d /tmp/app_test ]; then
+                rm -rf test
+                cp -r /tmp/app_test test
               fi
               if [ -f /tmp/analysis_options.yaml ]; then cp /tmp/analysis_options.yaml analysis_options.yaml; fi
             fi
             flutter pub get
             dart run flutter_launcher_icons
-            flutter build ios --release --no-codesign --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
+            RESOLVED_API_URL="${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}"
+            flutter build ios --release --no-codesign --dart-define="API_BASE_URL=$RESOLVED_API_URL"
           done

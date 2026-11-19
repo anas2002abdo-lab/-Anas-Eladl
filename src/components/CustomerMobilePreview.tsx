@@ -14,6 +14,7 @@ import {
   Home,
   ImagePlus,
   LayoutGrid,
+  LogIn,
   LogOut,
   MapPin,
   Menu,
@@ -52,7 +53,7 @@ import { parseLocalizedNumber, sanitizeDecimalInput } from '../lib/num.ts';
 import { OrderChatPage } from './OrderChatPage.tsx';
 import { TripChatPage } from './TripChatPage.tsx';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
-import { EmailOtpLoginCard } from './EmailOtpLoginCard.tsx';
+import { CustomerAuthPortal } from './CustomerAuthPortal.tsx';
 import type {
   CaptainRatingRecord,
   CategoryRecord,
@@ -100,6 +101,8 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       return null;
     }
   });
+  const [isGuest, setIsGuest] = useState<boolean>(false);
+  const [showAuthScreen, setShowAuthScreen] = useState<boolean>(false);
   const [tab, setTab] = useState<BottomTab>('home');
   const [serviceView, setServiceView] = useState<ServiceSubView>('hub');
   const [showInbox, setShowInbox] = useState<boolean>(false);
@@ -157,6 +160,8 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       full_name: String(user.full_name || 'عميل اطلبها'),
     };
     setCustomerSession(sess);
+    setIsGuest(false);
+    setShowAuthScreen(false);
     setCustomerName(sess.full_name);
     setCustomerPhone(sess.phone || '');
     if (user.default_zone_id) setSelectedZoneId(String(user.default_zone_id));
@@ -168,9 +173,37 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     }
   };
 
+  const handleContinueAsGuest = () => {
+    setIsGuest(true);
+    setShowAuthScreen(false);
+    if (!customerName) setCustomerName(isAr ? 'زائر اطلبها' : 'Guest');
+    onNotify(
+      isAr
+        ? 'أنت تتصفح الآن كزائر — يمكنك استعراض المتاجر والعروض وإضافة للسلة ثم التسجيل عند الطلب'
+        : 'Browsing as guest'
+    );
+  };
+
+  const openAuthFromGuest = () => {
+    setShowAuthScreen(true);
+  };
+
+  const requireCustomerAccount = (actionAr: string, actionEn: string): boolean => {
+    if (customerSession) return false;
+    onNotify(
+      isAr
+        ? `يرجى تسجيل الدخول أو إنشاء حساب ${actionAr} (سلتك محفوظة)`
+        : `Please sign in or create an account to ${actionEn}`
+    );
+    setShowAuthScreen(true);
+    return true;
+  };
+
   const handleCustomerLogout = () => {
     api.logoutSession().catch(() => {});
     setCustomerSession(null);
+    setIsGuest(false);
+    setShowAuthScreen(false);
     setActiveChatOrderId(null);
     setActiveChatTripId(null);
     setOrders([]);
@@ -262,7 +295,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
   const loadBootstrap = async (isAuthed = Boolean(customerSession)) => {
     const [boot, allOrders, notifs] = await Promise.all([
-      api.getCustomerBootstrap(),
+      isAuthed ? api.getCustomerBootstrap() : api.getCustomerGuestBootstrap(),
       isAuthed ? api.getOrders().catch(() => []) : Promise.resolve([]),
       isAuthed ? api.getMobileNotifications('customer').catch(() => []) : Promise.resolve([]),
     ]);
@@ -348,6 +381,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
   const handleCreateSupportTicket = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (requireCustomerAccount('للتواصل مع الدعم الفني', 'contact support')) return;
     if ((!newTicketSubject.trim() && !newTicketMessage.trim()) || sendingSupport) return;
     setSendingSupport(true);
     try {
@@ -425,17 +459,20 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   }, []);
 
   useEffect(() => {
-    if (!customerSession) return;
-    loadBootstrap(true).catch(() => {});
-    loadCustomerSupportTickets(false);
+    if (!customerSession && !isGuest) return;
+    const isAuthed = Boolean(customerSession);
+    loadBootstrap(isAuthed).catch(() => {});
+    if (isAuthed) {
+      loadCustomerSupportTickets(false);
+    }
 
-    const onFocus = () => loadBootstrap(true).catch(() => {});
+    const onFocus = () => loadBootstrap(isAuthed).catch(() => {});
     window.addEventListener('focus', onFocus);
 
     return () => {
       window.removeEventListener('focus', onFocus);
     };
-  }, [customerSession?.id]);
+  }, [customerSession?.id, isGuest]);
 
   const calcAirKm = (lat1: number, lng1: number, lat2: number, lng2: number) => {
     const rad = (d: number) => (d * Math.PI) / 180;
@@ -716,6 +753,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleSubmitStoreOrder = async () => {
+    if (requireCustomerAccount('لإتمام وإرسال الطلب', 'place an order')) return;
     if (orderChannel === 'catalog' && cartItems.length === 0) {
       onNotify(isAr ? 'أضف منتجًا واحدًا على الأقل إلى السلة' : 'Add at least one item to cart');
       return;
@@ -887,6 +925,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleSubmitRx = async () => {
+    if (requireCustomerAccount('لإرسال الروشتة للصيدلية', 'submit a prescription')) return;
     if (!pharmacyId) return;
     if (!rxText.trim() && !rxImageUrl) {
       onNotify(isAr ? 'اكتب اسم الدواء أو أرفق صورة للروشتة أولًا' : 'Enter medication details or attach Rx photo');
@@ -979,6 +1018,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleBookRide = async () => {
+    if (requireCustomerAccount('لحجز مشوار', 'book a ride')) return;
     if (!rideDropoff.trim() && rideDropoffLat === null) {
       onNotify(isAr ? 'اكتب مكان التوصيل أو حدده على الخريطة GPS أولًا' : 'Enter or pick destination');
       return;
@@ -1050,6 +1090,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleRequestParcel = async () => {
+    if (requireCustomerAccount('لإرسال طرد', 'send a parcel')) return;
     try {
       const customFeeNum = parcelCustomFee.trim() ? parseLocalizedNumber(parcelCustomFee) : NaN;
       const res = await api.requestParcel({
@@ -1081,6 +1122,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
   const handleCreateMarket = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (requireCustomerAccount('لنشر إعلان في سوق اطلبها', 'post a listing')) return;
     if (!mktTitle.trim()) return;
     const zone = zones.find((z) => z.id === selectedZoneId);
     await api.createMarketListing({
@@ -1197,12 +1239,13 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     }, 240);
   };
 
-  if (!customerSession) {
+  if (showAuthScreen || (!customerSession && !isGuest)) {
     return (
-      <EmailOtpLoginCard
-        role="customer"
+      <CustomerAuthPortal
         lang={lang}
+        openedFromGuest={isGuest}
         onVerified={handleCustomerVerified}
+        onContinueAsGuest={handleContinueAsGuest}
         onNotify={onNotify}
       />
     );
@@ -1705,9 +1748,15 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                     className="w-10 h-10 rounded-xl bg-white object-contain p-0.5 shrink-0"
                   />
                   <div className="min-w-0">
-                    <p className="text-sm font-bold truncate">{customerName}</p>
-                    <p className="text-[11px] text-amber-200 truncate" dir="ltr">
-                      {customerPhone || customerSession.email}
+                    <p className="text-sm font-bold truncate">
+                      {customerSession ? customerName : isAr ? 'زائر اطلبها' : 'Guest'}
+                    </p>
+                    <p className="text-[11px] text-amber-200 truncate" dir={customerSession ? 'ltr' : 'rtl'}>
+                      {customerSession
+                        ? customerPhone || customerSession.email
+                        : isAr
+                        ? 'تصفح كزائر · سجّل لإتمام الطلبات'
+                        : 'Guest browsing mode'}
                     </p>
                   </div>
                 </div>
@@ -1847,12 +1896,28 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                     type="button"
                     onClick={() => {
                       setShowSideDrawer(false);
-                      handleCustomerLogout();
+                      if (customerSession) {
+                        handleCustomerLogout();
+                      } else {
+                        openAuthFromGuest();
+                      }
                     }}
-                    className="w-full inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 rounded-xl text-xs font-bold"
+                    className={`w-full inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold ${
+                      customerSession
+                        ? 'bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700'
+                        : 'bg-[#A92224] hover:bg-[#8E1B1D] text-white'
+                    }`}
                   >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>{isAr ? 'تسجيل الخروج' : 'Sign Out'}</span>
+                    {customerSession ? <LogOut className="w-3.5 h-3.5" /> : <LogIn className="w-3.5 h-3.5" />}
+                    <span>
+                      {customerSession
+                        ? isAr
+                          ? 'تسجيل الخروج'
+                          : 'Sign Out'
+                        : isAr
+                        ? 'تسجيل الدخول أو إنشاء حساب'
+                        : 'Sign In or Sign Up'}
+                    </span>
                   </button>
                 </div>
               </div>
@@ -4241,103 +4306,127 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         {tab === 'profile' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             <div className="lg:col-span-4 space-y-4">
-              {/* Customer Data Form */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-2xl bg-slate-900 text-white flex items-center justify-center">
-                    <User className="w-5 h-5" />
+              {/* Customer Data Form or Guest Sign-In Prompt */}
+              {!customerSession ? (
+                <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-3">
+                  <div className="w-14 h-14 mx-auto rounded-2xl bg-amber-50 text-[#A92224] flex items-center justify-center">
+                    <User className="w-7 h-7" />
                   </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">{customerName}</h3>
-                    <p className="text-xs text-slate-500 tabular-nums flex flex-wrap items-center gap-1.5">
-                      <span dir="ltr" className="font-mono-num">{customerSession.email}</span>
-                      <span className="inline-flex items-center gap-0.5 text-teal-700 font-semibold">
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>{isAr ? 'موثق بالبريد ✓' : 'Verified ✓'}</span>
-                      </span>
-                    </p>
-                  </div>
-                </div>
-                <div className="space-y-2.5 pt-2 border-t border-slate-100">
-                  <div>
-                    <label className="text-[11px] font-semibold text-slate-600 block mb-1">الاسم</label>
-                    <input
-                      type="text"
-                      value={customerName}
-                      onChange={(e) => setCustomerName(e.target.value)}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-semibold text-slate-600 block mb-1">البريد الإلكتروني المؤكد</label>
-                    <input
-                      type="email"
-                      dir="ltr"
-                      readOnly
-                      value={customerSession.email}
-                      className="w-full px-3 py-2 border border-slate-200 bg-slate-50 text-slate-600 rounded-xl text-xs font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-semibold text-slate-600 block mb-1">رقم الهاتف للتوصيل</label>
-                    <input
-                      type="tel"
-                      dir="ltr"
-                      value={customerPhone}
-                      onChange={(e) => setCustomerPhone(e.target.value)}
-                      placeholder="01xxxxxxxxx"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs tabular-nums font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-semibold text-slate-600 block mb-1">العنوان التفصيلي في المنزلة</label>
-                    <input
-                      type="text"
-                      value={addressLandmark}
-                      onChange={(e) => setAddressLandmark(e.target.value)}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
-                    />
-                  </div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    {isAr ? 'أنت تتصفح التطبيق كزائر' : 'You are browsing as a guest'}
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    {isAr
+                      ? 'سجّل دخولك أو أنشئ حسابًا جديدًا لإتمام الطلبات، متابعة الشات و GPS مع الطيار، والاستفادة من المحفظة والعروض.'
+                      : 'Sign in or create an account to place orders, track captains live, and access your wallet.'}
+                  </p>
                   <button
                     type="button"
-                    disabled={savingProfile}
-                    onClick={async () => {
-                      if (!customerName.trim() || customerName.trim().length < 2) {
-                        onNotify(isAr ? 'أدخل الاسم (حرفين على الأقل)' : 'Enter valid name');
-                        return;
-                      }
-                      setSavingProfile(true);
-                      try {
-                        const res = await api.updateCustomerProfile({
-                          full_name: customerName.trim(),
-                          phone: customerPhone.trim(),
-                          address_landmark: addressLandmark.trim(),
-                          default_zone_id: selectedZoneId,
-                        });
-                        if (res.customer) {
-                          handleCustomerVerified(res.customer);
+                    onClick={openAuthFromGuest}
+                    className="w-full inline-flex items-center justify-center gap-2 py-3 bg-[#A92224] hover:bg-[#8E1B1D] text-white rounded-xl text-xs sm:text-sm font-bold min-h-[44px]"
+                  >
+                    <LogIn className="w-4 h-4" />
+                    <span>{isAr ? 'تسجيل الدخول أو إنشاء حساب' : 'Sign In or Create Account'}</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-slate-900 text-white flex items-center justify-center">
+                      <User className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">{customerName}</h3>
+                      <p className="text-xs text-slate-500 tabular-nums flex flex-wrap items-center gap-1.5">
+                        <span dir="ltr" className="font-mono-num">{customerSession.email}</span>
+                        <span className="inline-flex items-center gap-0.5 text-teal-700 font-semibold">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>{isAr ? 'موثق بالبريد ✓' : 'Verified ✓'}</span>
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="space-y-2.5 pt-2 border-t border-slate-100">
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-1">الاسم</label>
+                      <input
+                        type="text"
+                        value={customerName}
+                        onChange={(e) => setCustomerName(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-1">البريد الإلكتروني المؤكد</label>
+                      <input
+                        type="email"
+                        dir="ltr"
+                        readOnly
+                        value={customerSession.email}
+                        className="w-full px-3 py-2 border border-slate-200 bg-slate-50 text-slate-600 rounded-xl text-xs font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-1">رقم الهاتف للتوصيل</label>
+                      <input
+                        type="tel"
+                        dir="ltr"
+                        value={customerPhone}
+                        onChange={(e) => setCustomerPhone(e.target.value)}
+                        placeholder="01xxxxxxxxx"
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs tabular-nums font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-600 block mb-1">العنوان التفصيلي في المنزلة</label>
+                      <input
+                        type="text"
+                        value={addressLandmark}
+                        onChange={(e) => setAddressLandmark(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      disabled={savingProfile}
+                      onClick={async () => {
+                        if (!customerName.trim() || customerName.trim().length < 2) {
+                          onNotify(isAr ? 'أدخل الاسم (حرفين على الأقل)' : 'Enter valid name');
+                          return;
                         }
-                        onNotify(isAr ? 'تم حفظ بياناتك في حسابك بنجاح ✓' : 'Profile saved');
-                      } catch (err) {
-                        onNotify((err as Error).message);
-                      } finally {
-                        setSavingProfile(false);
-                      }
-                    }}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white rounded-xl text-xs font-bold min-h-[42px]"
-                  >
-                    <span>{savingProfile ? (isAr ? 'جاري الحفظ...' : 'Saving...') : isAr ? 'حفظ بياناتي' : 'Save Profile'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCustomerLogout}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold min-h-[42px]"
-                  >
-                    <LogOut className="w-4 h-4" />
-                    <span>{isAr ? 'تسجيل الخروج وتغيير البريد' : 'Sign Out'}</span>
-                  </button>
+                        setSavingProfile(true);
+                        try {
+                          const res = await api.updateCustomerProfile({
+                            full_name: customerName.trim(),
+                            phone: customerPhone.trim(),
+                            address_landmark: addressLandmark.trim(),
+                            default_zone_id: selectedZoneId,
+                          });
+                          if (res.customer) {
+                            handleCustomerVerified(res.customer);
+                          }
+                          onNotify(isAr ? 'تم حفظ بياناتك في حسابك بنجاح ✓' : 'Profile saved');
+                        } catch (err) {
+                          onNotify((err as Error).message);
+                        } finally {
+                          setSavingProfile(false);
+                        }
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white rounded-xl text-xs font-bold min-h-[42px]"
+                    >
+                      <span>{savingProfile ? (isAr ? 'جاري الحفظ...' : 'Saving...') : isAr ? 'حفظ بياناتي' : 'Save Profile'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCustomerLogout}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold min-h-[42px]"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      <span>{isAr ? 'تسجيل الخروج وتغيير الحساب' : 'Sign Out'}</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Wallet Card */}
               <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">

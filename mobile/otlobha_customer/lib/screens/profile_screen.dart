@@ -13,6 +13,8 @@ class ProfileScreen extends StatefulWidget {
   final void Function(String tripId) onOpenTripChat;
   final Future<void> Function(Map<String, dynamic> target) onRateCaptain;
   final VoidCallback onLogout;
+  final bool isGuest;
+  final VoidCallback? onRequireAuth;
 
   const ProfileScreen({
     super.key,
@@ -28,6 +30,8 @@ class ProfileScreen extends StatefulWidget {
     required this.onOpenTripChat,
     required this.onRateCaptain,
     required this.onLogout,
+    this.isGuest = false,
+    this.onRequireAuth,
   });
 
   @override
@@ -80,6 +84,61 @@ class _ProfileScreenState extends State<ProfileScreen> {
         }
       }
       return null;
+    }
+
+    if (widget.isGuest) {
+      return ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                children: [
+                  const CircleAvatar(
+                    radius: 32,
+                    backgroundColor: Color(0xFFFFF7ED),
+                    foregroundColor: Color(0xFFA92224),
+                    child: Icon(Icons.person_outline, size: 34),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'أنت تتصفح التطبيق كزائر',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF0F172A)),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'سجّل دخولك أو أنشئ حسابًا جديدًا لإتمام الطلبات، متابعة الشات و GPS مع الطيار، والاستفادة من المحفظة والعروض.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12.5, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFA92224),
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size.fromHeight(48),
+                      ),
+                      onPressed: widget.onRequireAuth,
+                      icon: const Icon(Icons.login),
+                      label: const Text('تسجيل الدخول أو إنشاء حساب'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: widget.onOpenOffers,
+            icon: const Icon(Icons.local_offer_outlined, size: 18),
+            label: const Text('تصفح العروض والكوبونات'),
+          ),
+        ],
+      );
     }
 
     return ListView(

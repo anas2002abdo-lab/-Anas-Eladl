@@ -258,6 +258,54 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getCustomerBootstrap: () => request<any>('/api/mobile/customer/bootstrap'),
+  getCustomerGuestBootstrap: () => request<any>('/api/mobile/customer/guest-bootstrap'),
+  requestCustomerRegisterOtp: (body: {
+    full_name: string;
+    email: string;
+    phone?: string;
+    password: string;
+  }) =>
+    request<{ ok: boolean; email: string; message?: string; expires_in_sec: number }>(
+      '/api/mobile/customer/register/request-otp',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+  registerCustomer: (body: {
+    full_name: string;
+    email: string;
+    phone?: string;
+    password: string;
+    code: string;
+    address_landmark?: string;
+    default_zone_id?: string;
+  }) =>
+    request<{ ok: boolean; role: 'customer'; user: any; tokens?: any }>('/api/mobile/customer/register', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  loginCustomer: (identifier: string, password: string) =>
+    request<{ ok: boolean; role: 'customer'; user: any; tokens?: any }>('/api/mobile/customer/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier, password }),
+    }),
+  requestCustomerPasswordReset: (email: string) =>
+    request<{ ok: boolean; email: string; message?: string; expires_in_sec: number }>(
+      '/api/mobile/customer/forgot-password/request',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }
+    ),
+  resetCustomerPassword: (email: string, code: string, new_password: string) =>
+    request<{ ok: boolean; message?: string; role: 'customer'; user: any; tokens?: any }>(
+      '/api/mobile/customer/forgot-password/reset',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, code, new_password }),
+      }
+    ),
   updateCustomerProfile: (body: {
     full_name?: string;
     phone?: string;
