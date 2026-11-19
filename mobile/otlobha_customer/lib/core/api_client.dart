@@ -51,6 +51,54 @@ class OtlobhaCustomerApi {
     return clean;
   }
 
+  static final RegExp _invisibleUnicodeRe = RegExp(r'[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]');
+  static final RegExp _emailFormatRe = RegExp(
+    r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$",
+  );
+  static const Map<String, String> _arabicIndicDigits = {
+    '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4',
+    '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
+    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
+    '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
+  };
+
+  /// Mirrors `src/shared/email.ts` identically so mobile & backend never disagree on valid emails.
+  static String sanitizeEmailInput(String raw) {
+    final buf = StringBuffer();
+    for (final rune in raw.runes) {
+      final ch = String.fromCharCode(rune);
+      buf.write(_arabicIndicDigits[ch] ?? ch);
+    }
+    return buf
+        .toString()
+        .replaceAll(RegExp(r'[\uFF20＠]'), '@')
+        .replaceAll(RegExp(r'[\uFF0E\u3002\uFF61．。｡]'), '.')
+        .replaceAll(_invisibleUnicodeRe, '')
+        .replaceAll(RegExp(r'[\s\u00A0]+'), '')
+        .toLowerCase();
+  }
+
+  static String? normalizeEmail(String raw) {
+    final clean = sanitizeEmailInput(raw);
+    if (clean.isEmpty || clean.length > 254) return null;
+    final atIdx = clean.indexOf('@');
+    if (atIdx <= 0 || atIdx != clean.lastIndexOf('@')) return null;
+
+    final local = clean.substring(0, atIdx);
+    final domain = clean.substring(atIdx + 1);
+    if (local.length > 64 || domain.length < 3 || domain.length > 253) return null;
+    if (local.startsWith('.') || local.endsWith('.') || local.contains('..')) return null;
+    if (domain.contains('..')) return null;
+
+    final lastDot = domain.lastIndexOf('.');
+    if (lastDot < 0) return null;
+    final tld = domain.substring(lastDot + 1);
+    if (tld.length < 2 || !RegExp(r'^[a-z0-9-]+$').hasMatch(tld)) return null;
+
+    if (!_emailFormatRe.hasMatch(clean)) return null;
+    return clean;
+  }
+
   static String get _resolvedBaseUrl => normalizeBaseUrl(baseUrl);
 
   static Uri _apiUri(String path, {Map<String, String>? queryParameters}) {
@@ -216,13 +264,14 @@ class OtlobhaCustomerApi {
     String? phone,
     required String password,
   }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
     final res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/register/request-otp'),
         headers: _headers(json: true, includeAuth: false),
         body: jsonEncode({
           'full_name': fullName.trim(),
-          'email': email.trim(),
+          'email': cleanEmail,
           if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
           'password': password,
         }),
@@ -232,7 +281,7 @@ class OtlobhaCustomerApi {
       debugPrint(
         '[OtlobhaCustomerApi] /api/mobile/customer/register/request-otp returned 404; falling back to /api/auth/otp/request',
       );
-      final fallback = await requestOtp(email.trim(), role: 'customer');
+      final fallback = await requestOtp(cleanEmail, role: 'customer');
       return <String, dynamic>{
         ...fallback,
         'auth_flow': 'legacy_otp',
@@ -255,9 +304,10 @@ class OtlobhaCustomerApi {
     String? defaultZoneId,
     bool useLegacyOtpFlow = false,
   }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
     if (useLegacyOtpFlow) {
       return verifyOtp(
-        email.trim(),
+        cleanEmail,
         code.trim(),
         role: 'customer',
         fullName: fullName.trim(),
@@ -272,7 +322,7 @@ class OtlobhaCustomerApi {
         headers: _headers(json: true, includeAuth: false),
         body: jsonEncode({
           'full_name': fullName.trim(),
-          'email': email.trim(),
+          'email': cleanEmail,
           if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
           'password': password,
           'code': code.trim(),
@@ -288,7 +338,7 @@ class OtlobhaCustomerApi {
         '[OtlobhaCustomerApi] /api/mobile/customer/register returned 404; falling back to /api/auth/otp/verify',
       );
       return verifyOtp(
-        email.trim(),
+        cleanEmail,
         code.trim(),
         role: 'customer',
         fullName: fullName.trim(),
@@ -311,12 +361,16 @@ class OtlobhaCustomerApi {
     required String identifier,
     required String password,
   }) async {
+    final rawIdent = identifier.trim();
+    final cleanIdent = (rawIdent.contains('@') || rawIdent.contains('＠'))
+        ? (normalizeEmail(rawIdent) ?? sanitizeEmailInput(rawIdent))
+        : rawIdent;
     final res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/login'),
         headers: _headers(json: true, includeAuth: false),
         body: jsonEncode({
-          'identifier': identifier.trim(),
+          'identifier': cleanIdent,
           'password': password,
         }),
       ),
@@ -333,11 +387,12 @@ class OtlobhaCustomerApi {
   }
 
   Future<Map<String, dynamic>> requestPasswordReset(String email) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
     final res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/forgot-password/request'),
         headers: _headers(json: true, includeAuth: false),
-        body: jsonEncode({'email': email.trim()}),
+        body: jsonEncode({'email': cleanEmail}),
       ),
     );
     return _decode(res, endpointHint: '/api/mobile/customer/forgot-password/request');
@@ -348,12 +403,13 @@ class OtlobhaCustomerApi {
     required String code,
     required String newPassword,
   }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
     final res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/forgot-password/reset'),
         headers: _headers(json: true, includeAuth: false),
         body: jsonEncode({
-          'email': email.trim(),
+          'email': cleanEmail,
           'code': code.trim(),
           'new_password': newPassword,
         }),
@@ -371,11 +427,12 @@ class OtlobhaCustomerApi {
   }
 
   Future<Map<String, dynamic>> requestOtp(String email, {String role = 'customer'}) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
     final res = await _execute(
       () => http.post(
         _apiUri('/api/auth/otp/request'),
         headers: _headers(json: true, includeAuth: false),
-        body: jsonEncode({'email': email, 'role': role}),
+        body: jsonEncode({'email': cleanEmail, 'role': role}),
       ),
     );
     return _decode(res, endpointHint: '/api/auth/otp/request');
@@ -389,13 +446,14 @@ class OtlobhaCustomerApi {
     String? phone,
     String? password,
   }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
     final res = await _execute(
       () => http.post(
         _apiUri('/api/auth/otp/verify'),
         headers: _headers(json: true, includeAuth: false),
         body: jsonEncode({
-          'email': email,
-          'code': code,
+          'email': cleanEmail,
+          'code': code.trim(),
           'role': role,
           if (fullName != null && fullName.trim().isNotEmpty) 'full_name': fullName.trim(),
           if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
@@ -414,7 +472,7 @@ class OtlobhaCustomerApi {
     return data;
   }
 
-  Future<void> logout() async {
+  Future<void> logout({String? fcmToken, String? deviceId}) async {
     try {
       await _execute(
         () => http.post(
@@ -422,6 +480,8 @@ class OtlobhaCustomerApi {
           headers: _headers(json: true),
           body: jsonEncode({
             if (_refreshToken != null && _refreshToken!.isNotEmpty) 'refresh_token': _refreshToken,
+            if (fcmToken != null && fcmToken.isNotEmpty) 'fcm_token': fcmToken,
+            if (deviceId != null && deviceId.isNotEmpty) 'device_id': deviceId,
           }),
         ),
         timeout: const Duration(seconds: 10),
@@ -430,6 +490,50 @@ class OtlobhaCustomerApi {
       // ignore logout transport errors; always clear local tokens
     } finally {
       clearTokens();
+    }
+  }
+
+  Future<Map<String, dynamic>> registerPushToken({
+    required String fcmToken,
+    String? deviceId,
+    String platform = 'android',
+    String? appVersion,
+    String? deviceLabel,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/mobile/push/register'),
+        headers: h,
+        body: jsonEncode({
+          'fcm_token': fcmToken,
+          if (deviceId != null && deviceId.isNotEmpty) 'device_id': deviceId,
+          'platform': platform,
+          if (appVersion != null && appVersion.isNotEmpty) 'app_version': appVersion,
+          if (deviceLabel != null && deviceLabel.isNotEmpty) 'device_label': deviceLabel,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/mobile/push/register');
+  }
+
+  Future<void> unregisterPushToken({String? fcmToken, String? deviceId}) async {
+    if (!hasTokens) return;
+    try {
+      await _sendWithAuth(
+        (h) => http.post(
+          _apiUri('/api/mobile/push/unregister'),
+          headers: h,
+          body: jsonEncode({
+            if (fcmToken != null && fcmToken.isNotEmpty) 'fcm_token': fcmToken,
+            if (deviceId != null && deviceId.isNotEmpty) 'device_id': deviceId,
+          }),
+        ),
+        json: true,
+        timeout: const Duration(seconds: 10),
+      );
+    } catch (_) {
+      // Best-effort unregister on logout
     }
   }
 

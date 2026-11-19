@@ -127,10 +127,17 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
   }
 
   Future<void> _submitLogin() async {
-    final identifier = _loginIdentifierCtrl.text.trim();
+    final rawIdentifier = _loginIdentifierCtrl.text.trim();
     final password = _loginPasswordCtrl.text;
-    if (identifier.isEmpty) {
+    if (rawIdentifier.isEmpty) {
       _showMessage('يرجى إدخال البريد الإلكتروني أو رقم الهاتف');
+      return;
+    }
+    final identifier = (rawIdentifier.contains('@') || rawIdentifier.contains('＠'))
+        ? OtlobhaCustomerApi.normalizeEmail(rawIdentifier)
+        : rawIdentifier;
+    if (identifier == null || identifier.isEmpty) {
+      _showMessage('يرجى إدخال بريد إلكتروني صحيح');
       return;
     }
     if (password.isEmpty) {
@@ -166,7 +173,7 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
 
   Future<void> _sendRegisterOtp() async {
     final fullName = _regNameCtrl.text.trim();
-    final email = _regEmailCtrl.text.trim();
+    final email = OtlobhaCustomerApi.normalizeEmail(_regEmailCtrl.text);
     final phone = _regPhoneCtrl.text.trim();
     final password = _regPasswordCtrl.text;
     final confirm = _regConfirmPassCtrl.text;
@@ -175,7 +182,7 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
       _showMessage('يرجى إدخال الاسم الكامل (حرفين على الأقل)');
       return;
     }
-    if (email.isEmpty || !email.contains('@')) {
+    if (email == null) {
       _showMessage('يرجى إدخال بريد إلكتروني صحيح');
       return;
     }
@@ -197,10 +204,12 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
         password: password,
       );
       if (mounted) {
+        final serverEmail = res['email']?.toString() ?? email;
+        _regEmailCtrl.text = serverEmail;
         setState(() {
           _regCodeSent = true;
           _regUseLegacyOtp = res['auth_flow']?.toString() == 'legacy_otp';
-          _regNormalizedEmail = res['email']?.toString() ?? email.toLowerCase();
+          _regNormalizedEmail = serverEmail;
           _regCodeCtrl.clear();
         });
         _startRegTimer();
@@ -217,11 +226,17 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
 
   Future<void> _submitRegister() async {
     final fullName = _regNameCtrl.text.trim();
-    final email = _regNormalizedEmail.isNotEmpty ? _regNormalizedEmail : _regEmailCtrl.text.trim();
+    final email = _regNormalizedEmail.isNotEmpty
+        ? _regNormalizedEmail
+        : (OtlobhaCustomerApi.normalizeEmail(_regEmailCtrl.text) ?? '');
     final phone = _regPhoneCtrl.text.trim();
     final password = _regPasswordCtrl.text;
     final code = _regCodeCtrl.text.trim();
 
+    if (email.isEmpty) {
+      _showMessage('يرجى إدخال بريد إلكتروني صحيح');
+      return;
+    }
     if (code.length != 6) {
       _showMessage('أدخل رمز تأكيد البريد المكون من 6 أرقام');
       return;
@@ -250,18 +265,20 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
   }
 
   Future<void> _sendForgotPasswordCode() async {
-    final raw = _forgotEmailCtrl.text.trim();
-    if (raw.isEmpty || !raw.contains('@')) {
-      _showMessage('أدخل البريد الإلكتروني المسجل به حسابك');
+    final cleanEmail = OtlobhaCustomerApi.normalizeEmail(_forgotEmailCtrl.text);
+    if (cleanEmail == null) {
+      _showMessage('أدخل البريد الإلكتروني المسجل به حسابك بشكل صحيح');
       return;
     }
     setState(() => _loading = true);
     try {
-      final res = await widget.api.requestPasswordReset(raw);
+      final res = await widget.api.requestPasswordReset(cleanEmail);
       if (mounted) {
+        final serverEmail = res['email']?.toString() ?? cleanEmail;
+        _forgotEmailCtrl.text = serverEmail;
         setState(() {
           _forgotCodeSent = true;
-          _forgotNormalizedEmail = res['email']?.toString() ?? raw.toLowerCase();
+          _forgotNormalizedEmail = serverEmail;
           _forgotCodeCtrl.clear();
         });
         _startForgotTimer();
@@ -314,18 +331,20 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
   }
 
   Future<void> _sendOtp() async {
-    final raw = _otpEmailCtrl.text.trim();
-    if (raw.isEmpty || !raw.contains('@')) {
+    final cleanEmail = OtlobhaCustomerApi.normalizeEmail(_otpEmailCtrl.text);
+    if (cleanEmail == null) {
       _showMessage('أدخل بريدًا إلكترونيًا صحيحًا أولًا');
       return;
     }
     setState(() => _loading = true);
     try {
-      final res = await widget.api.requestOtp(raw, role: 'customer');
+      final res = await widget.api.requestOtp(cleanEmail, role: 'customer');
       if (mounted) {
+        final serverEmail = res['email']?.toString() ?? cleanEmail;
+        _otpEmailCtrl.text = serverEmail;
         setState(() {
           _otpSent = true;
-          _otpNormalizedEmail = res['email']?.toString() ?? raw.toLowerCase();
+          _otpNormalizedEmail = serverEmail;
           _deliveryChannel = res['delivery_channel']?.toString() ?? 'smtp';
           _demoOtp = res['demo_otp']?.toString();
           _otpCodeCtrl.clear();

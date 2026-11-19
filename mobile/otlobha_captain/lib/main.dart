@@ -6,14 +6,19 @@ import 'package:geolocator/geolocator.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'core/api_client.dart';
+import 'core/push_notification_service.dart';
 import 'screens/captain_home_screen.dart';
 import 'screens/captain_login_screen.dart';
 import 'screens/captain_orders_screen.dart';
+import 'screens/captain_order_chat_screen.dart';
 import 'screens/captain_pos_screen.dart';
 import 'screens/captain_settlement_screen.dart';
 import 'screens/captain_profile_screen.dart';
+import 'screens/captain_trip_chat_screen.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await CaptainPushNotificationService.instance.initialize();
   runApp(const OtlobhaCaptainApp());
 }
 
@@ -76,13 +81,82 @@ class _CaptainShellState extends State<CaptainShell> {
   Timer? _gpsTimer;
   WebSocketChannel? _ridesWs;
   StreamSubscription? _ridesSub;
+  Map<String, dynamic>? _pendingPushTap;
 
   @override
   void initState() {
     super.initState();
+    CaptainPushNotificationService.instance.initialize(
+      onNotificationTap: _handlePushNotificationTap,
+      onForegroundNotification: () {
+        if (_activeCaptainId != null) _silentSync();
+      },
+    );
     _loadAll();
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) => _silentSync());
     _gpsTimer = Timer.periodic(const Duration(seconds: 20), (_) => _pushCaptainGps());
+  }
+
+  void _handlePushNotificationTap(Map<String, dynamic> data) {
+    if (!mounted) return;
+    final capId = _activeCaptainId;
+    if (capId == null) {
+      _pendingPushTap = data;
+      return;
+    }
+
+    final deepLink = (data['deep_link'] ?? '').toString().toLowerCase();
+    final orderId = (data['order_id'] ?? '').toString().trim();
+    final tripId = (data['trip_id'] ?? '').toString().trim();
+    final capName = (_activeCaptain?['full_name'] ?? 'الكابتن').toString();
+
+    if (deepLink == 'order_chat' && orderId.isNotEmpty) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CaptainOrderChatScreen(
+            api: api,
+            orderId: orderId,
+            captainId: capId,
+            captainName: capName,
+          ),
+        ),
+      ).then((_) => _loadAll());
+      return;
+    }
+    if ((deepLink == 'trip_chat' || deepLink == 'trip') && tripId.isNotEmpty) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CaptainTripChatScreen(
+            api: api,
+            tripId: tripId,
+            captainId: capId,
+            captainName: capName,
+          ),
+        ),
+      ).then((_) => _loadAll());
+      return;
+    }
+    if (deepLink == 'order' || deepLink == 'orders' || deepLink == 'parcels') {
+      setState(() {
+        _ordersInitialFilter = 'all';
+        _index = 1;
+      });
+      _loadAll();
+      return;
+    }
+    if (deepLink == 'wallet' || deepLink == 'settlement') {
+      setState(() => _index = 3);
+      _loadAll();
+      return;
+    }
+    if (deepLink == 'profile' || deepLink == 'kyc_upload') {
+      setState(() => _index = 4);
+      _loadAll();
+      return;
+    }
+    _showNotificationsSheet();
   }
 
   @override
@@ -203,11 +277,16 @@ class _CaptainShellState extends State<CaptainShell> {
     }
   }
 
-  void _logout() {
+  Future<void> _logout() async {
     _ridesSub?.cancel();
     _ridesWs?.sink.close();
     _ridesWs = null;
-    api.logout();
+    final push = CaptainPushNotificationService.instance;
+    final token = push.currentToken;
+    final devId = push.deviceId;
+    await push.unregisterOnLogout(api);
+    await api.logout(fcmToken: token, deviceId: devId);
+    if (!mounted) return;
     setState(() {
       _activeCaptainId = null;
       _activeCaptain = null;
@@ -254,64 +333,134 @@ class _CaptainShellState extends State<CaptainShell> {
   void _showCaptainSettingsSheet() {
     showModalBottomSheet(
       context: context,
-      builder: (ctx) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Row(
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Icon(Icons.settings, color: Color(0xFFA92224)),
-                      SizedBox(width: 8),
-                      Text('إعدادات تطبيق الطيار', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                      const Row(
+                        children: [
+                          Icon(Icons.settings, color: Color(0xFFA92224)),
+                          SizedBox(width: 8),
+                          Text('إعدادات تطبيق الطيار', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        icon: const Icon(Icons.close),
+                      ),
                     ],
                   ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    icon: const Icon(Icons.close),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'إعدادات إشعارات الطلبات (Android Push)',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF334155)),
+                        ),
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('صوت تنبيهات الطلبات', style: TextStyle(fontSize: 13)),
+                          value: CaptainPushNotificationService.instance.soundEnabled,
+                          activeColor: const Color(0xFFA92224),
+                          onChanged: (val) async {
+                            await CaptainPushNotificationService.instance.setSoundEnabled(val);
+                            setModalState(() {});
+                          },
+                        ),
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('الاهتزاز عند إسناد طلب جديد', style: TextStyle(fontSize: 13)),
+                          value: CaptainPushNotificationService.instance.vibrationEnabled,
+                          activeColor: const Color(0xFFA92224),
+                          onChanged: (val) async {
+                            await CaptainPushNotificationService.instance.setVibrationEnabled(val);
+                            setModalState(() {});
+                          },
+                        ),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: () async {
+                              final ok = await CaptainPushNotificationService.instance.requestPermission();
+                              if (_activeCaptainId != null) {
+                                await CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+                              }
+                              setModalState(() {});
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      ok
+                                          ? 'صلاحية الإشعارات مفعّلة بنجاح'
+                                          : 'يرجى تفعيل صلاحية الإشعارات من إعدادات الهاتف',
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            icon: const Icon(Icons.notifications_active_outlined, size: 16),
+                            label: const Text('فحص وتفعيل صلاحية الإشعارات', style: TextStyle(fontSize: 12)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    leading: const Icon(Icons.my_location, color: Color(0xFFA92224)),
+                    title: const Text('تحديث موقعي بالـ GPS الآن'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _pushCaptainGps();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.refresh, color: Color(0xFF0D9488)),
+                    title: const Text('تحديث الأوردرات والمشاوير'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _loadAll();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.person_outline, color: Color(0xFF475569)),
+                    title: const Text('الملف الشخصي والمركبة والمستندات'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() => _index = 4);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.logout, color: Colors.red.shade700),
+                    title: Text('تسجيل الخروج', style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.bold)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _logout();
+                    },
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              ListTile(
-                leading: const Icon(Icons.my_location, color: Color(0xFFA92224)),
-                title: const Text('تحديث موقعي بالـ GPS الآن'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _pushCaptainGps();
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.refresh, color: Color(0xFF0D9488)),
-                title: const Text('تحديث الأوردرات والمشاوير'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _loadAll();
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.person_outline, color: Color(0xFF475569)),
-                title: const Text('الملف الشخصي والمركبة والمستندات'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  setState(() => _index = 4);
-                },
-              ),
-              ListTile(
-                leading: Icon(Icons.logout, color: Colors.red.shade700),
-                title: Text('تسجيل الخروج', style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.bold)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _logout();
-                },
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -333,6 +482,12 @@ class _CaptainShellState extends State<CaptainShell> {
             _connectRidesWs();
             _loadAll();
             _pushCaptainGps();
+            CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+            if (_pendingPushTap != null) {
+              final pending = _pendingPushTap!;
+              _pendingPushTap = null;
+              WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+            }
           },
         ),
       );

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
   Bell,
@@ -77,6 +77,7 @@ export default function App() {
   });
 
   const [adminUser, setAdminUser] = useState<AdminUserRecord | null>(null);
+  const adminUserRef = useRef<AdminUserRecord | null>(null);
   const [authChecking, setAuthChecking] = useState<boolean>(true);
   const [overview, setOverview] = useState<Record<string, number> | null>(null);
   const [services, setServices] = useState<ServiceConfig[]>([]);
@@ -86,6 +87,10 @@ export default function App() {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
 
   const isAr = lang === 'ar';
+
+  useEffect(() => {
+    adminUserRef.current = adminUser;
+  }, [adminUser]);
 
   useEffect(() => {
     document.documentElement.dir = isAr ? 'rtl' : 'ltr';
@@ -98,7 +103,7 @@ export default function App() {
   };
 
   const refreshCore = async (forceAdmin?: boolean, explicitMerchant?: MerchantRecord | null) => {
-    const isAdmin = forceAdmin !== undefined ? forceAdmin : Boolean(adminUser);
+    const isAdmin = forceAdmin !== undefined ? forceAdmin : Boolean(adminUserRef.current);
     if (isAdmin) {
       const [ov, srv, zn, cap, mer, ord] = await Promise.all([
         api.getOverview(),
@@ -154,12 +159,19 @@ export default function App() {
   }, [portalMode]);
 
   useEffect(() => {
+    if (portalMode === 'admin' && adminUserRef.current && (activeTab === 'captains' || activeTab === 'overview' || activeTab === 'orders')) {
+      refreshCore(true).catch(() => {});
+    }
+  }, [activeTab, portalMode]);
+
+  useEffect(() => {
     let active = true;
     (async () => {
       try {
         const me = await api.getMe().catch(() => null);
         if (!active) return;
         if (me?.authenticated && me.user?.actorType === 'admin') {
+          adminUserRef.current = me.user as AdminUserRecord;
           setAdminUser(me.user as AdminUserRecord);
           await refreshCore(true);
         } else if (me?.authenticated && me.user?.actorType === 'merchant') {
@@ -206,6 +218,7 @@ export default function App() {
 
   const handleAdminLogout = async () => {
     await api.logoutSession().catch(() => {});
+    adminUserRef.current = null;
     setAdminUser(null);
     setOverview(null);
     setCaptains([]);
@@ -533,6 +546,7 @@ export default function App() {
             <AdminLoginPortal
               lang={lang}
               onSuccess={async (user) => {
+                adminUserRef.current = user;
                 setAdminUser(user);
                 await refreshCore(true);
               }}

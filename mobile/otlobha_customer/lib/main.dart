@@ -5,6 +5,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'core/api_client.dart';
+import 'core/push_notification_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/services_hub_screen.dart';
 import 'screens/offers_screen.dart';
@@ -16,7 +17,9 @@ import 'screens/trip_chat_screen.dart';
 import 'screens/customer_otp_login_screen.dart';
 import 'screens/support_screen.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await CustomerPushNotificationService.instance.initialize();
   runApp(const OtlobhaCustomerApp());
 }
 
@@ -85,13 +88,58 @@ class _CustomerShellState extends State<CustomerShell> {
   Timer? _pollTimer;
   WebSocketChannel? _ridesWs;
   StreamSubscription? _ridesSub;
+  Map<String, dynamic>? _pendingPushTap;
 
   @override
   void initState() {
     super.initState();
+    CustomerPushNotificationService.instance.initialize(
+      onNotificationTap: _handlePushNotificationTap,
+      onForegroundNotification: () {
+        if (_isAuthenticated && !_isGuest) _silentSync();
+      },
+    );
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       if (_isAuthenticated && !_isGuest) _silentSync();
     });
+  }
+
+  void _handlePushNotificationTap(Map<String, dynamic> data) {
+    if (!mounted) return;
+    if (!_isAuthenticated || _isGuest) {
+      _pendingPushTap = data;
+      return;
+    }
+
+    final deepLink = (data['deep_link'] ?? '').toString().toLowerCase();
+    final orderId = (data['order_id'] ?? '').toString().trim();
+    final tripId = (data['trip_id'] ?? '').toString().trim();
+
+    if ((deepLink == 'order_chat' || deepLink == 'order') && orderId.isNotEmpty) {
+      _openOrderChat(orderId);
+      return;
+    }
+    if ((deepLink == 'trip_chat' || deepLink == 'trip') && tripId.isNotEmpty) {
+      _openTripChat(tripId);
+      return;
+    }
+    if (deepLink == 'orders' || deepLink == 'profile') {
+      setState(() => _index = 4);
+      _loadData();
+      return;
+    }
+    if (deepLink == 'offers' || deepLink == 'promo') {
+      setState(() => _index = 1);
+      return;
+    }
+    if (deepLink == 'pharmacy' || deepLink == 'stores' || deepLink == 'parcels' || deepLink == 'market') {
+      setState(() {
+        _serviceSubView = deepLink == 'parcels' ? 'rides_parcels' : deepLink;
+        _index = 2;
+      });
+      return;
+    }
+    _openNotifications();
   }
 
   @override
@@ -386,10 +434,15 @@ class _CustomerShellState extends State<CustomerShell> {
     _loadData();
   }
 
-  void _logout() {
+  Future<void> _logout() async {
     _ridesSub?.cancel();
     _ridesWs?.sink.close();
-    api.logout();
+    final push = CustomerPushNotificationService.instance;
+    final token = push.currentToken;
+    final devId = push.deviceId;
+    await push.unregisterOnLogout(api);
+    await api.logout(fcmToken: token, deviceId: devId);
+    if (!mounted) return;
     setState(() {
       _isAuthenticated = false;
       _isGuest = false;
@@ -587,6 +640,71 @@ class _CustomerShellState extends State<CustomerShell> {
                     onChanged: (val) => setState(() => _addressLandmark = val),
                   ),
                   const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'إعدادات إشعارات النظام (Android Push)',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF334155)),
+                        ),
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('صوت الإشعارات', style: TextStyle(fontSize: 13)),
+                          value: CustomerPushNotificationService.instance.soundEnabled,
+                          activeColor: const Color(0xFFA92224),
+                          onChanged: (val) async {
+                            await CustomerPushNotificationService.instance.setSoundEnabled(val);
+                            setModalState(() {});
+                          },
+                        ),
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('الاهتزاز عند وصول إشعار', style: TextStyle(fontSize: 13)),
+                          value: CustomerPushNotificationService.instance.vibrationEnabled,
+                          activeColor: const Color(0xFFA92224),
+                          onChanged: (val) async {
+                            await CustomerPushNotificationService.instance.setVibrationEnabled(val);
+                            setModalState(() {});
+                          },
+                        ),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: () async {
+                              final ok = await CustomerPushNotificationService.instance.requestPermission();
+                              if (_isAuthenticated && !_isGuest) {
+                                await CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+                              }
+                              setModalState(() {});
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      ok
+                                          ? 'صلاحية الإشعارات مفعّلة بنجاح'
+                                          : 'يرجى تفعيل صلاحية الإشعارات من إعدادات الهاتف',
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            icon: const Icon(Icons.notifications_active_outlined, size: 16),
+                            label: const Text('فحص وتفعيل صلاحية الإشعارات', style: TextStyle(fontSize: 12)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   Row(
                     children: [
                       Expanded(
@@ -669,6 +787,12 @@ class _CustomerShellState extends State<CustomerShell> {
             });
             _connectRidesWs();
             _loadData();
+            CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+            if (_pendingPushTap != null) {
+              final pending = _pendingPushTap!;
+              _pendingPushTap = null;
+              WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+            }
           },
         ),
       );

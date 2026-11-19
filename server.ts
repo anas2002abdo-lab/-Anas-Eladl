@@ -39,6 +39,15 @@ import {
   type AuthContext,
 } from './src/server/auth.ts';
 import { calculateFinancialModel, calculateServicePrice, haversineKm, runSmartDispatch } from './src/server/engines.ts';
+import {
+  createAndSendNotification,
+  enqueueSystemPushNotification,
+  getFcmStatus,
+  registerDeviceToken,
+  unregisterDeviceToken,
+  type PushUserRole,
+} from './src/server/pushService.ts';
+import { normalizeEmail } from './src/shared/email.ts';
 import type { FinancialModelInput } from './src/shared/types.ts';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -520,32 +529,40 @@ function reconcileAndDispatchSingleOrder(orderId: string): {
   broadcastOrderChat(orderId, { type: 'order:status', order_id: orderId, status: 'ready_for_pickup' });
 
   const ordNum = String(order.order_number);
-  db.prepare(`
-    INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, sent_by)
-    VALUES (?, 'captain', ?, ?, 'operational', ?, ?, 'orders', 'otlobha_captain', 1, 'النظام')
-  `).run(
-    uid('notif'),
-    String(order.zone_name || 'all'),
-    winnerId,
-    `طلب جاهز للاستلام #${ordNum}`,
-    activeSections.length > 1
-      ? `تم إسناد طلب مقسم (${activeSections.length} متاجر) إليك — المتجر الأكثر طلبًا: ${anchor?.merchant_name || ''}`
-      : `تم إسناد الطلب #${ordNum} إليك من ${anchor?.merchant_name || String(order.merchant_name)}`
-  );
+  enqueueSystemPushNotification({
+    targetApp: 'captain',
+    targetZone: String(order.zone_name || 'all'),
+    recipientId: winnerId,
+    category: 'operational',
+    titleAr: `طلب جاهز للاستلام #${ordNum}`,
+    bodyAr:
+      activeSections.length > 1
+        ? `تم إسناد طلب مقسم (${activeSections.length} متاجر) إليك — المتجر الأكثر طلبًا: ${anchor?.merchant_name || ''}`
+        : `تم إسناد الطلب #${ordNum} إليك من ${anchor?.merchant_name || String(order.merchant_name)}`,
+    deepLink: 'order',
+    orderId,
+    status: 'ready_for_pickup',
+    channelId: 'otlobha_dispatch_channel',
+    sentBy: 'النظام',
+  });
 
   if (order.customer_id) {
-    db.prepare(`
-      INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, sent_by)
-      VALUES (?, 'customer', ?, ?, 'operational', ?, ?, 'orders', 'otlobha_customer', 1, 'النظام')
-    `).run(
-      uid('notif'),
-      String(order.zone_name || 'all'),
-      String(order.customer_id),
-      `تم تجهيز طلبك #${ordNum}`,
-      activeSections.length > 1
-        ? `كل المتاجر (${activeSections.length}) جهّزت طلبك وتم تسليم الطلب للطيار ${winnerName} للاستلام.`
-        : `تم تجهيز طلبك وإسناده للطيار ${winnerName}.`
-    );
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: String(order.customer_id),
+      category: 'operational',
+      titleAr: `تم تجهيز طلبك #${ordNum}`,
+      bodyAr:
+        activeSections.length > 1
+          ? `كل المتاجر (${activeSections.length}) جهّزت طلبك وتم تسليم الطلب للطيار ${winnerName} للاستلام.`
+          : `تم تجهيز طلبك وإسناده للطيار ${winnerName}.`,
+      deepLink: 'order',
+      orderId,
+      status: 'ready_for_pickup',
+      channelId: 'otlobha_orders_channel',
+      sentBy: 'النظام',
+    });
   }
 
   recordAuditLog({
@@ -709,6 +726,22 @@ app.post('/api/auth/refresh', (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
+  const auth = optionalAuth(req);
+  const fcmToken = typeof req.body?.fcm_token === 'string' ? req.body.fcm_token.trim() : '';
+  const deviceId = typeof req.body?.device_id === 'string' ? req.body.device_id.trim() : '';
+  if (
+    auth &&
+    auth.sessionId.startsWith('ses_') &&
+    (auth.role === 'customer' || auth.role === 'captain') &&
+    (fcmToken || deviceId)
+  ) {
+    unregisterDeviceToken({
+      userId: auth.id,
+      userRole: auth.role as PushUserRole,
+      fcmToken: fcmToken || null,
+      deviceId: deviceId || null,
+    });
+  }
   const { revoked } = revokeCurrentSession(req, res);
   res.json({ ok: true, revoked });
 });
@@ -1278,7 +1311,16 @@ function cancelTripTransaction(params: {
 
 // 6. Captains & KYC Documents
 app.get('/api/captains', requireAuth, requireRole(...ALL_ADMIN_ROLES), (_req, res) => {
-  const captains = db.prepare('SELECT * FROM captains').all() as Array<Record<string, unknown>>;
+  const captains = db
+    .prepare(
+      `SELECT * FROM captains
+       ORDER BY CASE
+         WHEN verification_status IN ('under_review', 'new', 'needs_correction', 'incomplete_data') THEN 0
+         WHEN verification_status = 'approved' THEN 1
+         ELSE 2
+       END, rowid DESC`
+    )
+    .all() as Array<Record<string, unknown>>;
   const docs = db.prepare('SELECT * FROM captain_documents').all() as Array<Record<string, unknown>>;
   res.json(captains.map((c) => sanitizeCaptain(c, docs.filter((d) => d.captain_id === c.id))));
 });
@@ -1381,6 +1423,46 @@ app.patch('/api/captains/:id/status', requireAuth, requirePermission('captains.r
     verification_status: nextStatus,
     availability_status: nextAvail,
   });
+
+  if (verification_status && verification_status !== existing.verification_status) {
+    const statusMap: Record<string, { title: string; body: string; cat: 'compliance' | 'operational' | 'alert' }> = {
+      approved: {
+        title: 'تم اعتماد حسابك ككابتن في اطلبها',
+        body: 'مبروك! يمكنك الآن تفعيل حالة التوفر وبدء استقبال الطلبات والمشاوير في المنزلة.',
+        cat: 'operational',
+      },
+      rejected: {
+        title: 'تحديث بخصوص طلب تسجيلك في اطلبها',
+        body: rejection_reason ? `تم رفض الطلب: ${String(rejection_reason)}` : 'تعذر اعتماد طلبك حاليًا. راجع الإدارة للتفاصيل.',
+        cat: 'compliance',
+      },
+      needs_correction: {
+        title: 'مطلوب استكمال أو تعديل مستنداتك',
+        body: rejection_reason ? `يرجى مراجعة: ${String(rejection_reason)}` : 'يرجى تحديث مستندات الحساب من صفحة الملف الشخصي.',
+        cat: 'compliance',
+      },
+      suspended: {
+        title: 'تم إيقاف الحساب مؤقتًا',
+        body: rejection_reason ? `السبب: ${String(rejection_reason)}` : 'تم تعليق استقبال الطلبات مؤقتًا. تواصل مع الإدارة.',
+        cat: 'alert',
+      },
+    };
+    const msg = statusMap[String(nextStatus)];
+    if (msg) {
+      enqueueSystemPushNotification({
+        targetApp: 'captain',
+        targetZone: String(existing.zone_name || 'all'),
+        recipientId: id,
+        category: msg.cat,
+        titleAr: msg.title,
+        bodyAr: msg.body,
+        deepLink: 'profile',
+        status: String(nextStatus),
+        channelId: 'otlobha_admin_channel',
+        sentBy: req.auth!.fullName,
+      });
+    }
+  }
 
   res.json({ ok: true });
 });
@@ -1828,6 +1910,37 @@ app.post('/api/orders/:id/chat', allowAnyUserOrGuest, (req, res) => {
     message: msgObj,
     delivery_proof_image_url: proofUrl,
   });
+
+  const ordNumChat = String(order.order_number || id);
+  const previewText = (cleanText || (isProof ? 'تم إرفاق صورة إثبات التسليم عند المنزل' : 'صورة مرفقة')).slice(0, 140);
+  if (derivedSenderRole !== 'customer' && order.customer_id) {
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: String(order.customer_id),
+      category: 'operational',
+      titleAr: `رسالة جديدة على الطلب #${ordNumChat}`,
+      bodyAr: `${derivedSenderName}: ${previewText}`,
+      deepLink: 'order_chat',
+      orderId: id,
+      channelId: 'otlobha_chat_channel',
+      sentBy: derivedSenderName,
+    });
+  }
+  if (derivedSenderRole !== 'captain' && order.captain_id) {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: String(order.captain_id),
+      category: 'operational',
+      titleAr: `رسالة من العميل على الطلب #${ordNumChat}`,
+      bodyAr: `${derivedSenderName}: ${previewText}`,
+      deepLink: 'order_chat',
+      orderId: id,
+      channelId: 'otlobha_chat_channel',
+      sentBy: derivedSenderName,
+    });
+  }
 
   res.status(201).json({ message: msgObj, delivery_proof_image_url: proofUrl });
 });
@@ -2870,17 +2983,19 @@ app.patch(
     }
 
     if (notifyTitle && notifyBody) {
-      db.prepare(`
-        INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, sent_by)
-        VALUES (?, 'customer', ?, ?, 'operational', ?, ?, 'orders', 'otlobha_customer', 1, ?)
-      `).run(
-        uid('notif'),
-        String(order.zone_name || 'all'),
-        order.customer_id ? String(order.customer_id) : null,
-        notifyTitle,
-        notifyBody,
-        targetSec.merchant_name
-      );
+      enqueueSystemPushNotification({
+        targetApp: 'customer',
+        targetZone: String(order.zone_name || 'all'),
+        recipientId: order.customer_id ? String(order.customer_id) : null,
+        category: nextSecStatus === 'cancelled' ? 'alert' : 'operational',
+        titleAr: notifyTitle,
+        bodyAr: notifyBody,
+        deepLink: 'order',
+        orderId: id,
+        status: nextSecStatus,
+        channelId: 'otlobha_orders_channel',
+        sentBy: targetSec.merchant_name,
+      });
     }
 
     recordAuditLog({
@@ -3052,17 +3167,35 @@ app.patch(
   );
 
   if (notifyTitle && notifyBody) {
-    db.prepare(`
-      INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, sent_by)
-      VALUES (?, 'customer', ?, ?, 'operational', ?, ?, 'orders', 'otlobha_customer', 1, ?)
-    `).run(
-      uid('notif'),
-      String(order.zone_name || 'all'),
-      order.customer_id ? String(order.customer_id) : null,
-      notifyTitle,
-      notifyBody,
-      String(order.merchant_name || 'التاجر')
-    );
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: order.customer_id ? String(order.customer_id) : null,
+      category: nextStatus === 'cancelled' ? 'alert' : 'operational',
+      titleAr: notifyTitle,
+      bodyAr: notifyBody,
+      deepLink: 'order',
+      orderId: id,
+      status: String(nextStatus),
+      channelId: 'otlobha_orders_channel',
+      sentBy: String(order.merchant_name || 'التاجر'),
+    });
+  }
+
+  if (captainId && captainId !== (order.captain_id || null) && nextStatus !== 'cancelled') {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: String(captainId),
+      category: 'operational',
+      titleAr: `طلب جديد مسند إليك #${String(order.order_number)}`,
+      bodyAr: `تم إسناد الطلب #${String(order.order_number)} من ${String(order.merchant_name || 'المتجر')} إليك — يرجى التوجه للاستلام.`,
+      deepLink: 'order',
+      orderId: id,
+      status: String(nextStatus),
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: 'النظام',
+    });
   }
 
   if (captainId && captainName && nextStatus !== 'cancelled') {
@@ -3264,6 +3397,38 @@ app.patch('/api/admin/orders/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES),
     order_id: id,
     status: nextStatus,
   });
+
+  if (nextCaptainId && nextCaptainId !== (order.captain_id || null) && nextStatus !== 'cancelled') {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: String(nextCaptainId),
+      category: 'operational',
+      titleAr: `إسناد طلب من الإدارة #${String(order.order_number)}`,
+      bodyAr: `تم إسناد الطلب #${String(order.order_number)} (${String(order.merchant_name || 'متجر')}) إليك بواسطة الإدارة.`,
+      deepLink: 'order',
+      orderId: id,
+      status: String(nextStatus),
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: req.auth!.fullName,
+    });
+  }
+
+  if (order.customer_id && sysNote) {
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: String(order.zone_name || 'all'),
+      recipientId: String(order.customer_id),
+      category: nextStatus === 'cancelled' ? 'alert' : 'operational',
+      titleAr: `تحديث على طلبك #${String(order.order_number)}`,
+      bodyAr: sysNote,
+      deepLink: 'order',
+      orderId: id,
+      status: String(nextStatus),
+      channelId: 'otlobha_orders_channel',
+      sentBy: req.auth!.fullName,
+    });
+  }
 
   recordAuditLog({
     actor_name: req.auth!.fullName,
@@ -4366,12 +4531,12 @@ app.post('/api/admin/users', requireAuth, requireRole('super_admin', 'general_ma
     permissions?: string[];
   };
 
-  const email = String(rawEmail || '').trim().toLowerCase();
+  const email = normalizeEmail(String(rawEmail || ''));
   const password = String(rawPassword || '').trim();
   const name = String(full_name || '').trim();
   const role = String(role_code || '').trim();
 
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!email) {
     return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صالح ومقبول' });
   }
 
@@ -5467,6 +5632,63 @@ app.get('/api/admin/customers/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES)
 });
 
 // 12. Push Notifications & Broadcast Campaigns (Customer App, Captain App, Merchant Portal)
+app.get('/api/notifications/fcm-status', requireAuth, requireRole(...ALL_ADMIN_ROLES), (_req, res) => {
+  res.json(getFcmStatus());
+});
+
+app.post('/api/mobile/push/register', requireAuth, requireRole('customer', 'captain'), (req, res) => {
+  const auth = req.auth!;
+  if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب فعلي لتفعيل الإشعارات' });
+  }
+  const { fcm_token, device_id, platform, app_version, device_label } = req.body || {};
+  const cleanToken = typeof fcm_token === 'string' ? fcm_token.trim() : '';
+  if (!cleanToken || cleanToken.length < 20) {
+    return res.status(400).json({ error: 'رمز FCM غير صالح أو ناقص' });
+  }
+  const result = registerDeviceToken({
+    userId: auth.id,
+    userRole: auth.role as PushUserRole,
+    fcmToken: cleanToken,
+    deviceId: typeof device_id === 'string' ? device_id : null,
+    platform: typeof platform === 'string' ? platform : 'android',
+    appVersion: typeof app_version === 'string' ? app_version : null,
+    deviceLabel: typeof device_label === 'string' ? device_label : null,
+  });
+  res.json({ ok: true, ...result });
+});
+
+app.post('/api/mobile/push/unregister', requireAuth, requireRole('customer', 'captain'), (req, res) => {
+  const auth = req.auth!;
+  if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب فعلي لإلغاء ربط الجهاز' });
+  }
+  const { fcm_token, device_id } = req.body || {};
+  const result = unregisterDeviceToken({
+    userId: auth.id,
+    userRole: auth.role as PushUserRole,
+    fcmToken: typeof fcm_token === 'string' ? fcm_token : null,
+    deviceId: typeof device_id === 'string' ? device_id : null,
+  });
+  res.json({ ok: true, ...result });
+});
+
+app.get('/api/mobile/push/devices', requireAuth, requireRole('customer', 'captain'), (req, res) => {
+  const auth = req.auth!;
+  if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب فعلي لعرض الأجهزة المسجلة' });
+  }
+  const rows = db
+    .prepare(
+      `SELECT id, device_id, platform, app_version, device_label, is_active, last_seen_at, created_at
+       FROM push_device_tokens
+       WHERE user_id = ? AND user_role = ? AND is_active = 1
+       ORDER BY last_seen_at DESC`
+    )
+    .all(auth.id, auth.role);
+  res.json({ ok: true, devices: rows });
+});
+
 app.get('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
   const { target_app } = req.query;
   const rows = (
@@ -5477,15 +5699,15 @@ app.get('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req
   res.json(rows.map((n) => ({ ...n, is_read: Boolean(n.is_read) })));
 });
 
-app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), async (req, res) => {
   const { target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link } = req.body;
   if (!title_ar || !body_ar) {
     return res.status(400).json({ error: 'عنوان الإشعار ونص الرسالة مطلوبان' });
   }
-  const appTarget = String(target_app || 'customer');
+  const appTarget = (['customer', 'captain', 'merchant', 'all'].includes(String(target_app))
+    ? String(target_app)
+    : 'customer') as 'customer' | 'captain' | 'merchant' | 'all';
   const zoneTarget = String(target_zone || 'all');
-  const id = uid('ntf');
-  const fcmTopic = `otlobha_${appTarget}_${zoneTarget === 'all' ? 'all' : 'zone'}`;
 
   let audienceCount = 0;
   if (recipient_id) {
@@ -5501,33 +5723,35 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), (re
       .get(...(zoneTarget === 'all' ? [] : [zoneTarget])) as { c: number };
     audienceCount = Math.max(m.c, 1);
   } else {
-    audienceCount = appTarget === 'all' ? 2250 : 1450;
+    const custCnt = (db.prepare('SELECT COUNT(*) as c FROM customers').get() as { c: number }).c;
+    const capCnt = (db.prepare('SELECT COUNT(*) as c FROM captains').get() as { c: number }).c;
+    audienceCount = appTarget === 'all' ? Math.max(custCnt + capCnt, 1) : Math.max(custCnt, 1);
   }
 
-  db.prepare(`
-    INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, is_read, sent_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Super Admin')
-  `).run(
-    id,
-    appTarget,
-    zoneTarget,
-    recipient_id || null,
-    category || 'operational',
-    String(title_ar).trim(),
-    String(body_ar).trim(),
-    deep_link || 'home',
-    fcmTopic,
-    audienceCount
-  );
+  const validCategory = (['promo', 'operational', 'compliance', 'alert'].includes(String(category))
+    ? String(category)
+    : 'operational') as 'promo' | 'operational' | 'compliance' | 'alert';
+
+  const result = await createAndSendNotification({
+    targetApp: appTarget,
+    targetZone: zoneTarget,
+    recipientId: recipient_id || null,
+    category: validCategory,
+    titleAr: String(title_ar).trim(),
+    bodyAr: String(body_ar).trim(),
+    deepLink: deep_link || 'notifications',
+    sentBy: req.auth?.fullName || 'Super Admin',
+    audienceCount,
+  });
 
   recordAuditLog({
     action: 'NOTIFICATION_BROADCAST_SENT',
     entity_type: 'notifications',
-    entity_id: id,
-    details: `إرسال إشعار إلى [${appTarget}] (${zoneTarget}): ${title_ar} — الموضوع ${fcmTopic}`,
+    entity_id: result.id,
+    details: `إرسال إشعار إلى [${appTarget}] (${zoneTarget}): ${title_ar} — الموضوع ${result.fcm_topic} — FCM مرسل: ${result.fcm_delivery.sent_count}/${result.fcm_delivery.targeted_devices}`,
   });
 
-  res.status(201).json({ id, fcm_topic: fcmTopic, audience_count: audienceCount });
+  res.status(201).json(result);
 });
 
 app.get('/api/mobile/notifications', requireAuth, (req, res) => {
@@ -5926,6 +6150,20 @@ app.patch('/api/trips/:id/captain', requireAuth, requirePermission('dispatch.man
     trip_id: id,
     trip: updatedTrip,
   });
+
+  if (nextPrefId) {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      recipientId: nextPrefId,
+      category: 'operational',
+      titleAr: `مشوار جديد موجه إليك #${String(trip.trip_number)}`,
+      bodyAr: `من ${String(trip.pickup_address || '')} إلى ${String(trip.dropoff_address || '')}`,
+      deepLink: 'trip',
+      tripId: id,
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: auth.fullName,
+    });
+  }
 
   recordAuditLog({
     actor_name: auth.fullName,
@@ -6341,6 +6579,34 @@ app.post('/api/rides/:id/chat', allowAnyUserOrGuest, (req, res) => {
     message: saved,
   });
 
+  const tripPreview = (cleanText || 'صورة مرفقة').slice(0, 140);
+  if (derivedRole !== 'customer' && trip.customer_id) {
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      recipientId: String(trip.customer_id),
+      category: 'operational',
+      titleAr: `رسالة جديدة في المشوار #${String(trip.trip_number || id)}`,
+      bodyAr: `${derivedName}: ${tripPreview}`,
+      deepLink: 'trip_chat',
+      tripId: id,
+      channelId: 'otlobha_chat_channel',
+      sentBy: derivedName,
+    });
+  }
+  if (derivedRole !== 'captain' && trip.captain_id) {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      recipientId: String(trip.captain_id),
+      category: 'operational',
+      titleAr: `رسالة من الراكب في المشوار #${String(trip.trip_number || id)}`,
+      bodyAr: `${derivedName}: ${tripPreview}`,
+      deepLink: 'trip_chat',
+      tripId: id,
+      channelId: 'otlobha_chat_channel',
+      sentBy: derivedName,
+    });
+  }
+
   res.status(201).json({ message: saved });
 });
 
@@ -6460,10 +6726,80 @@ app.post('/api/mobile/parcels', requireAuth, requireRole('customer', ...ALL_ADMI
   res.status(201).json({ id, delivery_number: deliveryNumber, delivery_fee: effectiveFee, delivery_otp: otp, assigned_captain: assignedCapName });
 });
 
-function normalizeEmail(raw: string): string | null {
-  const clean = String(raw || '').trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(clean)) return null;
-  return clean;
+const EMAIL_OTP_MAX_PER_WINDOW = 5;
+const EMAIL_OTP_SEND_WINDOW_MIN = 10;
+const EMAIL_OTP_MAX_VERIFY_FAILS = 10;
+const EMAIL_OTP_FAIL_WINDOW_MIN = 15;
+
+function parseSqliteUtcMs(ts: string | null | undefined): number | null {
+  if (!ts) return null;
+  const iso = ts.includes('T') ? ts : `${ts.replace(' ', 'T')}Z`;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatArabicWaitDuration(seconds: number): string {
+  const clamped = Math.max(10, Math.ceil(seconds));
+  if (clamped < 60) {
+    return `${clamped} ثانية`;
+  }
+  const mins = Math.ceil(clamped / 60);
+  if (mins === 1) return 'دقيقة واحدة';
+  if (mins === 2) return 'دقيقتين';
+  if (mins <= 10) return `${mins} دقائق`;
+  return `${mins} دقيقة`;
+}
+
+function checkEmailOtpQuota(
+  email: string,
+  role: string
+): { allowed: true } | { allowed: false; retryAfterSec: number; reason: 'send_limit' | 'fail_limit'; error: string } {
+  const sendWindowModifier = `-${EMAIL_OTP_SEND_WINDOW_MIN} minutes`;
+  const failWindowModifier = `-${EMAIL_OTP_FAIL_WINDOW_MIN} minutes`;
+
+  const sendStats = db
+    .prepare(
+      `SELECT COUNT(*) as c, MIN(created_at) as oldest
+       FROM email_otp_codes
+       WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', ?)`
+    )
+    .get(email, role, sendWindowModifier) as { c: number; oldest: string | null };
+
+  const failStats = db
+    .prepare(
+      `SELECT COALESCE(SUM(attempts), 0) as s, MIN(CASE WHEN attempts > 0 THEN created_at END) as oldest_fail
+       FROM email_otp_codes
+       WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', ?)`
+    )
+    .get(email, role, failWindowModifier) as { s: number; oldest_fail: string | null };
+
+  if (failStats.s >= EMAIL_OTP_MAX_VERIFY_FAILS) {
+    const oldestMs = parseSqliteUtcMs(failStats.oldest_fail);
+    const remainingSec = oldestMs
+      ? Math.max(30, Math.ceil((oldestMs + EMAIL_OTP_FAIL_WINDOW_MIN * 60 * 1000 - Date.now()) / 1000))
+      : EMAIL_OTP_FAIL_WINDOW_MIN * 60;
+    return {
+      allowed: false,
+      retryAfterSec: remainingSec,
+      reason: 'fail_limit',
+      error: `تم تجاوز الحد المسموح لمحاولات إدخال الرمز الخاطئ لهذا البريد، يرجى الانتظار ${formatArabicWaitDuration(remainingSec)} قبل إعادة المحاولة.`,
+    };
+  }
+
+  if (sendStats.c >= EMAIL_OTP_MAX_PER_WINDOW) {
+    const oldestMs = parseSqliteUtcMs(sendStats.oldest);
+    const remainingSec = oldestMs
+      ? Math.max(30, Math.ceil((oldestMs + EMAIL_OTP_SEND_WINDOW_MIN * 60 * 1000 - Date.now()) / 1000))
+      : EMAIL_OTP_SEND_WINDOW_MIN * 60;
+    return {
+      allowed: false,
+      retryAfterSec: remainingSec,
+      reason: 'send_limit',
+      error: `تم إرسال الحد الأقصى من رموز التحقق (${EMAIL_OTP_MAX_PER_WINDOW} رموز خلال ${EMAIL_OTP_SEND_WINDOW_MIN} دقائق) لهذا البريد، يرجى الانتظار ${formatArabicWaitDuration(remainingSec)} قبل طلب رمز جديد.`,
+    };
+  }
+
+  return { allowed: true };
 }
 
 function resolveSmtpConfig(): {
@@ -6552,10 +6888,20 @@ async function dispatchEmailOtp(
     return { ok: true, delivery_channel: 'smtp' };
   } catch (err) {
     const safeErrMsg = err instanceof Error ? err.message : 'SMTP transport failure';
+    const smtpCode = typeof (err as { responseCode?: unknown })?.responseCode === 'number'
+      ? Number((err as { responseCode?: number }).responseCode)
+      : 0;
     console.error('[Email OTP SMTP Error]:', safeErrMsg);
+    const isRecipientRejected =
+      smtpCode === 550 ||
+      smtpCode === 551 ||
+      smtpCode === 553 ||
+      /recipient address rejected|invalid recipient|user unknown|no such user|mailbox unavailable/i.test(safeErrMsg);
     return {
       ok: false,
-      error: 'تعذر إرسال رمز التأكيد عبر Gmail، يرجى التأكد من صحة البريد الإلكتروني والمحاولة مرة أخرى.',
+      error: isRecipientRejected
+        ? 'تعذر تسليم الرسالة إلى هذا البريد الإلكتروني لأنه غير موجود أو لا يستقبل رسائل، يرجى التحقق من كتابته بشكل صحيح.'
+        : 'تعذر إرسال رمز التأكيد حاليًا بسبب خلل مؤقت في خدمة البريد على الخادم، يرجى المحاولة مرة أخرى بعد قليل.',
     };
   }
 }
@@ -6585,22 +6931,14 @@ app.post('/api/auth/otp/request', async (req, res) => {
     return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
   }
 
-  const recentReqCount = (
-    db
-      .prepare(
-        "SELECT COUNT(*) as c FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-10 minutes')"
-      )
-      .get(email, role) as { c: number }
-  ).c;
-  const recentFailCount = (
-    db
-      .prepare(
-        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
-      )
-      .get(email, role) as { s: number }
-  ).s;
-  if (recentReqCount >= 3 || recentFailCount >= 10) {
-    return res.status(429).json({ error: 'تم إرسال عدة رموز لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق قبل إعادة المحاولة' });
+  const quota = checkEmailOtpQuota(email, role);
+  if (!quota.allowed) {
+    res.setHeader('Retry-After', String(quota.retryAfterSec));
+    return res.status(429).json({
+      error: quota.error,
+      reason: quota.reason,
+      retry_after_sec: quota.retryAfterSec,
+    });
   }
 
   const unifiedSuccessMessage = 'تم إرسال رمز التأكيد المكون من 6 أرقام إلى بريدك الإلكتروني على Gmail.';
@@ -6629,7 +6967,8 @@ app.post('/api/auth/otp/request', async (req, res) => {
 
   const mailRes = await dispatchEmailOtp(email, code);
   if (!mailRes.ok) {
-    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpId);
+    // Delete unsent OTP record so transient SMTP errors never consume the user's OTP rate limit
+    db.prepare('DELETE FROM email_otp_codes WHERE id = ?').run(otpId);
     return res.status(503).json({ error: mailRes.error });
   }
 
@@ -6868,22 +7207,14 @@ const handleCustomerRegisterRequestOtp = async (req: express.Request, res: expre
   }
 
   const regRole = 'customer_register';
-  const recentReqCount = (
-    db
-      .prepare(
-        "SELECT COUNT(*) as c FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-10 minutes')"
-      )
-      .get(email, regRole) as { c: number }
-  ).c;
-  const recentFailCount = (
-    db
-      .prepare(
-        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
-      )
-      .get(email, regRole) as { s: number }
-  ).s;
-  if (recentReqCount >= 3 || recentFailCount >= 10) {
-    return res.status(429).json({ error: 'تم إرسال عدة رموز تأكيد لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق' });
+  const quota = checkEmailOtpQuota(email, regRole);
+  if (!quota.allowed) {
+    res.setHeader('Retry-After', String(quota.retryAfterSec));
+    return res.status(429).json({
+      error: quota.error,
+      reason: quota.reason,
+      retry_after_sec: quota.retryAfterSec,
+    });
   }
 
   const code = String(crypto.randomInt(100000, 1000000));
@@ -6906,7 +7237,7 @@ const handleCustomerRegisterRequestOtp = async (req: express.Request, res: expre
     plainText: `رمز تأكيد البريد الإلكتروني لإنشاء حسابك في اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
   });
   if (!mailRes.ok) {
-    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpId);
+    db.prepare('DELETE FROM email_otp_codes WHERE id = ?').run(otpId);
     return res.status(503).json({ error: mailRes.error });
   }
 
@@ -7173,22 +7504,14 @@ app.post('/api/mobile/customer/forgot-password/request', async (req, res) => {
   }
 
   const resetRole = 'customer_reset';
-  const recentReqCount = (
-    db
-      .prepare(
-        "SELECT COUNT(*) as c FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-10 minutes')"
-      )
-      .get(email, resetRole) as { c: number }
-  ).c;
-  const recentFailCount = (
-    db
-      .prepare(
-        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = ? AND created_at >= datetime('now', '-15 minutes')"
-      )
-      .get(email, resetRole) as { s: number }
-  ).s;
-  if (recentReqCount >= 3 || recentFailCount >= 10) {
-    return res.status(429).json({ error: 'تم إرسال عدة رموز استعادة لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق' });
+  const quota = checkEmailOtpQuota(email, resetRole);
+  if (!quota.allowed) {
+    res.setHeader('Retry-After', String(quota.retryAfterSec));
+    return res.status(429).json({
+      error: quota.error,
+      reason: quota.reason,
+      retry_after_sec: quota.retryAfterSec,
+    });
   }
 
   const code = String(crypto.randomInt(100000, 1000000));
@@ -7208,7 +7531,7 @@ app.post('/api/mobile/customer/forgot-password/request', async (req, res) => {
     plainText: `رمز إعادة تعيين كلمة المرور لحسابك في اطلبها هو: ${code} (صالح لمدة 5 دقائق).`,
   });
   if (!mailRes.ok) {
-    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpId);
+    db.prepare('DELETE FROM email_otp_codes WHERE id = ?').run(otpId);
     return res.status(503).json({ error: mailRes.error });
   }
 
@@ -7460,6 +7783,13 @@ app.post('/api/mobile/captain/register', (req, res) => {
     entity_id: id,
     details: `تسجيل كابتن جديد (@${normalizedUsername}) بمركبة ${vehicle_type} - ${vehicle_model || ''} (${plate_number}) — قيد المراجعة`,
   });
+  broadcastToRooms(['admin:all', 'rides:all'], {
+    type: 'captains:updated',
+    action: 'registered',
+    captain_id: id,
+    full_name: String(full_name).trim(),
+    verification_status: 'under_review',
+  });
   const tokens = issueSessionForUser(req, res, {
     userId: id,
     role: 'captain',
@@ -7694,19 +8024,22 @@ app.patch(
         total_stores_count: totalCount,
       });
       if (order.customer_id) {
-        db.prepare(`
-          INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, sent_by)
-          VALUES (?, 'customer', ?, ?, 'operational', ?, ?, 'orders', 'otlobha_customer', 1, ?)
-        `).run(
-          uid('notif'),
-          String(order.zone_name || 'all'),
-          String(order.customer_id),
-          'تم استلام الطلب وهو في الطريق إليك الآن',
-          totalCount > 1
-            ? `استلم الطيار ${String(cap.full_name)} طلبك من جميع المتاجر (${totalCount}) وهو في الطريق إليك الآن.`
-            : `استلم الطيار ${String(cap.full_name)} طلبك وهو في الطريق إليك الآن.`,
-          String(cap.full_name)
-        );
+        enqueueSystemPushNotification({
+          targetApp: 'customer',
+          targetZone: String(order.zone_name || 'all'),
+          recipientId: String(order.customer_id),
+          category: 'operational',
+          titleAr: 'تم استلام الطلب وهو في الطريق إليك الآن',
+          bodyAr:
+            totalCount > 1
+              ? `استلم الطيار ${String(cap.full_name)} طلبك من جميع المتاجر (${totalCount}) وهو في الطريق إليك الآن.`
+              : `استلم الطيار ${String(cap.full_name)} طلبك وهو في الطريق إليك الآن.`,
+          deepLink: 'order',
+          orderId: order_id,
+          status: 'on_the_way',
+          channelId: 'otlobha_orders_channel',
+          sentBy: String(cap.full_name),
+        });
       }
     } else {
       broadcastOrderChat(order_id, {
@@ -7817,6 +8150,38 @@ app.patch(
   }
 
   broadcastOrderChat(order_id, { type: 'order:status', order_id, status: effectiveStatus });
+
+  if (order.customer_id) {
+    if (effectiveStatus === 'on_the_way') {
+      enqueueSystemPushNotification({
+        targetApp: 'customer',
+        targetZone: String(order.zone_name || 'all'),
+        recipientId: String(order.customer_id),
+        category: 'operational',
+        titleAr: `طلبك #${String(order.order_number)} في الطريق إليك`,
+        bodyAr: `استلم الطيار ${String(cap.full_name)} طلبك وهو في طريقه إلى عنوانك الآن.`,
+        deepLink: 'order',
+        orderId: order_id,
+        status: 'on_the_way',
+        channelId: 'otlobha_orders_channel',
+        sentBy: String(cap.full_name),
+      });
+    } else if (effectiveStatus === 'delivered') {
+      enqueueSystemPushNotification({
+        targetApp: 'customer',
+        targetZone: String(order.zone_name || 'all'),
+        recipientId: String(order.customer_id),
+        category: 'operational',
+        titleAr: `تم تسليم طلبك #${String(order.order_number)} بنجاح`,
+        bodyAr: `قام الكابتن ${String(cap.full_name)} بتسليم طلبك. نتمنى لك تجربة رائعة مع اطلبها!`,
+        deepLink: 'order',
+        orderId: order_id,
+        status: 'delivered',
+        channelId: 'otlobha_orders_channel',
+        sentBy: String(cap.full_name),
+      });
+    }
+  }
 
   if (effectiveStatus === 'delivered') {
     createPendingCaptainRating({
@@ -8022,6 +8387,38 @@ app.patch(
     status,
     trip: updatedTrip,
   });
+
+  if (trip.customer_id) {
+    const tripStatusCopy: Record<string, { title: string; body: string }> = {
+      captain_accepted: {
+        title: `وافق الكابتن ${String(cap.full_name)} على مشوارك`,
+        body: `المشوار #${String(trip.trip_number)} قيد التنفيذ والكابتن في طريقه إليك الآن.`,
+      },
+      captain_arrived: {
+        title: 'وصل الكابتن إلى نقطة الالتقاء',
+        body: `الكابتن ${String(cap.full_name)} في انتظارك الآن عند موقع الانطلاق.`,
+      },
+      in_progress: {
+        title: 'بدأت رحلتك الآن',
+        body: `نتمنى لك رحلة آمنة ومريحة مع الكابتن ${String(cap.full_name)}.`,
+      },
+    };
+    const copy = tripStatusCopy[String(status)];
+    if (copy) {
+      enqueueSystemPushNotification({
+        targetApp: 'customer',
+        recipientId: String(trip.customer_id),
+        category: 'operational',
+        titleAr: copy.title,
+        bodyAr: copy.body,
+        deepLink: 'trip',
+        tripId: trip_id,
+        status: String(status),
+        channelId: 'otlobha_orders_channel',
+        sentBy: String(cap.full_name),
+      });
+    }
+  }
 
   recordAuditLog({
     actor_name: auth.fullName,
@@ -8516,16 +8913,17 @@ app.post('/api/support/tickets/:id/messages', requireAuth, (req, res) => {
   db.prepare("UPDATE support_tickets SET last_message_at = datetime('now'), status = ? WHERE id = ?").run(nextStatus, id);
 
   if (role === 'admin') {
-    const notifId = `ntf_${crypto.randomUUID().slice(0, 8)}`;
-    db.prepare(
-      `INSERT INTO notifications (id, target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link, fcm_topic, audience_count, is_read, sent_by)
-       VALUES (?, 'customer', 'all', ?, 'support_reply', ?, ?, 'support', 'otlobha_customer', 1, 0, 'إدارة اطلبها')`
-    ).run(
-      notifId,
-      ticket.customer_id ? String(ticket.customer_id) : null,
-      `رد جديد من الإدارة (${String(ticket.ticket_number)})`,
-      text.slice(0, 140)
-    );
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: 'all',
+      recipientId: ticket.customer_id ? String(ticket.customer_id) : null,
+      category: 'operational',
+      titleAr: `رد جديد من الإدارة (${String(ticket.ticket_number)})`,
+      bodyAr: text.slice(0, 140),
+      deepLink: 'notifications',
+      channelId: 'otlobha_admin_channel',
+      sentBy: 'إدارة اطلبها',
+    });
   }
 
   const message = db.prepare('SELECT * FROM support_messages WHERE id = ?').get(msgId);
@@ -8597,22 +8995,14 @@ app.post('/api/auth/merchant/register/request-otp', async (req, res) => {
     return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح أولًا' });
   }
 
-  const recentReqCount = (
-    db
-      .prepare(
-        "SELECT COUNT(*) as c FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = 'merchant_register' AND created_at >= datetime('now', '-10 minutes')"
-      )
-      .get(email) as { c: number }
-  ).c;
-  const recentFailCount = (
-    db
-      .prepare(
-        "SELECT COALESCE(SUM(attempts), 0) as s FROM email_otp_codes WHERE LOWER(email) = LOWER(?) AND role = 'merchant_register' AND created_at >= datetime('now', '-15 minutes')"
-      )
-      .get(email) as { s: number }
-  ).s;
-  if (recentReqCount >= 3 || recentFailCount >= 10) {
-    return res.status(429).json({ error: 'تم إرسال عدة رموز لهذا البريد مؤخرًا، يرجى الانتظار بضع دقائق' });
+  const quota = checkEmailOtpQuota(email, 'merchant_register');
+  if (!quota.allowed) {
+    res.setHeader('Retry-After', String(quota.retryAfterSec));
+    return res.status(429).json({
+      error: quota.error,
+      reason: quota.reason,
+      retry_after_sec: quota.retryAfterSec,
+    });
   }
 
   const unifiedRegMessage = 'تم إرسال رمز التحقق المكون من 6 أرقام إلى بريدك الإلكتروني على Gmail.';
@@ -8638,7 +9028,7 @@ app.post('/api/auth/merchant/register/request-otp', async (req, res) => {
 
   const mailRes = await dispatchEmailOtp(email, code);
   if (!mailRes.ok) {
-    db.prepare('UPDATE email_otp_codes SET is_used = 1 WHERE id = ?').run(otpId);
+    db.prepare('DELETE FROM email_otp_codes WHERE id = ?').run(otpId);
     return res.status(503).json({ error: mailRes.error });
   }
 
@@ -9137,7 +9527,10 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production' && process.env.DISABLE_VITE !== '1') {
     try {
       const vite = await createViteServer({
-        server: { middlewareMode: true },
+        server: {
+          middlewareMode: true,
+          hmr: false,
+        },
         appType: 'spa',
       });
       app.use(vite.middlewares);

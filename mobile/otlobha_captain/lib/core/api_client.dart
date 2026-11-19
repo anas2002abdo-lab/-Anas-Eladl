@@ -236,7 +236,7 @@ class OtlobhaCaptainApi {
     return data;
   }
 
-  Future<void> logout() async {
+  Future<void> logout({String? fcmToken, String? deviceId}) async {
     try {
       await _execute(
         () => http.post(
@@ -244,6 +244,8 @@ class OtlobhaCaptainApi {
           headers: _headers(json: true),
           body: jsonEncode({
             if (_refreshToken != null && _refreshToken!.isNotEmpty) 'refresh_token': _refreshToken,
+            if (fcmToken != null && fcmToken.isNotEmpty) 'fcm_token': fcmToken,
+            if (deviceId != null && deviceId.isNotEmpty) 'device_id': deviceId,
           }),
         ),
         timeout: const Duration(seconds: 10),
@@ -252,6 +254,50 @@ class OtlobhaCaptainApi {
       // ignore logout transport errors; always clear local tokens
     } finally {
       clearTokens();
+    }
+  }
+
+  Future<Map<String, dynamic>> registerPushToken({
+    required String fcmToken,
+    String? deviceId,
+    String platform = 'android',
+    String? appVersion,
+    String? deviceLabel,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/mobile/push/register'),
+        headers: h,
+        body: jsonEncode({
+          'fcm_token': fcmToken,
+          if (deviceId != null && deviceId.isNotEmpty) 'device_id': deviceId,
+          'platform': platform,
+          if (appVersion != null && appVersion.isNotEmpty) 'app_version': appVersion,
+          if (deviceLabel != null && deviceLabel.isNotEmpty) 'device_label': deviceLabel,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/mobile/push/register');
+  }
+
+  Future<void> unregisterPushToken({String? fcmToken, String? deviceId}) async {
+    if (!hasTokens) return;
+    try {
+      await _sendWithAuth(
+        (h) => http.post(
+          _apiUri('/api/mobile/push/unregister'),
+          headers: h,
+          body: jsonEncode({
+            if (fcmToken != null && fcmToken.isNotEmpty) 'fcm_token': fcmToken,
+            if (deviceId != null && deviceId.isNotEmpty) 'device_id': deviceId,
+          }),
+        ),
+        json: true,
+        timeout: const Duration(seconds: 10),
+      );
+    } catch (_) {
+      // Best-effort unregister on logout
     }
   }
 

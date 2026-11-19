@@ -60,6 +60,7 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
   };
 
   useEffect(() => {
+    onRefresh().catch(() => {});
     loadRatings();
 
     let closed = false;
@@ -74,6 +75,8 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
         try {
           const payload = JSON.parse(String(evt.data || '{}'));
           if (
+            payload.type === 'captains:updated' ||
+            payload.type === 'captain:registered' ||
             payload.type === 'captain:location' ||
             payload.type === 'trip:completed' ||
             payload.type === 'trip:cancelled' ||

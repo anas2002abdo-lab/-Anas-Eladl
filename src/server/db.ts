@@ -551,6 +551,23 @@ export function initDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, user_role);
     CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
+
+    CREATE TABLE IF NOT EXISTS push_device_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      user_role TEXT NOT NULL,
+      fcm_token TEXT UNIQUE NOT NULL,
+      device_id TEXT,
+      platform TEXT NOT NULL DEFAULT 'android',
+      app_version TEXT,
+      device_label TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_tokens_user_role ON push_device_tokens(user_id, user_role, is_active);
+    CREATE INDEX IF NOT EXISTS idx_push_tokens_role_active ON push_device_tokens(user_role, is_active);
   `);
 
   const adminCols = db.prepare("PRAGMA table_info('admin_users')").all() as Array<{ name: string }>;

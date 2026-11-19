@@ -431,10 +431,29 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ delivery_id, otp }),
     }),
+  getFcmStatus: () =>
+    request<{
+      configured: boolean;
+      source: string;
+      project_id: string | null;
+      registered_devices: { total: number; customer: number; captain: number };
+    }>('/api/notifications/fcm-status'),
   getNotifications: (targetApp?: string) =>
     request<any[]>(`/api/notifications${targetApp ? `?target_app=${targetApp}` : ''}`),
   sendNotification: (body: Record<string, unknown>) =>
-    request<{ id: string; fcm_topic: string; audience_count: number }>('/api/notifications', {
+    request<{
+      id: string;
+      fcm_topic: string;
+      audience_count: number;
+      fcm_delivery?: {
+        fcm_enabled: boolean;
+        reason?: string;
+        targeted_devices: number;
+        sent_count: number;
+        failed_count: number;
+        deactivated_tokens: number;
+      };
+    }>('/api/notifications', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

@@ -16,6 +16,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
+import { normalizeEmail } from '../shared/email.ts';
 import type { Language } from '../shared/types.ts';
 
 interface Props {
@@ -93,13 +94,19 @@ export const CustomerAuthPortal: React.FC<Props> = ({
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loginIdentifier.trim() || !loginPassword) {
+    const rawIdent = loginIdentifier.trim();
+    if (!rawIdent || !loginPassword) {
       onNotify(isAr ? 'يرجى إدخال البريد الإلكتروني أو الهاتف وكلمة المرور' : 'Enter email/phone and password');
+      return;
+    }
+    const cleanedIdent = rawIdent.includes('@') || rawIdent.includes('＠') ? normalizeEmail(rawIdent) : rawIdent;
+    if (!cleanedIdent) {
+      onNotify(isAr ? 'يرجى إدخال بريد إلكتروني صحيح' : 'Enter a valid email');
       return;
     }
     setLoading(true);
     try {
-      const res = await api.loginCustomer(loginIdentifier.trim(), loginPassword);
+      const res = await api.loginCustomer(cleanedIdent, loginPassword);
       onNotify(isAr ? 'تم تسجيل الدخول بنجاح' : 'Signed in successfully');
       onVerified(res.user);
     } catch (err) {
@@ -115,7 +122,8 @@ export const CustomerAuthPortal: React.FC<Props> = ({
       onNotify(isAr ? 'يرجى إدخال الاسم الكامل (حرفين على الأقل)' : 'Enter your full name');
       return;
     }
-    if (!regEmail.trim() || !regEmail.includes('@')) {
+    const cleanEmail = normalizeEmail(regEmail);
+    if (!cleanEmail) {
       onNotify(isAr ? 'يرجى إدخال بريد إلكتروني صحيح' : 'Enter a valid email');
       return;
     }
@@ -131,19 +139,19 @@ export const CustomerAuthPortal: React.FC<Props> = ({
     try {
       const res = await api.requestCustomerRegisterOtp({
         full_name: regName.trim(),
-        email: regEmail.trim(),
+        email: cleanEmail,
         phone: regPhone.trim() || undefined,
         password: regPassword,
       });
-      setRegEmail(res.email);
+      setRegEmail(res.email || cleanEmail);
       setRegCode('');
       setRegStep('verify');
       setRegResendIn(60);
       onNotify(
         res.message ||
           (isAr
-            ? `تم إرسال رمز تأكيد البريد المكون من 6 أرقام إلى ${res.email}`
-            : `6-digit verification code sent to ${res.email}`)
+            ? `تم إرسال رمز تأكيد البريد المكون من 6 أرقام إلى ${res.email || cleanEmail}`
+            : `6-digit verification code sent to ${res.email || cleanEmail}`)
       );
     } catch (err) {
       onNotify((err as Error).message);
@@ -154,6 +162,11 @@ export const CustomerAuthPortal: React.FC<Props> = ({
 
   const handleConfirmRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanEmail = normalizeEmail(regEmail);
+    if (!cleanEmail) {
+      onNotify(isAr ? 'يرجى إدخال بريد إلكتروني صحيح' : 'Enter a valid email');
+      return;
+    }
     if (regCode.trim().length !== 6) {
       onNotify(isAr ? 'أدخل رمز تأكيد البريد المكون من 6 أرقام' : 'Enter the 6-digit email verification code');
       return;
@@ -162,7 +175,7 @@ export const CustomerAuthPortal: React.FC<Props> = ({
     try {
       const res = await api.registerCustomer({
         full_name: regName.trim(),
-        email: regEmail.trim(),
+        email: cleanEmail,
         phone: regPhone.trim() || undefined,
         password: regPassword,
         code: regCode.trim(),
@@ -178,22 +191,23 @@ export const CustomerAuthPortal: React.FC<Props> = ({
 
   const handleRequestResetCode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!forgotEmail.trim() || !forgotEmail.includes('@')) {
-      onNotify(isAr ? 'أدخل بريدك الإلكتروني المسجل أولًا' : 'Enter your registered email');
+    const cleanEmail = normalizeEmail(forgotEmail);
+    if (!cleanEmail) {
+      onNotify(isAr ? 'أدخل بريدك الإلكتروني المسجل بشكل صحيح أولًا' : 'Enter your registered email');
       return;
     }
     setLoading(true);
     try {
-      const res = await api.requestCustomerPasswordReset(forgotEmail.trim());
-      setForgotEmail(res.email);
+      const res = await api.requestCustomerPasswordReset(cleanEmail);
+      setForgotEmail(res.email || cleanEmail);
       setForgotCode('');
       setForgotStep('reset');
       setForgotResendIn(60);
       onNotify(
         res.message ||
           (isAr
-            ? `تم إرسال رمز إعادة تعيين كلمة المرور إلى ${res.email}`
-            : `Reset code sent to ${res.email}`)
+            ? `تم إرسال رمز إعادة تعيين كلمة المرور إلى ${res.email || cleanEmail}`
+            : `Reset code sent to ${res.email || cleanEmail}`)
       );
     } catch (err) {
       onNotify((err as Error).message);
@@ -204,6 +218,11 @@ export const CustomerAuthPortal: React.FC<Props> = ({
 
   const handleConfirmResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanEmail = normalizeEmail(forgotEmail);
+    if (!cleanEmail) {
+      onNotify(isAr ? 'يرجى إدخال بريد إلكتروني صحيح' : 'Enter a valid email');
+      return;
+    }
     if (forgotCode.trim().length !== 6) {
       onNotify(isAr ? 'أدخل رمز التحقق المكون من 6 أرقام' : 'Enter the 6-digit verification code');
       return;
@@ -218,7 +237,7 @@ export const CustomerAuthPortal: React.FC<Props> = ({
     }
     setLoading(true);
     try {
-      const res = await api.resetCustomerPassword(forgotEmail.trim(), forgotCode.trim(), forgotNewPass);
+      const res = await api.resetCustomerPassword(cleanEmail, forgotCode.trim(), forgotNewPass);
       onNotify(res.message || (isAr ? 'تم تحديث كلمة المرور بنجاح وتسجيل دخولك' : 'Password updated'));
       onVerified(res.user);
     } catch (err) {
@@ -230,21 +249,22 @@ export const CustomerAuthPortal: React.FC<Props> = ({
 
   const handleRequestOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!otpEmail.trim() || !otpEmail.includes('@')) {
+    const cleanEmail = normalizeEmail(otpEmail);
+    if (!cleanEmail) {
       onNotify(isAr ? 'أدخل بريدًا إلكترونيًا صحيحًا أولًا' : 'Enter a valid email');
       return;
     }
     setLoading(true);
     try {
-      const res = await api.requestEmailOtp(otpEmail.trim(), 'customer');
-      setOtpEmail(res.email);
+      const res = await api.requestEmailOtp(cleanEmail, 'customer');
+      setOtpEmail(res.email || cleanEmail);
       setOtpCode('');
       setOtpStep('code');
       setOtpResendIn(60);
       onNotify(
         isAr
-          ? `تم إرسال رمز التأكيد المكون من 6 أرقام إلى ${res.email}`
-          : `Confirmation code sent to ${res.email}`
+          ? `تم إرسال رمز التأكيد المكون من 6 أرقام إلى ${res.email || cleanEmail}`
+          : `Confirmation code sent to ${res.email || cleanEmail}`
       );
     } catch (err) {
       onNotify((err as Error).message);
@@ -255,6 +275,11 @@ export const CustomerAuthPortal: React.FC<Props> = ({
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanEmail = normalizeEmail(otpEmail);
+    if (!cleanEmail) {
+      onNotify(isAr ? 'يرجى إدخال بريد إلكتروني صحيح' : 'Enter a valid email');
+      return;
+    }
     if (otpCode.trim().length !== 6) {
       onNotify(isAr ? 'أدخل رمز التأكيد المكون من 6 أرقام' : 'Enter 6-digit code');
       return;
@@ -262,7 +287,7 @@ export const CustomerAuthPortal: React.FC<Props> = ({
     setLoading(true);
     try {
       const res = await api.verifyEmailOtp(
-        otpEmail.trim(),
+        cleanEmail,
         otpCode.trim(),
         'customer',
         otpName.trim() || undefined,
@@ -464,7 +489,12 @@ export const CustomerAuthPortal: React.FC<Props> = ({
                 </label>
                 <div className="relative">
                   <input
-                    type="email"
+                    type="text"
+                    inputMode="email"
+                    autoComplete="email"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     dir="ltr"
                     required
                     value={regEmail}
@@ -695,7 +725,12 @@ export const CustomerAuthPortal: React.FC<Props> = ({
                   </label>
                   <div className="relative">
                     <input
-                      type="email"
+                      type="text"
+                      inputMode="email"
+                      autoComplete="email"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       dir="ltr"
                       required
                       value={forgotEmail}
@@ -866,7 +901,12 @@ export const CustomerAuthPortal: React.FC<Props> = ({
                     {isAr ? 'البريد الإلكتروني (Gmail)' : 'Email Address'}
                   </label>
                   <input
-                    type="email"
+                    type="text"
+                    inputMode="email"
+                    autoComplete="email"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     dir="ltr"
                     required
                     value={otpEmail}

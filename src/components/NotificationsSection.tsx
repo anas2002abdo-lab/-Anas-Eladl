@@ -23,10 +23,20 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
   const [titleAr, setTitleAr] = useState<string>('');
   const [bodyAr, setBodyAr] = useState<string>('');
   const [sending, setSending] = useState<boolean>(false);
+  const [fcmStatus, setFcmStatus] = useState<{
+    configured: boolean;
+    source: string;
+    project_id: string | null;
+    registered_devices: { total: number; customer: number; captain: number };
+  } | null>(null);
 
   const loadHistory = async () => {
-    const rows = await api.getNotifications(filterApp === 'all_filter' ? undefined : filterApp);
+    const [rows, status] = await Promise.all([
+      api.getNotifications(filterApp === 'all_filter' ? undefined : filterApp),
+      api.getFcmStatus().catch(() => null),
+    ]);
     setHistory(rows);
+    if (status) setFcmStatus(status);
   };
 
   useEffect(() => {
@@ -80,10 +90,21 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
       setTitleAr('');
       setBodyAr('');
       await loadHistory();
+      const fcm = res.fcm_delivery;
+      const fcmNoteAr = fcm
+        ? fcm.fcm_enabled
+          ? ` — إرسال FCM فعلي: ${fcm.sent_count} من ${fcm.targeted_devices} جهاز`
+          : ` — محفوظ داخل التطبيق (${fcm.targeted_devices} جهاز مسجل، FCM بانتظار مفتاح الخدمة)`
+        : '';
+      const fcmNoteEn = fcm
+        ? fcm.fcm_enabled
+          ? ` — FCM delivered: ${fcm.sent_count}/${fcm.targeted_devices} devices`
+          : ` — In-app saved (${fcm.targeted_devices} registered devices, FCM credentials pending)`
+        : '';
       onNotify(
         isAr
-          ? `تم بث الإشعار بنجاح (${res.fcm_topic}) إلى ${res.audience_count} مستخدم — يمكنك رؤيته فورًا في معاينة التطبيق`
-          : `Notification broadcast sent (${res.fcm_topic}) to ${res.audience_count} recipients`
+          ? `تم بث الإشعار بنجاح (${res.fcm_topic})${fcmNoteAr}`
+          : `Notification broadcast sent (${res.fcm_topic})${fcmNoteEn}`
       );
     } catch (err) {
       onNotify((err as Error).message);
@@ -129,11 +150,23 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
         </div>
         <div className="bg-white border border-slate-200 rounded-lg p-4">
           <div className="flex items-center justify-between text-slate-500 text-xs mb-1">
-            <span>{isAr ? 'محرك البث الفوري' : 'Push Gateway'}</span>
-            <Users className="w-4 h-4 text-emerald-600" />
+            <span>{isAr ? 'محرك Firebase FCM والأجهزة' : 'Firebase FCM & Devices'}</span>
+            <Users className={`w-4 h-4 ${fcmStatus?.configured ? 'text-emerald-600' : 'text-amber-600'}`} />
           </div>
-          <p className="text-sm font-bold text-slate-900 mt-1">FCM Topics + In-App</p>
-          <p className="text-xs text-slate-500">{isAr ? 'مجاني (Zero-Budget)' : 'Free Tier Ready'}</p>
+          <p className="text-sm font-bold text-slate-900 mt-1">
+            {fcmStatus?.configured
+              ? isAr
+                ? 'FCM مفعّل وجاهز'
+                : 'FCM Active'
+              : isAr
+              ? 'FCM بانتظار مفتاح الخدمة'
+              : 'FCM Key Pending'}
+          </p>
+          <p className="text-xs text-slate-500 tabular-nums">
+            {isAr
+              ? `أجهزة مسجلة: ${fcmStatus?.registered_devices.total ?? 0} (عملاء ${fcmStatus?.registered_devices.customer ?? 0} · طيارون ${fcmStatus?.registered_devices.captain ?? 0})`
+              : `Devices: ${fcmStatus?.registered_devices.total ?? 0} (Cust ${fcmStatus?.registered_devices.customer ?? 0} · Cap ${fcmStatus?.registered_devices.captain ?? 0})`}
+          </p>
         </div>
       </div>
 
