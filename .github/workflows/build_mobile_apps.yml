@@ -65,6 +65,10 @@ jobs:
           FIREBASE_SECRET_NAME: "FIREBASE_CUSTOMER_GOOGLE_SERVICES_JSON_B64"
           EXPECTED_ANDROID_PACKAGE: "com.otlobha.otlobha_customer"
           REQUIRE_GOOGLE_SERVICES: "1"
+                    CUSTOMER_KEYSTORE_B64: ${{ secrets.CUSTOMER_KEYSTORE_BASE64 }}
+          CUSTOMER_KEY_ALIAS: ${{ secrets.CUSTOMER_KEY_ALIAS }}
+          CUSTOMER_STORE_PASSWORD: ${{ secrets.CUSTOMER_STORE_PASSWORD }}
+          CUSTOMER_KEY_PASSWORD: ${{ secrets.CUSTOMER_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           cd mobile/otlobha_customer
