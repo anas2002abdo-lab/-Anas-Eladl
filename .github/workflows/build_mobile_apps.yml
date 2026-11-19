@@ -59,7 +59,7 @@ jobs:
           flutter config --jdk-dir="$JAVA_HOME"
           flutter --version
 
-           - name: Prepare & Build Otlobha Customer APK
+      - name: Prepare & Build Otlobha Customer APK
         env:
           FIREBASE_GOOGLE_SERVICES_JSON_B64: ${{ secrets.FIREBASE_CUSTOMER_GOOGLE_SERVICES_JSON_B64 }}
           FIREBASE_SECRET_NAME: "FIREBASE_CUSTOMER_GOOGLE_SERVICES_JSON_B64"
