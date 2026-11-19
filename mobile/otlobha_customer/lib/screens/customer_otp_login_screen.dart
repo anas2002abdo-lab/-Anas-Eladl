@@ -151,6 +151,12 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
         _showMessage('تم تسجيل الدخول بنجاح');
         widget.onVerified(user);
       }
+    } on ApiException catch (e) {
+      if (e.statusCode == 404 && identifier.contains('@')) {
+        await _fallbackOtpAuthFlow(email: identifier, password: pass);
+      } else {
+        _showMessage(_cleanError(e));
+      }
     } catch (e) {
       _showMessage(_cleanError(e));
     } finally {
@@ -200,6 +206,12 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
         _showMessage('أهلاً بك في اطلبها! سيصلك إشعار لتوثيق بريدك الإلكتروني.');
         widget.onVerified(user);
       }
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) {
+        await _fallbackOtpAuthFlow(email: cleanEmail, fullName: name, password: pass, isRegister: true);
+      } else {
+        _showMessage(_cleanError(e));
+      }
     } catch (e) {
       _showMessage(_cleanError(e));
     } finally {
@@ -207,20 +219,295 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
     }
   }
 
+  Future<void> _fallbackOtpAuthFlow({
+    required String email,
+    String? fullName,
+    String? password,
+    bool isRegister = false,
+  }) async {
+    try {
+      bool useLegacy = true;
+      if (isRegister && fullName != null && password != null) {
+        final reqRes = await widget.api.requestCustomerRegisterOtp(
+          fullName: fullName,
+          email: email,
+          password: password,
+        );
+        useLegacy = reqRes['auth_flow'] == 'legacy_otp';
+      } else {
+        await widget.api.requestOtp(email, role: 'customer');
+      }
+      if (!mounted) return;
+      _showMessage('تم إرسال رمز تحقق من 6 أرقام إلى بريدك الإلكتروني');
+      final codeCtrl = TextEditingController();
+      bool submitting = false;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => Directionality(
+            textDirection: TextDirection.rtl,
+            child: AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              title: Text(isRegister ? 'تأكيد إنشاء الحساب' : 'تأكيد تسجيل الدخول'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('أدخل الرمز المكون من 6 أرقام المرسل إلى $email', style: const TextStyle(fontSize: 13)),
+                  const SizedBox(height: 12),
+                  Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: TextField(
+                      controller: codeCtrl,
+                      keyboardType: TextInputType.number,
+                      maxLength: 6,
+                      textAlign: TextAlign.center,
+                      decoration: const InputDecoration(
+                        hintText: '000000',
+                        counterText: '',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: submitting ? null : () => Navigator.of(ctx).pop(),
+                  child: const Text('إلغاء'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFA92224), foregroundColor: Colors.white),
+                  onPressed: submitting
+                      ? null
+                      : () async {
+                          final code = codeCtrl.text.trim();
+                          if (code.length != 6) {
+                            _showMessage('أدخل رمز التحقق المكون من 6 أرقام');
+                            return;
+                          }
+                          setDialogState(() => submitting = true);
+                          try {
+                            final Map<String, dynamic> res = (isRegister && fullName != null && password != null)
+                                ? await widget.api.registerCustomer(
+                                    fullName: fullName,
+                                    email: email,
+                                    password: password,
+                                    code: code,
+                                    useLegacyOtpFlow: useLegacy,
+                                  )
+                                : await widget.api.verifyOtp(
+                                    email,
+                                    code,
+                                    role: 'customer',
+                                    fullName: fullName,
+                                    password: password,
+                                  );
+                            final user = res['user'] is Map
+                                ? Map<String, dynamic>.from(res['user'] as Map)
+                                : <String, dynamic>{};
+                            await widget.api.persistUserSnapshot(user);
+                            if (ctx.mounted) Navigator.of(ctx).pop();
+                            if (mounted) {
+                              _showMessage('تم تسجيل الدخول بنجاح');
+                              widget.onVerified(user);
+                            }
+                          } catch (err) {
+                            setDialogState(() => submitting = false);
+                            _showMessage(_cleanError(err));
+                          }
+                        },
+                  child: Text(submitting ? 'جاري التحقق...' : 'تأكيد'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      codeCtrl.dispose();
+    } catch (err) {
+      _showMessage(_cleanError(err));
+    }
+  }
+
   Future<void> _openForgotPasswordExternalPage() async {
     final raw = _loginIdentifierCtrl.text.trim();
     final prefillEmail = (raw.contains('@') || raw.contains('＠')) ? raw : null;
     final uri = widget.api.forgotPasswordExternalUri(email: prefillEmail);
+    setState(() => _loading = true);
+    bool safeExternal = false;
     try {
-      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!launched && mounted) {
-        _showMessage('تعذر فتح صفحة استعادة كلمة المرور في المتصفح');
-      }
-    } catch (_) {
-      if (mounted) {
-        _showMessage('تعذر فتح صفحة استعادة كلمة المرور في المتصفح');
-      }
+      safeExternal = await widget.api.isSafeExternalPortalUri(uri);
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
+
+    if (safeExternal) {
+      try {
+        final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (launched) return;
+      } catch (_) {}
+    }
+
+    // Never open an unverified URL that could show the Admin Dashboard; use safe in-app 2-step reset dialog instead.
+    if (!mounted) return;
+    await _showInAppForgotPasswordDialog(initialEmail: prefillEmail ?? '');
+  }
+
+  Future<void> _showInAppForgotPasswordDialog({String initialEmail = ''}) async {
+    final emailCtrl = TextEditingController(text: initialEmail);
+    final codeCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+    int step = 1;
+    bool busy = false;
+    String? errMsg;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            title: const Text('استعادة كلمة المرور'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (errMsg != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEF2F2),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFFECACA)),
+                      ),
+                      child: Text(errMsg!, style: const TextStyle(color: Color(0xFFB91C1C), fontSize: 12.5)),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (step == 1) ...[
+                    const Text('أدخل بريدك الإلكتروني لإرسال رمز الاستعادة المكون من 6 أرقام.', style: TextStyle(fontSize: 13)),
+                    const SizedBox(height: 12),
+                    Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: TextField(
+                        controller: emailCtrl,
+                        keyboardType: TextInputType.emailAddress,
+                        decoration: const InputDecoration(labelText: 'البريد الإلكتروني', border: OutlineInputBorder()),
+                      ),
+                    ),
+                  ] else ...[
+                    Text('أدخل الرمز المرسل إلى ${emailCtrl.text.trim()} وكلمة المرور الجديدة.', style: const TextStyle(fontSize: 13)),
+                    const SizedBox(height: 10),
+                    Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: TextField(
+                        controller: codeCtrl,
+                        keyboardType: TextInputType.number,
+                        maxLength: 6,
+                        textAlign: TextAlign.center,
+                        decoration: const InputDecoration(labelText: 'رمز التحقق (6 أرقام)', counterText: '', border: OutlineInputBorder()),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: TextField(
+                        controller: passCtrl,
+                        obscureText: true,
+                        decoration: const InputDecoration(labelText: 'كلمة المرور الجديدة', border: OutlineInputBorder()),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: TextField(
+                        controller: confirmCtrl,
+                        obscureText: true,
+                        decoration: const InputDecoration(labelText: 'تأكيد كلمة المرور الجديدة', border: OutlineInputBorder()),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.of(ctx).pop(),
+                child: const Text('إلغاء'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFA92224), foregroundColor: Colors.white),
+                onPressed: busy
+                    ? null
+                    : () async {
+                        final cleanEmail = OtlobhaCustomerApi.normalizeEmail(emailCtrl.text);
+                        if (cleanEmail == null) {
+                          setDialogState(() => errMsg = 'يرجى إدخال بريد إلكتروني صحيح');
+                          return;
+                        }
+                        if (step == 1) {
+                          setDialogState(() {
+                            busy = true;
+                            errMsg = null;
+                          });
+                          try {
+                            await widget.api.requestPasswordReset(cleanEmail);
+                            setDialogState(() {
+                              busy = false;
+                              step = 2;
+                            });
+                          } catch (e) {
+                            setDialogState(() {
+                              busy = false;
+                              errMsg = _cleanError(e);
+                            });
+                          }
+                        } else {
+                          final code = codeCtrl.text.trim();
+                          if (code.length != 6) {
+                            setDialogState(() => errMsg = 'أدخل رمز التحقق المكون من 6 أرقام');
+                            return;
+                          }
+                          if (passCtrl.text.length < 6) {
+                            setDialogState(() => errMsg = 'كلمة المرور يجب أن لا تقل عن 6 أحرف');
+                            return;
+                          }
+                          if (passCtrl.text != confirmCtrl.text) {
+                            setDialogState(() => errMsg = 'كلمتا المرور غير متطابقتين');
+                            return;
+                          }
+                          setDialogState(() {
+                            busy = true;
+                            errMsg = null;
+                          });
+                          try {
+                            await widget.api.resetPassword(email: cleanEmail, code: code, newPassword: passCtrl.text);
+                            if (ctx.mounted) Navigator.of(ctx).pop();
+                            _showMessage('تم تغيير كلمة المرور بنجاح! يمكنك تسجيل الدخول الآن.');
+                          } catch (e) {
+                            setDialogState(() {
+                              busy = false;
+                              errMsg = _cleanError(e);
+                            });
+                          }
+                        }
+                      },
+                child: Text(busy ? 'جاري التنفيذ...' : (step == 1 ? 'إرسال الرمز' : 'حفظ كلمة المرور')),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    emailCtrl.dispose();
+    codeCtrl.dispose();
+    passCtrl.dispose();
+    confirmCtrl.dispose();
   }
 
   InputDecoration _inputDecoration({

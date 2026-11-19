@@ -369,11 +369,17 @@ class OtlobhaCustomerApi {
     return data;
   }
 
-  static Uri _portalUri(String dedicatedPath, String fallbackPath, {Map<String, String>? queryParameters}) {
+  static Uri _portalUri(
+    String dedicatedPath,
+    String staticHtmlPath,
+    String fallbackPath, {
+    Map<String, String>? queryParameters,
+  }) {
     final dedicatedBase = normalizeBaseUrl(customerPortalBaseUrl);
     final useDedicated = dedicatedBase.isNotEmpty;
     final base = useDedicated ? dedicatedBase : _resolvedBaseUrl;
-    final path = useDedicated ? dedicatedPath : fallbackPath;
+    final isStaticHost = useDedicated && dedicatedBase.toLowerCase().contains('github.io');
+    final path = useDedicated ? (isStaticHost ? staticHtmlPath : dedicatedPath) : fallbackPath;
     final normalizedPath = path.startsWith('/') ? path : '/$path';
     final uri = Uri.parse('$base$normalizedPath');
     if (queryParameters == null || queryParameters.isEmpty) {
@@ -382,14 +388,30 @@ class OtlobhaCustomerApi {
     return uri.replace(queryParameters: queryParameters);
   }
 
+  /// Verifies that an external portal URI is genuinely a dedicated Customer Portal page
+  /// (never the Admin Dashboard!) before launching an external browser.
+  Future<bool> isSafeExternalPortalUri(Uri uri) async {
+    try {
+      final res = await http
+          .get(uri, headers: const {'Accept': 'text/html'})
+          .timeout(const Duration(seconds: 4));
+      if (res.statusCode != 200) return false;
+      final body = utf8.decode(res.bodyBytes, allowMalformed: true);
+      return body.contains('otlobha-customer-portal-marker');
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// External browser page for entering the 6-digit email verification code and returning to app.
-  /// Uses the dedicated isolated Customer Accounts Portal (CUSTOMER_PORTAL_URL) when configured.
+  /// Uses the dedicated isolated Customer Accounts Portal (CUSTOMER_PORTAL_URL — e.g. GitHub Pages) when configured.
   Uri verifyEmailExternalUri({String? email, bool autoSend = true}) {
     final cleanEmail = (email != null && email.trim().isNotEmpty)
         ? (normalizeEmail(email) ?? sanitizeEmailInput(email))
         : '';
     return _portalUri(
       '/verify-email',
+      '/verify-email.html',
       '/portal/customer/verify-email',
       queryParameters: {
         if (cleanEmail.isNotEmpty) 'email': cleanEmail,
@@ -399,18 +421,66 @@ class OtlobhaCustomerApi {
   }
 
   /// External browser page for forgot password (email -> 6-digit code -> new password -> return to app).
-  /// Uses the dedicated isolated Customer Accounts Portal (CUSTOMER_PORTAL_URL) when configured.
+  /// Uses the dedicated isolated Customer Accounts Portal (CUSTOMER_PORTAL_URL — e.g. GitHub Pages) when configured.
   Uri forgotPasswordExternalUri({String? email}) {
     final cleanEmail = (email != null && email.trim().isNotEmpty)
         ? (normalizeEmail(email) ?? sanitizeEmailInput(email))
         : '';
     return _portalUri(
       '/forgot-password',
+      '/forgot-password.html',
       '/portal/customer/forgot-password',
       queryParameters: {
         if (cleanEmail.isNotEmpty) 'email': cleanEmail,
       },
     );
+  }
+
+  /// Requests a 6-digit email verification code (used by in-app fallback if external portal is unavailable).
+  Future<Map<String, dynamic>> requestEmailVerifyCode(String email) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
+    var res = await _execute(
+      () => http.post(
+        _apiUri('/api/auth/customer/email-verify/request-code'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({'email': cleanEmail}),
+      ),
+    );
+    if (res.statusCode == 404) {
+      res = await _execute(
+        () => http.post(
+          _apiUri('/api/auth/otp/request'),
+          headers: _headers(json: true, includeAuth: false),
+          body: jsonEncode({'email': cleanEmail, 'role': 'customer'}),
+        ),
+      );
+      final fallback = _decode(res, endpointHint: '/api/auth/otp/request');
+      return <String, dynamic>{...fallback, 'verify_flow': 'legacy_otp'};
+    }
+    return _decode(res, endpointHint: '/api/auth/customer/email-verify/request-code');
+  }
+
+  /// Confirms a 6-digit email verification code (used by in-app fallback if external portal is unavailable).
+  Future<Map<String, dynamic>> confirmEmailVerifyCode({
+    required String email,
+    required String code,
+    bool useLegacyOtpFlow = false,
+  }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
+    if (useLegacyOtpFlow) {
+      return verifyOtp(cleanEmail, code.trim(), role: 'customer');
+    }
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/auth/customer/email-verify/confirm-code'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({'email': cleanEmail, 'code': code.trim()}),
+      ),
+    );
+    if (res.statusCode == 404) {
+      return verifyOtp(cleanEmail, code.trim(), role: 'customer');
+    }
+    return _decode(res, endpointHint: '/api/auth/customer/email-verify/confirm-code');
   }
 
   /// Direct account creation without prior email verification — enters the app immediately
@@ -422,21 +492,31 @@ class OtlobhaCustomerApi {
     required String password,
   }) async {
     final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
-    final res = await _execute(
+    final payload = jsonEncode({
+      'full_name': fullName.trim(),
+      'email': cleanEmail,
+      if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
+      'password': password,
+    });
+    var res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/register-direct'),
         headers: _headers(json: true, includeAuth: false),
-        body: jsonEncode({
-          'full_name': fullName.trim(),
-          'email': cleanEmail,
-          if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
-          'password': password,
-        }),
+        body: payload,
       ),
     );
     if (res.statusCode == 404) {
+      res = await _execute(
+        () => http.post(
+          _apiUri('/api/auth/customer/register-direct'),
+          headers: _headers(json: true, includeAuth: false),
+          body: payload,
+        ),
+      );
+    }
+    if (res.statusCode == 404) {
       throw const ApiException(
-        'الخادم لم يُحدَّث بعد بنسخة التسجيل الجديدة — يرجى تشغيل Deploy Otlobha Backend to Cloud Run أولًا ثم إعادة المحاولة.',
+        'جاري التحويل تلقائيًا للتسجيل برمز التحقق...',
         statusCode: 404,
       );
     }
@@ -624,16 +704,26 @@ class OtlobhaCustomerApi {
     final cleanIdent = (rawIdent.contains('@') || rawIdent.contains('＠'))
         ? (normalizeEmail(rawIdent) ?? sanitizeEmailInput(rawIdent))
         : rawIdent;
-    final res = await _execute(
+    final payload = jsonEncode({
+      'identifier': cleanIdent,
+      'password': password,
+    });
+    var res = await _execute(
       () => http.post(
         _apiUri('/api/mobile/customer/login'),
         headers: _headers(json: true, includeAuth: false),
-        body: jsonEncode({
-          'identifier': cleanIdent,
-          'password': password,
-        }),
+        body: payload,
       ),
     );
+    if (res.statusCode == 404) {
+      res = await _execute(
+        () => http.post(
+          _apiUri('/api/auth/customer/login'),
+          headers: _headers(json: true, includeAuth: false),
+          body: payload,
+        ),
+      );
+    }
     final data = _decode(res, endpointHint: '/api/mobile/customer/login');
     final tokens = data['tokens'];
     if (tokens is Map) {

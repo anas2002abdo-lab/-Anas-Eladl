@@ -113,6 +113,7 @@ function renderNotFoundHtml() {
 function renderVerifyEmailHtml(prefillEmail, autoSend) {
   const safeEmail = escapeHtml(prefillEmail);
   return `<!doctype html>
+<!-- otlobha-customer-portal-marker -->
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8" />
@@ -306,6 +307,7 @@ function renderVerifyEmailHtml(prefillEmail, autoSend) {
 function renderForgotPasswordHtml(prefillEmail) {
   const safeEmail = escapeHtml(prefillEmail);
   return `<!doctype html>
+<!-- otlobha-customer-portal-marker -->
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8" />

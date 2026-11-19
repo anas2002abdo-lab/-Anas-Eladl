@@ -7694,6 +7694,25 @@ const handleCustomerEmailVerifyRequestCode = async (req: express.Request, res: e
   });
 };
 
+// Scoped CORS for the 4 public customer email-verify & forgot-password endpoints so the isolated GitHub Pages Customer Portal can call them directly without a second Cloud Run service.
+const CUSTOMER_PORTAL_CORS_PATHS = [
+  '/api/auth/customer/email-verify/request-code',
+  '/api/mobile/customer/email-verify/request-code',
+  '/api/auth/customer/email-verify/confirm-code',
+  '/api/mobile/customer/email-verify/confirm-code',
+  '/api/mobile/customer/forgot-password/request',
+  '/api/mobile/customer/forgot-password/reset',
+];
+app.use(CUSTOMER_PORTAL_CORS_PATHS, (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  return next();
+});
+
 app.post('/api/auth/customer/email-verify/request-code', handleCustomerEmailVerifyRequestCode);
 app.post('/api/mobile/customer/email-verify/request-code', handleCustomerEmailVerifyRequestCode);
 
@@ -7796,6 +7815,7 @@ app.get(['/portal/customer/verify-email', '/verify-email', '/auth/verify-email']
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   return res.status(200).send(`<!doctype html>
+<!-- otlobha-customer-portal-marker -->
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8" />
@@ -7995,6 +8015,7 @@ app.get(['/portal/customer/forgot-password', '/forgot-password', '/auth/forgot-p
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   return res.status(200).send(`<!doctype html>
+<!-- otlobha-customer-portal-marker -->
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8" />

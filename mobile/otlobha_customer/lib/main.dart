@@ -127,20 +127,170 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   Future<void> _openExternalVerifyEmailPage({String? email}) async {
     final targetEmail = (email != null && email.trim().isNotEmpty) ? email.trim() : _customerEmail.trim();
     final uri = api.verifyEmailExternalUri(email: targetEmail, autoSend: true);
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تعذر فتح صفحة توثيق البريد في المتصفح')),
-        );
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تعذر فتح صفحة توثيق البريد في المتصفح')),
-        );
-      }
+    final safeExternal = await api.isSafeExternalPortalUri(uri);
+    if (safeExternal) {
+      try {
+        final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (ok) return;
+      } catch (_) {}
     }
+
+    // Never open an unverified URL that could expose the Admin Dashboard; verify securely inside the app.
+    if (!mounted) return;
+    await _showInAppEmailVerifyDialog(targetEmail);
+  }
+
+  Future<void> _showInAppEmailVerifyDialog(String email) async {
+    final emailCtrl = TextEditingController(text: email);
+    final codeCtrl = TextEditingController();
+    bool codeSent = false;
+    bool useLegacyOtp = false;
+    bool busy = false;
+    String? feedback;
+    bool feedbackOk = false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            title: const Text('توثيق البريد الإلكتروني'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (feedback != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: feedbackOk ? const Color(0xFFF0FDFA) : const Color(0xFFFEF2F2),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: feedbackOk ? const Color(0xFF99F6E4) : const Color(0xFFFECACA)),
+                      ),
+                      child: Text(
+                        feedback!,
+                        style: TextStyle(
+                          color: feedbackOk ? const Color(0xFF0F766E) : const Color(0xFFB91C1C),
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: TextField(
+                      controller: emailCtrl,
+                      keyboardType: TextInputType.emailAddress,
+                      decoration: const InputDecoration(labelText: 'البريد الإلكتروني', border: OutlineInputBorder()),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            final cleanEmail = OtlobhaCustomerApi.normalizeEmail(emailCtrl.text);
+                            if (cleanEmail == null) {
+                              setDialogState(() {
+                                feedback = 'يرجى إدخال بريد إلكتروني صحيح';
+                                feedbackOk = false;
+                              });
+                              return;
+                            }
+                            setDialogState(() => busy = true);
+                            try {
+                              final res = await api.requestEmailVerifyCode(cleanEmail);
+                              if (res['already_verified'] == true) {
+                                if (ctx.mounted) Navigator.of(ctx).pop();
+                                _silentSync();
+                                return;
+                              }
+                              setDialogState(() {
+                                busy = false;
+                                codeSent = true;
+                                useLegacyOtp = res['verify_flow'] == 'legacy_otp';
+                                feedback = (res['message'] ?? 'تم إرسال رمز التوثيق المكون من 6 أرقام إلى بريدك').toString();
+                                feedbackOk = true;
+                              });
+                            } catch (e) {
+                              setDialogState(() {
+                                busy = false;
+                                feedback = e.toString().replaceFirst('Exception: ', '');
+                                feedbackOk = false;
+                              });
+                            }
+                          },
+                    child: Text(codeSent ? 'إعادة إرسال الرمز' : 'إرسال رمز التوثيق على البريد'),
+                  ),
+                  const SizedBox(height: 10),
+                  Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: TextField(
+                      controller: codeCtrl,
+                      keyboardType: TextInputType.number,
+                      maxLength: 6,
+                      textAlign: TextAlign.center,
+                      decoration: const InputDecoration(labelText: 'رمز التوثيق (6 أرقام)', counterText: '', border: OutlineInputBorder()),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.of(ctx).pop(),
+                child: const Text('إغلاق'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFA92224), foregroundColor: Colors.white),
+                onPressed: busy
+                    ? null
+                    : () async {
+                        final cleanEmail = OtlobhaCustomerApi.normalizeEmail(emailCtrl.text);
+                        final code = codeCtrl.text.trim();
+                        if (cleanEmail == null || code.length != 6) {
+                          setDialogState(() {
+                            feedback = 'أدخل البريد الإلكتروني ورمز التوثيق المكون من 6 أرقام';
+                            feedbackOk = false;
+                          });
+                          return;
+                        }
+                        setDialogState(() => busy = true);
+                        try {
+                          await api.confirmEmailVerifyCode(
+                            email: cleanEmail,
+                            code: code,
+                            useLegacyOtpFlow: useLegacyOtp,
+                          );
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                          if (mounted) {
+                            setState(() => _isEmailVerified = true);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('تم توثيق بريدك الإلكتروني بنجاح ✓')),
+                            );
+                          }
+                          _silentSync();
+                        } catch (e) {
+                          setDialogState(() {
+                            busy = false;
+                            feedback = e.toString().replaceFirst('Exception: ', '');
+                            feedbackOk = false;
+                          });
+                        }
+                      },
+                child: Text(busy ? 'جاري التحقق...' : 'تأكيد التوثيق'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    emailCtrl.dispose();
+    codeCtrl.dispose();
   }
 
   void _maybeTriggerEmailVerificationNotification() {
