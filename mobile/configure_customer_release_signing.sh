@@ -6,13 +6,13 @@ set -euo pipefail
 # Never generates a new keystore, never falls back to debug signing, and never prints secrets.
 #
 # Required environment variables:
-#   ANDROID_CUSTOMER_KEYSTORE_B64      : Base64-encoded original .jks/.keystore file
-#   ANDROID_CUSTOMER_KEYSTORE_PASSWORD : Keystore password (storePassword)
-#   ANDROID_CUSTOMER_KEY_ALIAS         : Signing key alias (keyAlias)
-#   ANDROID_CUSTOMER_KEY_PASSWORD      : Signing key password (keyPassword)
+#   CUSTOMER_KEYSTORE_BASE64 : Base64-encoded original .jks/.keystore file
+#   CUSTOMER_STORE_PASSWORD  : Keystore password (storePassword)
+#   CUSTOMER_KEY_ALIAS       : Signing key alias (keyAlias)
+#   CUSTOMER_KEY_PASSWORD    : Signing key password (keyPassword)
 # Optional:
-#   EXPECTED_ANDROID_PACKAGE           : Defaults to com.otlobha.otlobha_customer
-#   KEYSTORE_OUTPUT_PATH               : Defaults to ${RUNNER_TEMP:-/tmp}/otlobha-customer-release.jks
+#   EXPECTED_ANDROID_PACKAGE : Defaults to com.otlobha.otlobha_customer
+#   KEYSTORE_OUTPUT_PATH     : Defaults to ${RUNNER_TEMP:-/tmp}/otlobha-customer-release.jks
 
 APP_DIR="${1:-.}"
 cd "$APP_DIR"
@@ -31,13 +31,21 @@ import stat
 import sys
 from pathlib import Path
 
-required_vars = [
-    "ANDROID_CUSTOMER_KEYSTORE_B64",
-    "ANDROID_CUSTOMER_KEYSTORE_PASSWORD",
-    "ANDROID_CUSTOMER_KEY_ALIAS",
-    "ANDROID_CUSTOMER_KEY_PASSWORD",
-]
-missing = [v for v in required_vars if not os.environ.get(v, "").strip()]
+raw_b64 = os.environ.get("CUSTOMER_KEYSTORE_BASE64") or os.environ.get("CUSTOMER_KEYSTORE_B64") or ""
+store_password = os.environ.get("CUSTOMER_STORE_PASSWORD", "")
+key_alias = os.environ.get("CUSTOMER_KEY_ALIAS", "").strip()
+key_password = os.environ.get("CUSTOMER_KEY_PASSWORD", "")
+
+missing = []
+if not raw_b64.strip():
+    missing.append("CUSTOMER_KEYSTORE_BASE64")
+if not store_password.strip():
+    missing.append("CUSTOMER_STORE_PASSWORD")
+if not key_alias:
+    missing.append("CUSTOMER_KEY_ALIAS")
+if not key_password.strip():
+    missing.append("CUSTOMER_KEY_PASSWORD")
+
 if missing:
     print(
         f"::error::Missing required Customer release signing secrets: {', '.join(missing)}. "
@@ -46,13 +54,12 @@ if missing:
     )
     sys.exit(1)
 
-raw_b64 = os.environ["ANDROID_CUSTOMER_KEYSTORE_B64"]
 compact_b64 = "".join(raw_b64.split())
 try:
     keystore_bytes = base64.b64decode(compact_b64, validate=True)
 except (binascii.Error, ValueError):
     print(
-        "::error::Secret ANDROID_CUSTOMER_KEYSTORE_B64 is not valid Base64. "
+        "::error::Secret CUSTOMER_KEYSTORE_BASE64 is not valid Base64. "
         "Re-encode your original release keystore file as Base64 and update the secret.",
         file=sys.stderr,
     )
@@ -60,7 +67,7 @@ except (binascii.Error, ValueError):
 
 if len(keystore_bytes) < 64:
     print(
-        "::error::Decoded ANDROID_CUSTOMER_KEYSTORE_B64 is unexpectedly small/empty. "
+        "::error::Decoded CUSTOMER_KEYSTORE_BASE64 is unexpectedly small/empty. "
         "Verify your original keystore file.",
         file=sys.stderr,
     )
@@ -96,9 +103,6 @@ def escape_java_properties_value(val: str) -> str:
     return "".join(out)
 
 
-store_password = os.environ["ANDROID_CUSTOMER_KEYSTORE_PASSWORD"]
-key_alias = os.environ["ANDROID_CUSTOMER_KEY_ALIAS"].strip()
-key_password = os.environ["ANDROID_CUSTOMER_KEY_PASSWORD"]
 expected_pkg = os.environ["EXPECTED_PKG"].strip()
 
 key_props_path = Path("android/key.properties")
@@ -170,21 +174,21 @@ if app_kts.exists():
             '        create("release") {\n'
             '            val releaseStorePath = (\n'
             '                keystoreProperties.getProperty("storeFile")\n'
-            '                    ?: System.getenv("ANDROID_CUSTOMER_KEYSTORE_PATH")\n'
+            '                    ?: System.getenv("CUSTOMER_KEYSTORE_PATH")\n'
             '                    ?: ""\n'
             '            ).trim()\n'
             '            val releaseStorePass =\n'
             '                keystoreProperties.getProperty("storePassword")\n'
-            '                    ?: System.getenv("ANDROID_CUSTOMER_KEYSTORE_PASSWORD")\n'
+            '                    ?: System.getenv("CUSTOMER_STORE_PASSWORD")\n'
             '                    ?: ""\n'
             '            val releaseAlias = (\n'
             '                keystoreProperties.getProperty("keyAlias")\n'
-            '                    ?: System.getenv("ANDROID_CUSTOMER_KEY_ALIAS")\n'
+            '                    ?: System.getenv("CUSTOMER_KEY_ALIAS")\n'
             '                    ?: ""\n'
             '            ).trim()\n'
             '            val releaseKeyPass =\n'
             '                keystoreProperties.getProperty("keyPassword")\n'
-            '                    ?: System.getenv("ANDROID_CUSTOMER_KEY_PASSWORD")\n'
+            '                    ?: System.getenv("CUSTOMER_KEY_PASSWORD")\n'
             '                    ?: ""\n'
             '            if (releaseStorePath.isEmpty() || releaseStorePass.isEmpty() || releaseAlias.isEmpty() || releaseKeyPass.isEmpty()) {\n'
             '                error("Missing Android release signing configuration (storeFile/storePassword/keyAlias/keyPassword).")\n'
@@ -269,10 +273,10 @@ elif app_groovy.exists():
         signing_block = (
             "    signingConfigs {\n"
             "        release {\n"
-            "            def releaseStorePath = (keystoreProperties['storeFile'] ?: System.getenv('ANDROID_CUSTOMER_KEYSTORE_PATH') ?: '').toString().trim()\n"
-            "            def releaseStorePass = (keystoreProperties['storePassword'] ?: System.getenv('ANDROID_CUSTOMER_KEYSTORE_PASSWORD') ?: '').toString()\n"
-            "            def releaseAlias = (keystoreProperties['keyAlias'] ?: System.getenv('ANDROID_CUSTOMER_KEY_ALIAS') ?: '').toString().trim()\n"
-            "            def releaseKeyPass = (keystoreProperties['keyPassword'] ?: System.getenv('ANDROID_CUSTOMER_KEY_PASSWORD') ?: '').toString()\n"
+            "            def releaseStorePath = (keystoreProperties['storeFile'] ?: System.getenv('CUSTOMER_KEYSTORE_PATH') ?: '').toString().trim()\n"
+            "            def releaseStorePass = (keystoreProperties['storePassword'] ?: System.getenv('CUSTOMER_STORE_PASSWORD') ?: '').toString()\n"
+            "            def releaseAlias = (keystoreProperties['keyAlias'] ?: System.getenv('CUSTOMER_KEY_ALIAS') ?: '').toString().trim()\n"
+            "            def releaseKeyPass = (keystoreProperties['keyPassword'] ?: System.getenv('CUSTOMER_KEY_PASSWORD') ?: '').toString()\n"
             "            if (!releaseStorePath || !releaseStorePass || !releaseAlias || !releaseKeyPass) {\n"
             "                throw new GradleException('Missing Android release signing configuration.')\n"
             "            }\n"

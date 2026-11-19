@@ -1,4 +1,3 @@
-
 name: Build Otlobha Android & iOS Apps
 
 on:
@@ -42,6 +41,37 @@ jobs:
           fi
           echo "Firebase Android secrets verified."
 
+      - name: Verify Required Customer Release Signing Secrets
+        env:
+          CUSTOMER_KEYSTORE_BASE64: ${{ secrets.CUSTOMER_KEYSTORE_BASE64 }}
+          CUSTOMER_STORE_PASSWORD: ${{ secrets.CUSTOMER_STORE_PASSWORD }}
+          CUSTOMER_KEY_ALIAS: ${{ secrets.CUSTOMER_KEY_ALIAS }}
+          CUSTOMER_KEY_PASSWORD: ${{ secrets.CUSTOMER_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          MISSING=0
+          if [ -z "${CUSTOMER_KEYSTORE_BASE64//[$' \t\r\n']/}" ]; then
+            echo "::error::Missing GitHub Secret CUSTOMER_KEYSTORE_BASE64."
+            MISSING=1
+          fi
+          if [ -z "${CUSTOMER_STORE_PASSWORD:-}" ]; then
+            echo "::error::Missing GitHub Secret CUSTOMER_STORE_PASSWORD."
+            MISSING=1
+          fi
+          if [ -z "${CUSTOMER_KEY_ALIAS//[$' \t\r\n']/}" ]; then
+            echo "::error::Missing GitHub Secret CUSTOMER_KEY_ALIAS."
+            MISSING=1
+          fi
+          if [ -z "${CUSTOMER_KEY_PASSWORD:-}" ]; then
+            echo "::error::Missing GitHub Secret CUSTOMER_KEY_PASSWORD."
+            MISSING=1
+          fi
+          if [ "$MISSING" -ne 0 ]; then
+            echo "::error::Stopping Android build because Customer release signing secrets are missing. Refusing to sign with debug keystore."
+            exit 1
+          fi
+          echo "Customer release signing secrets verified."
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -66,7 +96,7 @@ jobs:
           FIREBASE_SECRET_NAME: "FIREBASE_CUSTOMER_GOOGLE_SERVICES_JSON_B64"
           EXPECTED_ANDROID_PACKAGE: "com.otlobha.otlobha_customer"
           REQUIRE_GOOGLE_SERVICES: "1"
-          CUSTOMER_KEYSTORE_B64: ${{ secrets.CUSTOMER_KEYSTORE_BASE64 }}
+          CUSTOMER_KEYSTORE_BASE64: ${{ secrets.CUSTOMER_KEYSTORE_BASE64 }}
           CUSTOMER_KEY_ALIAS: ${{ secrets.CUSTOMER_KEY_ALIAS }}
           CUSTOMER_STORE_PASSWORD: ${{ secrets.CUSTOMER_STORE_PASSWORD }}
           CUSTOMER_KEY_PASSWORD: ${{ secrets.CUSTOMER_KEY_PASSWORD }}
@@ -100,19 +130,19 @@ jobs:
             exit 1
           fi
 
-          if ! grep -qE 'com.google.gms(.google-services|:google-services)' android/settings.gradle* android/build.gradle* 2>/dev/null || ! grep -q 'com.google.gms.google-services' android/app/build.gradle* 2>/dev/null; then
+          if ! grep -qE 'com\.google\.gms(\.google-services|:google-services)' android/settings.gradle* android/build.gradle* 2>/dev/null || ! grep -q 'com\.google\.gms\.google-services' android/app/build.gradle* 2>/dev/null; then
             echo "::error::Google Services Gradle plugin is not enabled for Customer."
             exit 1
           fi
 
-          if [ -f android/gradle.properties ] && ! grep -q '^org.gradle.vfs.watch=' android/gradle.properties; then
+          if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
             printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
           fi
 
           echo "--- Android Gradle / AGP / Kotlin Versions (Customer) ---"
           if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
-          if [ -f android/settings.gradle.kts ]; then grep -E 'com.android.application|org.jetbrains.kotlin.android|google-services' android/settings.gradle.kts || true; fi
-          if [ -f android/settings.gradle ]; then grep -E 'com.android.application|org.jetbrains.kotlin.android|google-services' android/settings.gradle || true; fi
+          if [ -f android/settings.gradle.kts ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android|google-services' android/settings.gradle.kts || true; fi
+          if [ -f android/settings.gradle ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android|google-services' android/settings.gradle || true; fi
 
           flutter pub get
           dart run flutter_launcher_icons
@@ -125,76 +155,15 @@ jobs:
             echo "::warning::API_BASE_URL points to an AI Studio preview URL protected by Cookie Check. Set repository variable OTLOBHA_API_BASE_URL to your public Cloud Run URL."
           fi
 
+          KEYSTORE_OUTPUT_PATH="${RUNNER_TEMP:-/tmp}/otlobha-customer-release.jks"
+          export KEYSTORE_OUTPUT_PATH
+          cleanup_customer_signing() {
+            rm -f "$KEYSTORE_OUTPUT_PATH" android/key.properties
+          }
+          trap cleanup_customer_signing EXIT
+
           echo "--- Configure Customer Release Signing ---"
-
-          if [ -z "${CUSTOMER_KEYSTORE_B64:-}" ] || [ -z "${CUSTOMER_KEY_ALIAS:-}" ] || [ -z "${CUSTOMER_STORE_PASSWORD:-}" ] || [ -z "${CUSTOMER_KEY_PASSWORD:-}" ]; then
-            echo "::error::Missing customer Android signing secrets."
-            exit 1
-          fi
-
-          printf '%s' "$CUSTOMER_KEYSTORE_B64" | base64 --decode > android/app/otlobha-customer-release.jks
-          test -s android/app/otlobha-customer-release.jks
-
-          umask 077
-          cat > android/key.properties <<EOF
-          storePassword=$CUSTOMER_STORE_PASSWORD
-          keyPassword=$CUSTOMER_KEY_PASSWORD
-          keyAlias=$CUSTOMER_KEY_ALIAS
-          storeFile=app/otlobha-customer-release.jks
-          EOF
-
-          if [ -f android/app/build.gradle.kts ]; then
-            cat >> android/app/build.gradle.kts <<'KOTLIN'
-
-          val customerSigningProperties = java.util.Properties()
-          val customerSigningFile = rootProject.file("key.properties")
-          customerSigningProperties.load(customerSigningFile.inputStream())
-
-          android {
-              signingConfigs {
-                  create("customerRelease") {
-                      keyAlias = customerSigningProperties.getProperty("keyAlias")
-                      keyPassword = customerSigningProperties.getProperty("keyPassword")
-                      storeFile = file("otlobha-customer-release.jks")
-                      storePassword = customerSigningProperties.getProperty("storePassword")
-                  }
-              }
-              buildTypes {
-                  getByName("release") {
-                      signingConfig = signingConfigs.getByName("customerRelease")
-                  }
-              }
-          }
-          KOTLIN
-          elif [ -f android/app/build.gradle ]; then
-            cat >> android/app/build.gradle <<'GROOVY'
-
-          def customerSigningProperties = new Properties()
-          def customerSigningFile = rootProject.file("key.properties")
-          customerSigningProperties.load(new FileInputStream(customerSigningFile))
-
-          android {
-              signingConfigs {
-                  create("customerRelease") {
-                      keyAlias customerSigningProperties['keyAlias']
-                      keyPassword customerSigningProperties['keyPassword']
-                      storeFile file("otlobha-customer-release.jks")
-                      storePassword customerSigningProperties['storePassword']
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.customerRelease
-                  }
-              }
-          }
-          GROOVY
-          else
-            echo "::error::Customer Android Gradle build file not found."
-            exit 1
-          fi
-
-          echo "Customer release signing configured successfully."
+          bash ../configure_customer_release_signing.sh .
 
           flutter build apk --release --dart-define="API_BASE_URL=$RESOLVED_API_URL"
 
@@ -202,11 +171,14 @@ jobs:
           ls -lh build/app/outputs/flutter-apk/app-release.apk
           if [ -x android/gradlew ]; then (cd android && ./gradlew --stop) || true; fi
 
-      - name: Print Signed Customer APK SHA-1 & SHA-256 (Diagnostic)
+      - name: Verify Signed Customer APK SHA-1 & SHA-256
         run: |
           set -euo pipefail
           APK_PATH="mobile/otlobha_customer/build/app/outputs/flutter-apk/app-release.apk"
           test -s "$APK_PATH"
+
+          EXPECTED_SHA1="8C:F4:83:5C:71:9C:1F:D6:DD:C7:10:39:D5:F9:F2:32:C6:27:27:6A"
+          EXPECTED_SHA256="03:D6:5D:58:64:90:3B:38:BC:3C:DD:9E:D7:BD:FC:6D:02:FF:7E:22:4E:C6:01:68:66:C8:D9:DE:E7:96:03:99"
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           APKSIGNER="$(find "$SDK_ROOT/build-tools" -maxdepth 2 -type f -name apksigner 2>/dev/null | sort -V | tail -n 1)"
@@ -216,8 +188,8 @@ jobs:
           fi
 
           CERTS_OUT="$("$APKSIGNER" verify --print-certs "$APK_PATH")"
-          SHA1_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.certificate SHA-1 digest:[[:space:]]([0-9a-fA-F]+)./\1/p' | head -n 1)"
-          SHA256_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.certificate SHA-256 digest:[[:space:]]([0-9a-fA-F]+)./\1/p' | head -n 1)"
+          SHA1_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.*certificate SHA-1 digest:[[:space:]]*([0-9a-fA-F]+).*/\1/p' | head -n 1)"
+          SHA256_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.*certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]+).*/\1/p' | head -n 1)"
 
           if [ -z "$SHA1_HEX" ] || [ -z "$SHA256_HEX" ]; then
             echo "::error::Failed to extract SHA-1/SHA-256 signing fingerprints from $APK_PATH."
@@ -228,6 +200,17 @@ jobs:
           SHA256_FMT="$(printf '%s' "$SHA256_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')"
           echo "SHA-1: $SHA1_FMT"
           echo "SHA-256: $SHA256_FMT"
+
+          if [ "$SHA1_FMT" != "$EXPECTED_SHA1" ] || [ "$SHA256_FMT" != "$EXPECTED_SHA256" ]; then
+            echo "::error::Customer APK signing certificate fingerprint mismatch!"
+            echo "::error::Expected SHA-1:   $EXPECTED_SHA1"
+            echo "::error::Actual SHA-1:     $SHA1_FMT"
+            echo "::error::Expected SHA-256: $EXPECTED_SHA256"
+            echo "::error::Actual SHA-256:   $SHA256_FMT"
+            exit 1
+          fi
+
+          echo "Customer APK signing certificate SHA-1 and SHA-256 verified successfully."
 
       - name: Prepare & Build Otlobha Captain APK
         env:
