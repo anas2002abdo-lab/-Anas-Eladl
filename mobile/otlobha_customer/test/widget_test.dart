@@ -32,12 +32,12 @@ void main() {
     // Verify external verification & forgot-password URI builders
     final api = OtlobhaCustomerApi();
     final verifyUri = api.verifyEmailExternalUri(email: 'Test@Gmail.com', autoSend: true);
-    expect(verifyUri.path, '/auth/verify-email');
+    expect(verifyUri.path, '/portal/customer/verify-email');
     expect(verifyUri.queryParameters['email'], 'test@gmail.com');
     expect(verifyUri.queryParameters['auto'], '1');
 
     final forgotUri = api.forgotPasswordExternalUri(email: 'Test@Gmail.com');
-    expect(forgotUri.path, '/auth/forgot-password');
+    expect(forgotUri.path, '/portal/customer/forgot-password');
     expect(forgotUri.queryParameters['email'], 'test@gmail.com');
   });
 }

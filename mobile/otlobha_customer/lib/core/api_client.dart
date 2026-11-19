@@ -22,6 +22,13 @@ class OtlobhaCustomerApi {
     defaultValue: 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app',
   );
 
+  /// Dedicated isolated Customer Accounts Portal URL (e.g. https://otlobha-accounts-xxxx.europe-west2.run.app)
+  /// completely separated from the Admin Dashboard. Override via --dart-define=CUSTOMER_PORTAL_URL=...
+  static const String customerPortalBaseUrl = String.fromEnvironment(
+    'CUSTOMER_PORTAL_URL',
+    defaultValue: '',
+  );
+
   static const Duration _defaultTimeout = Duration(seconds: 30);
   static const Duration _uploadTimeout = Duration(seconds: 60);
 
@@ -36,17 +43,19 @@ class OtlobhaCustomerApi {
           ? {'Authorization': 'Bearer $_accessToken'}
           : const {};
 
-  /// Normalizes API_BASE_URL by removing trailing slashes and accidental trailing '/api'
-  /// so endpoints never resolve to '/api/api/...'.
+  /// Normalizes API_BASE_URL by removing trailing slashes and accidental trailing '/api', '/admin', or '/dashboard'
+  /// so endpoints never resolve to '/api/api/...' or '/admin/api/...'.
   static String normalizeBaseUrl(String raw) {
     var clean = raw.trim();
     while (clean.endsWith('/')) {
       clean = clean.substring(0, clean.length - 1);
     }
-    if (clean.toLowerCase().endsWith('/api')) {
-      clean = clean.substring(0, clean.length - 4);
-      while (clean.endsWith('/')) {
-        clean = clean.substring(0, clean.length - 1);
+    for (final suffix in const ['/api', '/admin', '/dashboard']) {
+      if (clean.toLowerCase().endsWith(suffix)) {
+        clean = clean.substring(0, clean.length - suffix.length);
+        while (clean.endsWith('/')) {
+          clean = clean.substring(0, clean.length - 1);
+        }
       }
     }
     return clean;
@@ -360,13 +369,28 @@ class OtlobhaCustomerApi {
     return data;
   }
 
+  static Uri _portalUri(String dedicatedPath, String fallbackPath, {Map<String, String>? queryParameters}) {
+    final dedicatedBase = normalizeBaseUrl(customerPortalBaseUrl);
+    final useDedicated = dedicatedBase.isNotEmpty;
+    final base = useDedicated ? dedicatedBase : _resolvedBaseUrl;
+    final path = useDedicated ? dedicatedPath : fallbackPath;
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final uri = Uri.parse('$base$normalizedPath');
+    if (queryParameters == null || queryParameters.isEmpty) {
+      return uri;
+    }
+    return uri.replace(queryParameters: queryParameters);
+  }
+
   /// External browser page for entering the 6-digit email verification code and returning to app.
+  /// Uses the dedicated isolated Customer Accounts Portal (CUSTOMER_PORTAL_URL) when configured.
   Uri verifyEmailExternalUri({String? email, bool autoSend = true}) {
     final cleanEmail = (email != null && email.trim().isNotEmpty)
         ? (normalizeEmail(email) ?? sanitizeEmailInput(email))
         : '';
-    return _apiUri(
-      '/auth/verify-email',
+    return _portalUri(
+      '/verify-email',
+      '/portal/customer/verify-email',
       queryParameters: {
         if (cleanEmail.isNotEmpty) 'email': cleanEmail,
         if (autoSend) 'auto': '1',
@@ -375,12 +399,14 @@ class OtlobhaCustomerApi {
   }
 
   /// External browser page for forgot password (email -> 6-digit code -> new password -> return to app).
+  /// Uses the dedicated isolated Customer Accounts Portal (CUSTOMER_PORTAL_URL) when configured.
   Uri forgotPasswordExternalUri({String? email}) {
     final cleanEmail = (email != null && email.trim().isNotEmpty)
         ? (normalizeEmail(email) ?? sanitizeEmailInput(email))
         : '';
-    return _apiUri(
-      '/auth/forgot-password',
+    return _portalUri(
+      '/forgot-password',
+      '/portal/customer/forgot-password',
       queryParameters: {
         if (cleanEmail.isNotEmpty) 'email': cleanEmail,
       },
@@ -408,6 +434,12 @@ class OtlobhaCustomerApi {
         }),
       ),
     );
+    if (res.statusCode == 404) {
+      throw const ApiException(
+        'الخادم لم يُحدَّث بعد بنسخة التسجيل الجديدة — يرجى تشغيل Deploy Otlobha Backend to Cloud Run أولًا ثم إعادة المحاولة.',
+        statusCode: 404,
+      );
+    }
     final data = _decode(res, endpointHint: '/api/mobile/customer/register-direct');
     final tokens = data['tokens'];
     if (tokens is Map) {

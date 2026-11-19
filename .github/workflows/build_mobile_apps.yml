@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       api_base_url:
-        description: "Public Backend API Base URL (e.g. https://otlobha-backend-xxxx.a.run.app)"
+        description: "Public Backend API Base URL (e.g. https://otlobha-xxxx.europe-west2.run.app)"
+        required: false
+        default: ""
+      customer_portal_url:
+        description: "Dedicated Isolated Customer Accounts Portal URL (e.g. https://otlobha-accounts-xxxx.europe-west2.run.app)"
         required: false
         default: ""
   push:
@@ -150,9 +154,19 @@ jobs:
           flutter test
 
           RESOLVED_API_URL="${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}"
+          RESOLVED_PORTAL_URL="${{ github.event.inputs.customer_portal_url || vars.OTLOBHA_CUSTOMER_PORTAL_URL || '' }}"
           echo "Using Customer API_BASE_URL=$RESOLVED_API_URL"
+          echo "Using Customer CUSTOMER_PORTAL_URL=${RESOLVED_PORTAL_URL:-<fallback to API_BASE_URL/portal/customer/*>}"
           if echo "$RESOLVED_API_URL" | grep -qE 'ais-dev-|ais-pre-'; then
             echo "::warning::API_BASE_URL points to an AI Studio preview URL protected by Cookie Check. Set repository variable OTLOBHA_API_BASE_URL to your public Cloud Run URL."
+          else
+            REG_CHECK="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "${RESOLVED_API_URL%/}/api/mobile/customer/register-direct" || echo "000")"
+            if [ "$REG_CHECK" = "404" ]; then
+              echo "::warning::Target backend ${RESOLVED_API_URL} returned 404 for /api/mobile/customer/register-direct. Run 'Deploy Otlobha Backend to Cloud Run' so login/register routes are live."
+            fi
+          fi
+          if [ -z "$RESOLVED_PORTAL_URL" ]; then
+            echo "::warning::OTLOBHA_CUSTOMER_PORTAL_URL is not set. Run 'Deploy Otlobha Backend to Cloud Run' and set Repository Variable OTLOBHA_CUSTOMER_PORTAL_URL to the dedicated otlobha-accounts URL so customer links never share the admin hostname."
           fi
 
           KEYSTORE_OUTPUT_PATH="${RUNNER_TEMP:-/tmp}/otlobha-customer-release.jks"
@@ -165,7 +179,9 @@ jobs:
           echo "--- Configure Customer Release Signing ---"
           bash ../configure_customer_release_signing.sh .
 
-          flutter build apk --release --dart-define="API_BASE_URL=$RESOLVED_API_URL"
+          flutter build apk --release \
+            --dart-define="API_BASE_URL=$RESOLVED_API_URL" \
+            --dart-define="CUSTOMER_PORTAL_URL=$RESOLVED_PORTAL_URL"
 
           test -s build/app/outputs/flutter-apk/app-release.apk
           ls -lh build/app/outputs/flutter-apk/app-release.apk
@@ -326,5 +342,8 @@ jobs:
             flutter pub get
             dart run flutter_launcher_icons
             RESOLVED_API_URL="${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}"
-            flutter build ios --release --no-codesign --dart-define="API_BASE_URL=$RESOLVED_API_URL"
+            RESOLVED_PORTAL_URL="${{ github.event.inputs.customer_portal_url || vars.OTLOBHA_CUSTOMER_PORTAL_URL || '' }}"
+            flutter build ios --release --no-codesign \
+              --dart-define="API_BASE_URL=$RESOLVED_API_URL" \
+              --dart-define="CUSTOMER_PORTAL_URL=$RESOLVED_PORTAL_URL"
           done

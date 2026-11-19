@@ -7786,11 +7786,15 @@ app.post('/api/auth/customer/email-verify/confirm-code', handleCustomerEmailVeri
 app.post('/api/mobile/customer/email-verify/confirm-code', handleCustomerEmailVerifyConfirmCode);
 
 // External Hosted RTL Page 1: Verify Customer Email via 6-digit Code -> Auto-close & Redirect back to App
-app.get('/auth/verify-email', (req, res) => {
+app.get(['/portal/customer/verify-email', '/verify-email', '/auth/verify-email'], (req, res) => {
   const prefillEmail = normalizeEmail(String(req.query.email || '')) || String(req.query.email || '').trim();
   const autoSend = String(req.query.auto || '') === '1';
   const safeEmail = escapeHtmlSafe(prefillEmail);
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   return res.status(200).send(`<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
@@ -7982,10 +7986,14 @@ app.get('/auth/verify-email', (req, res) => {
 });
 
 // External Hosted RTL Page 2: Forgot Password (Enter Email -> Receive 6-digit Code -> Reset Password -> Auto-close & Return to App)
-app.get('/auth/forgot-password', (req, res) => {
+app.get(['/portal/customer/forgot-password', '/forgot-password', '/auth/forgot-password'], (req, res) => {
   const prefillEmail = normalizeEmail(String(req.query.email || '')) || String(req.query.email || '').trim();
   const safeEmail = escapeHtmlSafe(prefillEmail);
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   return res.status(200).send(`<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
@@ -8945,7 +8953,7 @@ app.post('/api/mobile/customer/register', (req, res) => {
   });
 });
 
-app.post('/api/mobile/customer/login', (req, res) => {
+app.post(['/api/mobile/customer/login', '/api/auth/customer/login'], (req, res) => {
   const ip = getClientIp(req);
   const ipLimit = checkRateLimit(`cust_login_ip:${ip}`, 20, 5 * 60 * 1000);
   if (!ipLimit.allowed) {
@@ -11083,6 +11091,23 @@ async function startServer() {
       },
     })
   );
+
+  // Hard security barrier: customer portal / auth URLs must NEVER fall through to the Admin Dashboard SPA
+  app.use(['/portal', '/auth', '/verify-email', '/forgot-password'], (_req, res) => {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    return res.status(404).type('html').send(`<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>الرابط غير موجود – اطلبها</title></head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F8FAFC;font-family:Tahoma,Arial,sans-serif;padding:20px;color:#0F172A;">
+  <div style="max-width:400px;width:100%;background:#fff;border:1px solid #E2E8F0;border-radius:18px;padding:24px;text-align:center;">
+    <h1 style="margin:0 0 8px;font-size:19px;">الرابط المطلوب غير متوفر</h1>
+    <p style="margin:0 0 16px;font-size:13.5px;color:#475569;">يرجى العودة إلى تطبيق اطلبها والمحاولة مرة أخرى.</p>
+    <a href="otlobha://home" style="display:inline-block;padding:12px 22px;border-radius:12px;background:#A92224;color:#fff;text-decoration:none;font-weight:700;">العودة إلى تطبيق اطلبها</a>
+  </div>
+</body></html>`);
+  });
 
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {

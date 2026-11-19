@@ -164,9 +164,34 @@ jobs:
           gcloud run services update "$SERVICE_NAME" --region "$REGION" --update-env-vars "APP_URL=${SERVICE_URL}" >/dev/null
           echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify Public JSON Endpoints (No Cookie Check / No HTML)
+      - name: Deploy Isolated Customer Accounts Portal (Zero Admin UI)
+        id: deploy_portal
+        env:
+          REGION: ${{ github.event.inputs.region || 'europe-west2' }}
+          PORTAL_SERVICE_NAME: ${{ vars.OTLOBHA_PORTAL_SERVICE_NAME || 'otlobha-accounts' }}
+          SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$PORTAL_SERVICE_NAME" \
+            --source ./customer-portal \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 256Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 3 \
+            --timeout 60 \
+            --set-env-vars "NODE_ENV=production,BACKEND_API_URL=${SERVICE_URL}"
+
+          PORTAL_URL="$(gcloud run services describe "$PORTAL_SERVICE_NAME" --region "$REGION" --format='value(status.url)')"
+          echo "portal_url=${PORTAL_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Public JSON Endpoints & Isolated Customer Portal
         env:
           SERVICE_URL: ${{ steps.deploy.outputs.service_url }}
+          PORTAL_URL: ${{ steps.deploy_portal.outputs.portal_url }}
         run: |
           set -euo pipefail
           HEALTH_BODY="$(curl -fsS -H 'Accept: application/json' "${SERVICE_URL}/api/health")"
@@ -177,21 +202,46 @@ jobs:
           echo "Guest bootstrap HTTP status: $GUEST_STATUS"
           test "$GUEST_STATUS" = "200"
 
+          LOGIN_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' -d '{}' "${SERVICE_URL}/api/mobile/customer/login")"
+          echo "Customer login route validation HTTP status: $LOGIN_STATUS"
+          test "$LOGIN_STATUS" = "400"
+
+          REG_DIRECT_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' -d '{}' "${SERVICE_URL}/api/mobile/customer/register-direct")"
+          echo "Customer register-direct route validation HTTP status: $REG_DIRECT_STATUS"
+          test "$REG_DIRECT_STATUS" = "400"
+
           REG_OTP_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' -d '{}' "${SERVICE_URL}/api/mobile/customer/register/request-otp")"
           echo "Customer register OTP route validation HTTP status: $REG_OTP_STATUS"
           test "$REG_OTP_STATUS" = "400"
 
+          PORTAL_HEALTH="$(curl -fsS -H 'Accept: application/json' "${PORTAL_URL}/health")"
+          echo "Portal health: $PORTAL_HEALTH"
+          echo "$PORTAL_HEALTH" | grep -q '"ok":true'
+
+          VERIFY_HTML="$(curl -fsS "${PORTAL_URL}/verify-email?email=test@example.com")"
+          echo "$VERIFY_HTML" | grep -q 'otlobha://verified'
+
+          FORGOT_HTML="$(curl -fsS "${PORTAL_URL}/forgot-password?email=test@example.com")"
+          echo "$FORGOT_HTML" | grep -q 'otlobha://password-reset-done'
+
           {
-            echo "## Otlobha Unified Backend — Public Cloud Run URL"
+            echo "## Otlobha Cloud Run Deployment Summary"
             echo ""
+            echo "### 1. Main API Backend"
             echo "**Public API Base URL:** \`${SERVICE_URL}\`"
-            echo ""
             echo "- Region: \`europe-west2\`"
-            echo "- Secrets: **Google Secret Manager** (\`--set-secrets\`)"
+            echo "- Secrets: **Google Secret Manager**"
             echo "- SQLite Persistence: Local POSIX WAL + Verified Atomic Snapshots -> Versioned GCS (\`/mnt/gcs-data\`)"
-            echo "- Health Check: \`GET ${SERVICE_URL}/api/health\` -> **200 JSON**"
-            echo "- Guest Catalog: \`GET ${SERVICE_URL}/api/mobile/customer/guest-bootstrap\` -> **200 JSON**"
+            echo "- Verified: \`/api/health\` (200), \`/api/mobile/customer/guest-bootstrap\` (200), \`/api/mobile/customer/login\` (400 validation), \`/api/mobile/customer/register-direct\` (400 validation)"
+            echo ""
+            echo "### 2. Dedicated Isolated Customer Accounts Portal (Zero Admin UI)"
+            echo "**Public Customer Portal URL:** \`${PORTAL_URL}\`"
+            echo "- Verify Email Page: \`${PORTAL_URL}/verify-email\`"
+            echo "- Forgot Password Page: \`${PORTAL_URL}/forgot-password\`"
+            echo "- Completely isolated from the Admin Dashboard (no admin assets, no admin routes, no database access)."
             echo ""
             echo "### Connect Customer & Captain APKs"
-            echo "Set GitHub Repository Variable \`OTLOBHA_API_BASE_URL\` to \`${SERVICE_URL}\`, then run **Build Otlobha Android & iOS Apps**."
+            echo "1. Set GitHub Repository Variable \`OTLOBHA_API_BASE_URL\` to \`${SERVICE_URL}\`."
+            echo "2. Set GitHub Repository Variable \`OTLOBHA_CUSTOMER_PORTAL_URL\` to \`${PORTAL_URL}\`."
+            echo "3. Run **Build Otlobha Android & iOS Apps**."
           } >> "$GITHUB_STEP_SUMMARY"

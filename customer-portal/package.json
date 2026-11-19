@@ -1,0 +1,13 @@
+{
+  "name": "otlobha-customer-portal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dedicated isolated Customer Accounts Portal for Otlobha (Email Verification & Forgot Password — zero admin UI).",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
