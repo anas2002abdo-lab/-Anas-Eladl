@@ -123,6 +123,33 @@ jobs:
           ls -lh build/app/outputs/flutter-apk/app-release.apk
           if [ -x android/gradlew ]; then (cd android && ./gradlew --stop) || true; fi
 
+      - name: Print Signed Customer APK SHA-1 & SHA-256 (Diagnostic)
+        run: |
+          set -euo pipefail
+          APK_PATH="mobile/otlobha_customer/build/app/outputs/flutter-apk/app-release.apk"
+          test -s "$APK_PATH"
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -maxdepth 2 -type f -name apksigner 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner not found under Android SDK build-tools ($SDK_ROOT/build-tools)."
+            exit 1
+          fi
+
+          CERTS_OUT="$("$APKSIGNER" verify --print-certs "$APK_PATH")"
+          SHA1_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.*certificate SHA-1 digest:[[:space:]]*([0-9a-fA-F]+).*/\1/p' | head -n 1)"
+          SHA256_HEX="$(printf '%s\n' "$CERTS_OUT" | sed -nE 's/.*certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]+).*/\1/p' | head -n 1)"
+
+          if [ -z "$SHA1_HEX" ] || [ -z "$SHA256_HEX" ]; then
+            echo "::error::Failed to extract SHA-1/SHA-256 signing fingerprints from $APK_PATH."
+            exit 1
+          fi
+
+          SHA1_FMT="$(printf '%s' "$SHA1_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')"
+          SHA256_FMT="$(printf '%s' "$SHA256_HEX" | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g; s/:$//')"
+          echo "SHA-1: $SHA1_FMT"
+          echo "SHA-256: $SHA256_FMT"
+
       - name: Prepare & Build Otlobha Captain APK
         env:
           FIREBASE_GOOGLE_SERVICES_JSON_B64: ${{ secrets.FIREBASE_CAPTAIN_GOOGLE_SERVICES_JSON_B64 }}
