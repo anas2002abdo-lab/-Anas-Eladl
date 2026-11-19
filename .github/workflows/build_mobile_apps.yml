@@ -10,69 +10,129 @@ on:
   push:
     paths:
       - "mobile/**"
+      - ".github/workflows/build_mobile_apps.yml"
 
 jobs:
   build_android_apks:
     runs-on: ubuntu-latest
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.vfs.watch=false"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
           distribution: "temurin"
-          java-version: "17"
-      - uses: subosito/flutter-action@v2
+          java-version: "21"
+
+      - name: Set up Flutter (Stable)
+        uses: subosito/flutter-action@v2
         with:
           channel: "stable"
+          cache: true
+
+      - name: Configure & Verify Toolchain Versions
+        run: |
+          java -version
+          flutter config --jdk-dir="$JAVA_HOME"
+          flutter --version
 
       - name: Prepare & Build Otlobha Customer APK
         run: |
+          set -euo pipefail
           cd mobile/otlobha_customer
-          cp android/app/src/main/AndroidManifest.xml /tmp/cust_manifest.xml
-          cp ios/Runner/Info.plist /tmp/cust_info.plist
-          cp test/widget_test.dart /tmp/cust_widget_test.dart
-          cp analysis_options.yaml /tmp/cust_analysis_options.yaml
-          flutter create . --project-name otlobha_customer --org com.otlobha --platforms=android,ios
-          cp /tmp/cust_manifest.xml android/app/src/main/AndroidManifest.xml
-          cp /tmp/cust_info.plist ios/Runner/Info.plist
-          mkdir -p test
-          cp /tmp/cust_widget_test.dart test/widget_test.dart
-          cp /tmp/cust_analysis_options.yaml analysis_options.yaml
+
+          if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
+            if [ -f android/app/src/main/AndroidManifest.xml ]; then cp android/app/src/main/AndroidManifest.xml /tmp/cust_manifest.xml; fi
+            if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/cust_info.plist; fi
+            if [ -f test/widget_test.dart ]; then cp test/widget_test.dart /tmp/cust_widget_test.dart; fi
+            if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/cust_analysis_options.yaml; fi
+
+            flutter create . --project-name otlobha_customer --org com.otlobha --platforms=android,ios
+
+            if [ -f /tmp/cust_manifest.xml ]; then cp /tmp/cust_manifest.xml android/app/src/main/AndroidManifest.xml; fi
+            if [ -f /tmp/cust_info.plist ]; then cp /tmp/cust_info.plist ios/Runner/Info.plist; fi
+            if [ -f /tmp/cust_widget_test.dart ]; then
+              mkdir -p test
+              cp /tmp/cust_widget_test.dart test/widget_test.dart
+            fi
+            if [ -f /tmp/cust_analysis_options.yaml ]; then cp /tmp/cust_analysis_options.yaml analysis_options.yaml; fi
+          fi
+
+          if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
+            printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
+          fi
+
+          echo "--- Android Gradle / AGP / Kotlin Versions (Customer) ---"
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
+          if [ -f android/settings.gradle.kts ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android' android/settings.gradle.kts || true; fi
+          if [ -f android/settings.gradle ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android' android/settings.gradle || true; fi
+
           flutter pub get
           dart run flutter_launcher_icons
           flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter test
           flutter build apk --release --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
 
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+          if [ -x android/gradlew ]; then (cd android && ./gradlew --stop) || true; fi
+
       - name: Prepare & Build Otlobha Captain APK
         run: |
+          set -euo pipefail
           cd mobile/otlobha_captain
-          cp android/app/src/main/AndroidManifest.xml /tmp/cap_manifest.xml
-          cp ios/Runner/Info.plist /tmp/cap_info.plist
-          cp test/widget_test.dart /tmp/cap_widget_test.dart
-          cp analysis_options.yaml /tmp/cap_analysis_options.yaml
-          flutter create . --project-name otlobha_captain --org com.otlobha --platforms=android,ios
-          cp /tmp/cap_manifest.xml android/app/src/main/AndroidManifest.xml
-          cp /tmp/cap_info.plist ios/Runner/Info.plist
-          mkdir -p test
-          cp /tmp/cap_widget_test.dart test/widget_test.dart
-          cp /tmp/cap_analysis_options.yaml analysis_options.yaml
+
+          if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
+            if [ -f android/app/src/main/AndroidManifest.xml ]; then cp android/app/src/main/AndroidManifest.xml /tmp/cap_manifest.xml; fi
+            if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/cap_info.plist; fi
+            if [ -f test/widget_test.dart ]; then cp test/widget_test.dart /tmp/cap_widget_test.dart; fi
+            if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/cap_analysis_options.yaml; fi
+
+            flutter create . --project-name otlobha_captain --org com.otlobha --platforms=android,ios
+
+            if [ -f /tmp/cap_manifest.xml ]; then cp /tmp/cap_manifest.xml android/app/src/main/AndroidManifest.xml; fi
+            if [ -f /tmp/cap_info.plist ]; then cp /tmp/cap_info.plist ios/Runner/Info.plist; fi
+            if [ -f /tmp/cap_widget_test.dart ]; then
+              mkdir -p test
+              cp /tmp/cap_widget_test.dart test/widget_test.dart
+            fi
+            if [ -f /tmp/cap_analysis_options.yaml ]; then cp /tmp/cap_analysis_options.yaml analysis_options.yaml; fi
+          fi
+
+          if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
+            printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
+          fi
+
+          echo "--- Android Gradle / AGP / Kotlin Versions (Captain) ---"
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then grep -E 'distributionUrl' android/gradle/wrapper/gradle-wrapper.properties || true; fi
+          if [ -f android/settings.gradle.kts ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android' android/settings.gradle.kts || true; fi
+          if [ -f android/settings.gradle ]; then grep -E 'com\.android\.application|org\.jetbrains\.kotlin\.android' android/settings.gradle || true; fi
+
           flutter pub get
           dart run flutter_launcher_icons
           flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter test
           flutter build apk --release --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
+
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+          if [ -x android/gradlew ]; then (cd android && ./gradlew --stop) || true; fi
 
       - name: Upload Customer APK
         uses: actions/upload-artifact@v4
         with:
           name: otlobha-customer-apk
           path: mobile/otlobha_customer/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
 
       - name: Upload Captain APK
         uses: actions/upload-artifact@v4
         with:
           name: otlobha-captain-apk
           path: mobile/otlobha_captain/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
 
   build_ios_unsigned:
     runs-on: macos-latest
@@ -82,18 +142,26 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: "stable"
+          cache: true
       - name: Build Unsigned iOS Runners
         run: |
+          set -euo pipefail
           for app in otlobha_customer otlobha_captain; do
             cd "$GITHUB_WORKSPACE/mobile/$app"
-            cp ios/Runner/Info.plist /tmp/info.plist
-            cp test/widget_test.dart /tmp/widget_test.dart
-            cp analysis_options.yaml /tmp/analysis_options.yaml
-            flutter create . --project-name "$app" --org com.otlobha --platforms=ios
-            cp /tmp/info.plist ios/Runner/Info.plist
-            mkdir -p test
-            cp /tmp/widget_test.dart test/widget_test.dart
-            cp /tmp/analysis_options.yaml analysis_options.yaml
+            if [ ! -d ios/Runner.xcodeproj ]; then
+              if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/info.plist; fi
+              if [ -f test/widget_test.dart ]; then cp test/widget_test.dart /tmp/widget_test.dart; fi
+              if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/analysis_options.yaml; fi
+
+              flutter create . --project-name "$app" --org com.otlobha --platforms=ios
+
+              if [ -f /tmp/info.plist ]; then cp /tmp/info.plist ios/Runner/Info.plist; fi
+              if [ -f /tmp/widget_test.dart ]; then
+                mkdir -p test
+                cp /tmp/widget_test.dart test/widget_test.dart
+              fi
+              if [ -f /tmp/analysis_options.yaml ]; then cp /tmp/analysis_options.yaml analysis_options.yaml; fi
+            fi
             flutter pub get
             dart run flutter_launcher_icons
             flutter build ios --release --no-codesign --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
