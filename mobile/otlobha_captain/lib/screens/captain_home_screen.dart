@@ -32,6 +32,7 @@ class CaptainHomeScreen extends StatefulWidget {
 
 class _CaptainHomeScreenState extends State<CaptainHomeScreen> {
   final Map<String, TextEditingController> _otpCtrls = {};
+  final Set<String> _dismissedTripIds = {};
   bool _updatingGps = false;
   String? _acceptingTripId;
 
@@ -133,6 +134,8 @@ class _CaptainHomeScreenState extends State<CaptainHomeScreen> {
     final activeParcels = widget.parcels.where((p) => p['status'] != 'delivered').toList();
     final searchingTrips = widget.trips.where((t) {
       if (t['status'] != 'searching') return false;
+      final tid = t['id']?.toString() ?? '';
+      if (_dismissedTripIds.contains(tid)) return false;
       final prefCap = t['preferred_captain_id']?.toString();
       if (prefCap != null && prefCap.isNotEmpty) {
         return prefCap == capId;
@@ -468,15 +471,43 @@ class _CaptainHomeScreenState extends State<CaptainHomeScreen> {
                     const SizedBox(height: 4),
                     Text('من: ${t['pickup_address']} ← إلى: ${t['dropoff_address']}', style: const TextStyle(fontSize: 12)),
                     const SizedBox(height: 8),
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFEA580C),
-                        foregroundColor: Colors.white,
-                        minimumSize: const Size.fromHeight(42),
-                      ),
-                      onPressed: _acceptingTripId == tid ? null : () => _acceptRide(t),
-                      icon: const Icon(Icons.check_circle_outline, size: 17),
-                      label: Text(_acceptingTripId == tid ? 'جاري القبول...' : 'قبول المشوار وفتح الشات'),
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFEA580C),
+                              foregroundColor: Colors.white,
+                              minimumSize: const Size.fromHeight(44),
+                            ),
+                            onPressed: _acceptingTripId == tid ? null : () => _acceptRide(t),
+                            icon: const Icon(Icons.check_circle_outline, size: 17),
+                            label: Text(_acceptingTripId == tid ? 'جاري القبول...' : 'قبول المشوار'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 1,
+                          child: OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red.shade700,
+                              side: BorderSide(color: Colors.red.shade300),
+                              minimumSize: const Size.fromHeight(44),
+                            ),
+                            onPressed: _acceptingTripId == tid
+                                ? null
+                                : () {
+                                    setState(() => _dismissedTripIds.add(tid));
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('تم رفض المشوار وإخفاؤه من قائمتك')),
+                                    );
+                                  },
+                            icon: const Icon(Icons.close, size: 16),
+                            label: const Text('رفض'),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),

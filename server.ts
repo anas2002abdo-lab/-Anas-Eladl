@@ -45,6 +45,7 @@ import {
   getFcmStatus,
   registerDeviceToken,
   unregisterDeviceToken,
+  verifyGoogleOrFirebaseToken,
   type PushUserRole,
 } from './src/server/pushService.ts';
 import { normalizeEmail } from './src/shared/email.ts';
@@ -601,10 +602,29 @@ function ensureTripChatStarter(tripId: string, captainName: string) {
 
 // 1. Health, Auth Foundation & Overview KPIs
 app.get('/api/health', (_req, res) => {
+  const smtpCfg = resolveSmtpConfig();
   res.json({
     ok: true,
     service: 'Otlobha Unified Backend',
-    email_otp_mode: process.env.SMTP_USER && process.env.SMTP_PASS ? 'smtp' : 'sandbox',
+    email_otp_mode: smtpCfg ? 'smtp' : 'sandbox',
+    smtp_host: smtpCfg ? smtpCfg.host : null,
+    smtp_port: smtpCfg ? smtpCfg.port : null,
+    capabilities: {
+      guest_bootstrap: true,
+      customer_register_otp: true,
+      customer_verification_link: true,
+      customer_password_reset: true,
+      customer_password_reset_link: true,
+      customer_google_auth: true,
+      fcm_push: true,
+    },
+  });
+});
+
+app.get('/api/auth/public-config', (_req, res) => {
+  res.json({
+    ok: true,
+    google_web_client_id: String(process.env.GOOGLE_WEB_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || '').trim(),
   });
 });
 
@@ -5149,17 +5169,38 @@ app.get('/api/mobile/customer/bootstrap', (req, res) => {
 app.patch('/api/mobile/customer/me', requireAuth, requireRole('customer'), (req, res) => {
   const auth = req.auth!;
   const existing = db
-    .prepare('SELECT id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified FROM customers WHERE id = ?')
+    .prepare(
+      'SELECT id, email, phone, secondary_phone, full_name, age, country, city, default_zone_id, address_landmark, last_lat, last_lng, is_email_verified, auth_provider, profile_completed FROM customers WHERE id = ?'
+    )
     .get(auth.id) as Record<string, unknown> | undefined;
   if (!existing) {
     return res.status(404).json({ error: 'حساب العميل غير موجود' });
   }
 
-  const { full_name, phone, address_landmark, default_zone_id } = (req.body || {}) as {
+  const {
+    full_name,
+    age,
+    country,
+    city,
+    phone,
+    secondary_phone,
+    address_landmark,
+    default_zone_id,
+    last_lat,
+    last_lng,
+    profile_completed,
+  } = (req.body || {}) as {
     full_name?: unknown;
+    age?: unknown;
+    country?: unknown;
+    city?: unknown;
     phone?: unknown;
+    secondary_phone?: unknown;
     address_landmark?: unknown;
     default_zone_id?: unknown;
+    last_lat?: unknown;
+    last_lng?: unknown;
+    profile_completed?: unknown;
   };
 
   let nextName = String(existing.full_name || 'عميل اطلبها').trim();
@@ -5171,6 +5212,35 @@ app.patch('/api/mobile/customer/me', requireAuth, requireRole('customer'), (req,
     nextName = trimmed;
   }
 
+  let nextAge: number | null = typeof existing.age === 'number' ? existing.age : null;
+  if (age !== undefined && age !== null && String(age).trim() !== '') {
+    const parsedAge = Math.trunc(parseLocalizedNumber(age));
+    if (!Number.isFinite(parsedAge) || parsedAge < 10 || parsedAge > 110) {
+      return res.status(400).json({ error: 'يرجى إدخال عمر صحيح (من 10 إلى 110 سنة)' });
+    }
+    nextAge = parsedAge;
+  } else if (age === null || age === '') {
+    nextAge = null;
+  }
+
+  let nextCountry = String(existing.country || 'مصر').trim() || 'مصر';
+  if (country !== undefined) {
+    const trimmedCountry = String(country).trim();
+    if (trimmedCountry.length < 2 || trimmedCountry.length > 80) {
+      return res.status(400).json({ error: 'يرجى إدخال اسم البلد بشكل صحيح' });
+    }
+    nextCountry = trimmedCountry;
+  }
+
+  let nextCity = String(existing.city || 'المنزلة').trim() || 'المنزلة';
+  if (city !== undefined) {
+    const trimmedCity = String(city).trim();
+    if (trimmedCity.length > 80) {
+      return res.status(400).json({ error: 'اسم المدينة طويل جدًا' });
+    }
+    if (trimmedCity) nextCity = trimmedCity;
+  }
+
   let nextPhone = existing.phone ? String(existing.phone).trim() : null;
   if (phone !== undefined) {
     const trimmedPhone = String(phone).trim();
@@ -5178,9 +5248,22 @@ app.patch('/api/mobile/customer/me', requireAuth, requireRole('customer'), (req,
       nextPhone = null;
     } else {
       if (!/^[+0-9\s-]{8,18}$/.test(trimmedPhone)) {
-        return res.status(400).json({ error: 'رقم الهاتف غير صالح' });
+        return res.status(400).json({ error: 'رقم الهاتف الأساسي غير صالح' });
       }
       nextPhone = trimmedPhone;
+    }
+  }
+
+  let nextSecondaryPhone = existing.secondary_phone ? String(existing.secondary_phone).trim() : null;
+  if (secondary_phone !== undefined) {
+    const trimmedSec = String(secondary_phone).trim();
+    if (!trimmedSec) {
+      nextSecondaryPhone = null;
+    } else {
+      if (!/^[+0-9\s-]{8,18}$/.test(trimmedSec)) {
+        return res.status(400).json({ error: 'رقم الهاتف الإضافي غير صالح' });
+      }
+      nextSecondaryPhone = trimmedSec;
     }
   }
 
@@ -5205,12 +5288,48 @@ app.patch('/api/mobile/customer/me', requireAuth, requireRole('customer'), (req,
     nextZoneId = zoneExists.id;
   }
 
+  const nextLat =
+    last_lat !== undefined && last_lat !== null && Number.isFinite(Number(last_lat))
+      ? Number(last_lat)
+      : (existing.last_lat ?? null);
+  const nextLng =
+    last_lng !== undefined && last_lng !== null && Number.isFinite(Number(last_lng))
+      ? Number(last_lng)
+      : (existing.last_lng ?? null);
+
+  let nextCompleted = Number(existing.profile_completed || 0);
+  if (profile_completed === true || profile_completed === 1 || profile_completed === '1') {
+    if (!nextPhone) {
+      return res.status(400).json({ error: 'يرجى إدخال رقم الهاتف الأساسي لإكمال ملفك الشخصي' });
+    }
+    nextCompleted = 1;
+  }
+
   db.prepare(
-    'UPDATE customers SET full_name = ?, phone = ?, address_landmark = ?, default_zone_id = ? WHERE id = ?'
-  ).run(nextName, nextPhone, nextAddress, nextZoneId, auth.id);
+    `UPDATE customers
+     SET full_name = ?, age = ?, country = ?, city = ?, phone = ?, secondary_phone = ?,
+         address_landmark = ?, default_zone_id = ?, last_lat = ?, last_lng = ?,
+         profile_completed = ?, location_updated_at = CASE WHEN ? IS NOT NULL AND ? IS NOT NULL THEN datetime('now') ELSE location_updated_at END
+     WHERE id = ?`
+  ).run(
+    nextName,
+    nextAge,
+    nextCountry,
+    nextCity,
+    nextPhone,
+    nextSecondaryPhone,
+    nextAddress,
+    nextZoneId,
+    nextLat,
+    nextLng,
+    nextCompleted,
+    nextLat,
+    nextLng,
+    auth.id
+  );
 
   const updated = db
-    .prepare('SELECT id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified FROM customers WHERE id = ?')
+    .prepare('SELECT * FROM customers WHERE id = ?')
     .get(auth.id) as Record<string, unknown>;
 
   recordAuditLog({
@@ -5222,10 +5341,7 @@ app.patch('/api/mobile/customer/me', requireAuth, requireRole('customer'), (req,
     details: 'تحديث بيانات الملف الشخصي للعميل',
   });
 
-  const profileObj = {
-    ...updated,
-    is_email_verified: Boolean(updated.is_email_verified),
-  };
+  const profileObj = sanitizeCustomerRow(updated);
   res.json({
     ok: true,
     customer: profileObj,
@@ -6823,15 +6939,18 @@ function resolveSmtpConfig(): {
   }
   const host = isValidAsciiHost ? rawHost : 'smtp.gmail.com';
 
-  if (host.toLowerCase() === 'smtp.gmail.com' && /^[a-z]{4}(?: [a-z]{4}){3}$/i.test(smtpPass)) {
-    smtpPass = smtpPass.replace(/\s+/g, '');
+  if (host.toLowerCase() === 'smtp.gmail.com') {
+    const compactPass = smtpPass.replace(/\s+/g, '');
+    if (/^[a-z]{16}$/i.test(compactPass)) {
+      smtpPass = compactPass;
+    }
   }
 
   const parsedPort = Number(String(process.env.SMTP_PORT || '').trim());
   const port = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 465;
 
   const rawSecure = String(process.env.SMTP_SECURE || '').trim().toLowerCase();
-  const secure = port === 465 ? rawSecure !== 'false' : rawSecure === 'true';
+  const secure = port === 465 ? true : port === 587 ? false : rawSecure === 'true';
 
   const rawFrom = String(process.env.SMTP_FROM || '').trim();
   const from = rawFrom
@@ -6866,6 +6985,9 @@ async function dispatchEmailOtp(
       port: smtpCfg.port,
       secure: smtpCfg.secure,
       auth: { user: smtpCfg.user, pass: smtpCfg.pass },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
     });
     await transporter.sendMail({
       from: smtpCfg.from,
@@ -6888,10 +7010,17 @@ async function dispatchEmailOtp(
     return { ok: true, delivery_channel: 'smtp' };
   } catch (err) {
     const safeErrMsg = err instanceof Error ? err.message : 'SMTP transport failure';
-    const smtpCode = typeof (err as { responseCode?: unknown })?.responseCode === 'number'
-      ? Number((err as { responseCode?: number }).responseCode)
-      : 0;
-    console.error('[Email OTP SMTP Error]:', safeErrMsg);
+    const errObj = err as { code?: unknown; responseCode?: unknown; command?: unknown };
+    const smtpCode = typeof errObj?.responseCode === 'number' ? Number(errObj.responseCode) : 0;
+    const errCode = typeof errObj?.code === 'string' ? errObj.code : '';
+    console.error(
+      `[Email OTP SMTP Error]: host=${smtpCfg.host} port=${smtpCfg.port} secure=${smtpCfg.secure} code=${errCode || 'N/A'} responseCode=${smtpCode || 'N/A'} msg=${safeErrMsg}`
+    );
+    const isAuthError =
+      errCode === 'EAUTH' ||
+      smtpCode === 534 ||
+      smtpCode === 535 ||
+      /invalid login|username and password not accepted|application-specific password/i.test(safeErrMsg);
     const isRecipientRejected =
       smtpCode === 550 ||
       smtpCode === 551 ||
@@ -6901,7 +7030,9 @@ async function dispatchEmailOtp(
       ok: false,
       error: isRecipientRejected
         ? 'تعذر تسليم الرسالة إلى هذا البريد الإلكتروني لأنه غير موجود أو لا يستقبل رسائل، يرجى التحقق من كتابته بشكل صحيح.'
-        : 'تعذر إرسال رمز التأكيد حاليًا بسبب خلل مؤقت في خدمة البريد على الخادم، يرجى المحاولة مرة أخرى بعد قليل.',
+        : isAuthError
+          ? 'تعذر تسجيل الدخول إلى خدمة البريد الإلكتروني على الخادم (Gmail App Password)، يرجى مراجعة إعدادات SMTP على الخادم.'
+          : 'تعذر إرسال رمز التأكيد حاليًا بسبب خلل مؤقت في خدمة البريد على الخادم، يرجى المحاولة مرة أخرى بعد قليل.',
     };
   }
 }
@@ -7154,12 +7285,727 @@ app.post('/api/auth/otp/verify', (req, res) => {
 
 function sanitizeCustomerRow(row: Record<string, unknown>) {
   const { password_hash: _pw, ...rest } = row;
+  const completed = Boolean(row.profile_completed);
   return {
     ...rest,
+    age: row.age ?? null,
+    country: String(row.country || 'مصر'),
+    city: String(row.city || 'المنزلة'),
+    secondary_phone: row.secondary_phone ? String(row.secondary_phone) : null,
+    auth_provider: String(row.auth_provider || 'email'),
     is_email_verified: Boolean(row.is_email_verified),
+    profile_completed: completed,
+    needs_profile_completion: !completed,
     has_password: Boolean(String(row.password_hash || '').trim()),
   };
 }
+
+function resolvePublicAppUrl(req: express.Request): string {
+  const envUrl = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  if (envUrl && /^https?:\/\//i.test(envUrl)) {
+    return envUrl;
+  }
+  const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+    .split(',')[0]
+    .trim();
+  const host = String(req.headers['x-forwarded-host'] || req.get('host') || 'localhost:3000')
+    .split(',')[0]
+    .trim();
+  return `${protoHeader}://${host}`.replace(/\/+$/, '');
+}
+
+function hashActionToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(`otlobha_action:${rawToken}`).digest('hex');
+}
+
+function escapeHtmlSafe(input: string): string {
+  return String(input || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function dispatchBrandedHtmlEmail(
+  email: string,
+  params: { subject: string; plainText: string; html: string }
+): Promise<{ ok: true; delivery_channel: 'smtp' } | { ok: false; error: string }> {
+  const smtpCfg = resolveSmtpConfig();
+  if (!smtpCfg) {
+    return {
+      ok: false,
+      error: 'خدمة إرسال البريد الإلكتروني (Gmail SMTP) غير مفعلة حاليًا — يرجى التحقق من إعدادات البريد.',
+    };
+  }
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtpCfg.host,
+      port: smtpCfg.port,
+      secure: smtpCfg.secure,
+      auth: { user: smtpCfg.user, pass: smtpCfg.pass },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+    });
+    await transporter.sendMail({
+      from: smtpCfg.from,
+      to: email,
+      subject: params.subject,
+      text: params.plainText,
+      html: params.html,
+    });
+    return { ok: true, delivery_channel: 'smtp' };
+  } catch (err) {
+    const safeErrMsg = err instanceof Error ? err.message : 'SMTP transport failure';
+    const errObj = err as { code?: unknown; responseCode?: unknown };
+    const smtpCode = typeof errObj?.responseCode === 'number' ? Number(errObj.responseCode) : 0;
+    const errCode = typeof errObj?.code === 'string' ? errObj.code : '';
+    console.error(
+      `[Email Link SMTP Error]: host=${smtpCfg.host} port=${smtpCfg.port} secure=${smtpCfg.secure} code=${errCode || 'N/A'} responseCode=${smtpCode || 'N/A'} msg=${safeErrMsg}`
+    );
+    const isAuthError =
+      errCode === 'EAUTH' ||
+      smtpCode === 534 ||
+      smtpCode === 535 ||
+      /invalid login|username and password not accepted|application-specific password/i.test(safeErrMsg);
+    const isRecipientRejected =
+      smtpCode === 550 ||
+      smtpCode === 551 ||
+      smtpCode === 553 ||
+      /recipient address rejected|invalid recipient|user unknown|no such user|mailbox unavailable/i.test(safeErrMsg);
+    return {
+      ok: false,
+      error: isRecipientRejected
+        ? 'تعذر تسليم الرسالة إلى هذا البريد الإلكتروني لأنه غير موجود أو لا يستقبل رسائل، يرجى التحقق من كتابته بشكل صحيح.'
+        : isAuthError
+          ? 'تعذر تسجيل الدخول إلى خدمة البريد الإلكتروني على الخادم (Gmail App Password)، يرجى مراجعة إعدادات SMTP على الخادم.'
+          : 'تعذر إرسال رسالة البريد الإلكتروني حاليًا بسبب خلل مؤقت على الخادم، يرجى المحاولة مرة أخرى بعد قليل.',
+    };
+  }
+}
+
+function renderActionResultPage(params: {
+  title: string;
+  heading: string;
+  body: string;
+  success: boolean;
+  ctaHref?: string;
+  ctaLabel?: string;
+}): string {
+  const accent = params.success ? '#0D9488' : '#A92224';
+  const badgeBg = params.success ? '#F0FDFA' : '#FEF2F2';
+  const iconSvg = params.success
+    ? '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#0D9488" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
+    : '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#A92224" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+  const ctaBlock = params.ctaHref
+    ? `<a href="${escapeHtmlSafe(params.ctaHref)}" style="display:inline-block;margin-top:20px;padding:13px 26px;background:${accent};color:#fff;text-decoration:none;border-radius:12px;font-weight:700;font-size:15px;">${escapeHtmlSafe(params.ctaLabel || 'العودة إلى تطبيق اطلبها')}</a>`
+    : '';
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${escapeHtmlSafe(params.title)}</title>
+</head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F8FAFC;font-family:Tahoma,Arial,sans-serif;padding:20px;color:#0F172A;">
+  <div style="width:100%;max-width:440px;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:20px;padding:32px 24px;text-align:center;box-shadow:0 12px 32px rgba(15,23,42,0.06);">
+    <div style="width:68px;height:68px;margin:0 auto 18px;border-radius:18px;background:${badgeBg};display:flex;align-items:center;justify-content:center;">
+      ${iconSvg}
+    </div>
+    <h1 style="margin:0 0 10px;font-size:21px;font-weight:800;color:#0F172A;">${escapeHtmlSafe(params.heading)}</h1>
+    <p style="margin:0;font-size:14.5px;line-height:1.75;color:#475569;">${escapeHtmlSafe(params.body)}</p>
+    ${ctaBlock}
+    <p style="margin-top:22px;font-size:12px;color:#94A3B8;">اطلبها – Otlobha</p>
+  </div>
+</body>
+</html>`;
+}
+
+// Google Sign-In for Customer (Flutter google_sign_in / Firebase Auth & Web Google Identity Services)
+const handleCustomerGoogleAuth = async (req: express.Request, res: express.Response) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_google_ip:${ip}`, 25, 5 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد محاولات تسجيل الدخول، يرجى الانتظار قليلًا' });
+  }
+
+  const { id_token } = (req.body || {}) as { id_token?: string };
+  if (!id_token || !String(id_token).trim()) {
+    return res.status(400).json({ error: 'رمز مصادقة جوجل غير موجود، يرجى المحاولة مرة أخرى' });
+  }
+
+  const identity = await verifyGoogleOrFirebaseToken(String(id_token));
+  if (!identity || !identity.email) {
+    return res.status(401).json({ error: 'تعذر التحقق من حساب جوجل، يرجى إعادة المحاولة' });
+  }
+
+  const normalizedEmail = normalizeEmail(identity.email) || identity.email.toLowerCase();
+  let customerRow = db
+    .prepare('SELECT * FROM customers WHERE google_uid = ? OR LOWER(email) = LOWER(?) LIMIT 1')
+    .get(identity.uid, normalizedEmail) as Record<string, unknown> | undefined;
+
+  let isNewCustomer = false;
+  if (customerRow) {
+    if (String(customerRow.status || 'active') === 'suspended') {
+      return res.status(403).json({ error: 'هذا الحساب موقوف حاليًا، يرجى التواصل مع الدعم الفني' });
+    }
+    const nextName =
+      String(customerRow.full_name || '').trim() && String(customerRow.full_name) !== 'عميل اطلبها'
+        ? String(customerRow.full_name)
+        : identity.name || normalizedEmail.split('@')[0] || 'عميل اطلبها';
+    db.prepare(
+      `UPDATE customers
+       SET google_uid = COALESCE(google_uid, ?),
+           auth_provider = CASE WHEN auth_provider = 'email' THEN 'google' ELSE auth_provider END,
+           full_name = ?,
+           is_email_verified = 1,
+           last_login_at = datetime('now')
+       WHERE id = ?`
+    ).run(identity.uid, nextName, String(customerRow.id));
+    customerRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(customerRow.id)) as Record<string, unknown>;
+  } else {
+    isNewCustomer = true;
+    const custId = uid('cust');
+    const displayName = identity.name || normalizedEmail.split('@')[0] || 'عميل اطلبها';
+    db.prepare(
+      `INSERT INTO customers (id, email, phone, password_hash, full_name, default_zone_id, address_landmark, is_email_verified, google_uid, auth_provider, profile_completed)
+       VALUES (?, ?, NULL, '', ?, 'zn_city_center', '', 1, ?, 'google', 0)`
+    ).run(custId, normalizedEmail, displayName, identity.uid);
+    customerRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(custId) as Record<string, unknown>;
+  }
+
+  const tokens = issueSessionForUser(req, res, {
+    userId: String(customerRow.id),
+    role: 'customer',
+    actorType: 'customer',
+    tokenVersion: Number(customerRow.token_version || 0),
+  });
+
+  recordAuditLog({
+    actor_name: String(customerRow.full_name || normalizedEmail),
+    actor_role: 'customer',
+    action: isNewCustomer ? 'CUSTOMER_GOOGLE_REGISTER' : 'CUSTOMER_GOOGLE_LOGIN',
+    entity_type: 'customers',
+    entity_id: String(customerRow.id),
+    details: `${isNewCustomer ? 'تسجيل حساب عميل جديد' : 'تسجيل دخول العميل'} عبر Google (${normalizedEmail})`,
+  });
+
+  const sanitized = sanitizeCustomerRow(customerRow);
+  return res.json({
+    ok: true,
+    role: 'customer',
+    is_new_user: isNewCustomer,
+    needs_profile_completion: sanitized.needs_profile_completion,
+    user: sanitized,
+    tokens: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
+    },
+  });
+};
+
+app.post('/api/mobile/customer/auth/google', handleCustomerGoogleAuth);
+app.post('/api/auth/customer/google', handleCustomerGoogleAuth);
+
+// Manual Email Registration via Clickable Verification Link (NO OTP Code)
+const handleCustomerSendVerificationLink = async (req: express.Request, res: express.Response) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_verify_link_ip:${ip}`, 10, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم إرسال عدة روابط مؤخرًا، يرجى الانتظار قليلًا ثم المحاولة مرة أخرى' });
+  }
+
+  const { full_name, email: rawEmail, password, phone: rawPhone } = (req.body || {}) as {
+    full_name?: string;
+    email?: string;
+    password?: string;
+    phone?: string;
+  };
+  const cleanName = String(full_name || '').trim();
+  const email = normalizeEmail(String(rawEmail || ''));
+  const cleanPass = String(password || '');
+  const cleanPhone = String(rawPhone || '').trim();
+
+  if (cleanName.length < 2 || cleanName.length > 100) {
+    return res.status(400).json({ error: 'يرجى إدخال الاسم الكامل (حرفين على الأقل)' });
+  }
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+  if (cleanPass.length < 6) {
+    return res.status(400).json({ error: 'كلمة المرور يجب أن لا تقل عن 6 أحرف' });
+  }
+  if (cleanPhone && !/^[+0-9\s-]{8,18}$/.test(cleanPhone)) {
+    return res.status(400).json({ error: 'رقم الهاتف غير صالح' });
+  }
+
+  const existing = db.prepare('SELECT * FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | Record<string, unknown>
+    | undefined;
+  let customerId: string;
+  if (existing) {
+    if (Boolean(existing.is_email_verified)) {
+      return res.status(409).json({
+        error: 'هذا البريد الإلكتروني مسجل ومفعّل بالفعل، يمكنك تسجيل الدخول مباشرة',
+      });
+    }
+    customerId = String(existing.id);
+    db.prepare(
+      'UPDATE customers SET full_name = ?, phone = COALESCE(?, phone), password_hash = ? WHERE id = ?'
+    ).run(cleanName, cleanPhone || null, hashPassword(cleanPass), customerId);
+  } else {
+    customerId = uid('cust');
+    db.prepare(
+      `INSERT INTO customers (id, email, phone, password_hash, full_name, default_zone_id, address_landmark, is_email_verified, auth_provider, profile_completed)
+       VALUES (?, ?, ?, ?, ?, 'zn_city_center', '', 0, 'email', 0)`
+    ).run(customerId, email, cleanPhone || null, hashPassword(cleanPass), cleanName);
+  }
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashActionToken(rawToken);
+  const tokenId = uid('eat');
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+  db.prepare(
+    "UPDATE email_action_tokens SET is_used = 1 WHERE LOWER(email) = LOWER(?) AND action_type = 'verify_email' AND is_used = 0"
+  ).run(email);
+  db.prepare(
+    `INSERT INTO email_action_tokens (id, customer_id, email, action_type, token_hash, is_used, expires_at)
+     VALUES (?, ?, ?, 'verify_email', ?, 0, ?)`
+  ).run(tokenId, customerId, email, tokenHash, expiresAt);
+
+  const verifyUrl = `${resolvePublicAppUrl(req)}/api/auth/customer/verify-email?token=${encodeURIComponent(rawToken)}`;
+  const mailRes = await dispatchBrandedHtmlEmail(email, {
+    subject: 'تأكيد حسابك في تطبيق اطلبها – Otlobha',
+    plainText: `مرحبًا ${cleanName}، اضغط على الرابط التالي لتأكيد بريدك الإلكتروني وتفعيل حسابك في اطلبها (صالح لمدة 30 دقيقة):\n${verifyUrl}`,
+    html: `
+      <div dir="rtl" style="font-family: Tahoma, Arial, sans-serif; padding: 24px; background: #F8FAFC;">
+        <div style="max-width: 500px; margin: 0 auto; background: #FFFFFF; border-radius: 18px; padding: 28px; border: 1px solid #E2E8F0;">
+          <h2 style="color: #A92224; margin: 0 0 10px;">مرحبًا بك في اطلبها</h2>
+          <p style="color: #334155; font-size: 15px; line-height: 1.7;">أهلًا ${escapeHtmlSafe(cleanName)}، اضغط على الزر بالأسفل لتأكيد بريدك الإلكتروني وتفعيل حسابك فورًا:</p>
+          <div style="text-align: center; margin: 26px 0;">
+            <a href="${escapeHtmlSafe(verifyUrl)}" style="display: inline-block; background: #A92224; color: #FFFFFF; text-decoration: none; padding: 14px 30px; border-radius: 12px; font-weight: bold; font-size: 15px;">
+              تأكيد البريد الإلكتروني وتفعيل الحساب
+            </a>
+          </div>
+          <p style="color: #64748B; font-size: 12.5px; line-height: 1.6;">إذا لم يعمل الزر، انسخ هذا الرابط وافتحه في المتصفح (صالح لمدة 30 دقيقة):</p>
+          <p style="direction: ltr; word-break: break-all; font-size: 12px; color: #0F172A; background: #F1F5F9; padding: 10px; border-radius: 8px;">${escapeHtmlSafe(verifyUrl)}</p>
+        </div>
+      </div>
+    `,
+  });
+
+  if (!mailRes.ok) {
+    db.prepare('DELETE FROM email_action_tokens WHERE id = ?').run(tokenId);
+    return res.status(503).json({ error: mailRes.error });
+  }
+
+  recordAuditLog({
+    actor_name: cleanName,
+    actor_role: 'customer',
+    action: 'CUSTOMER_VERIFICATION_LINK_SENT',
+    entity_type: 'customers',
+    entity_id: customerId,
+    details: `إرسال رابط تأكيد الحساب إلى البريد ${email} عبر Gmail SMTP`,
+  });
+
+  return res.json({
+    ok: true,
+    email,
+    message: `تم إرسال رابط تأكيد الحساب إلى بريدك الإلكتروني (${email}). افتح الرسالة واضغط على الرابط ثم عد للتطبيق.`,
+    expires_in_sec: 1800,
+    delivery_channel: mailRes.delivery_channel,
+  });
+};
+
+app.post('/api/mobile/customer/register/send-verification-link', handleCustomerSendVerificationLink);
+app.post('/api/auth/customer/register/send-verification-link', handleCustomerSendVerificationLink);
+
+// Clicking the email verification link activates the customer account immediately
+app.get('/api/auth/customer/verify-email', (req, res) => {
+  const rawToken = String(req.query.token || '').trim();
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (!rawToken) {
+    return res.status(400).send(
+      renderActionResultPage({
+        title: 'رابط غير صالح – اطلبها',
+        heading: 'رابط التأكيد غير مكتمل',
+        body: 'يرجى فتح رابط التأكيد مباشرة من رسالة البريد الإلكتروني أو طلب إرسال رابط جديد من تطبيق اطلبها.',
+        success: false,
+      })
+    );
+  }
+
+  const tokenHash = hashActionToken(rawToken);
+  const row = db
+    .prepare("SELECT * FROM email_action_tokens WHERE token_hash = ? AND action_type = 'verify_email' LIMIT 1")
+    .get(tokenHash) as Record<string, unknown> | undefined;
+
+  if (!row) {
+    return res.status(404).send(
+      renderActionResultPage({
+        title: 'رابط غير صالح – اطلبها',
+        heading: 'رابط التأكيد غير صالح',
+        body: 'هذا الرابط غير صالح أو تم استبداله برابط أحدث. اطلب رابط تأكيد جديد من تطبيق اطلبها.',
+        success: false,
+      })
+    );
+  }
+
+  const email = String(row.email || '');
+  if (Boolean(row.is_used)) {
+    return res.status(200).send(
+      renderActionResultPage({
+        title: 'تم التأكيد مسبقًا – اطلبها',
+        heading: 'حسابك مفعّل بالفعل',
+        body: `تم تأكيد البريد الإلكتروني (${email}) سابقًا. يمكنك الآن العودة إلى تطبيق اطلبها والمتابعة مباشرة.`,
+        success: true,
+        ctaHref: `otlobha://verified?email=${encodeURIComponent(email)}`,
+        ctaLabel: 'العودة إلى تطبيق اطلبها',
+      })
+    );
+  }
+
+  if (Date.now() > new Date(String(row.expires_at)).getTime()) {
+    return res.status(410).send(
+      renderActionResultPage({
+        title: 'انتهت صلاحية الرابط – اطلبها',
+        heading: 'انتهت صلاحية رابط التأكيد',
+        body: 'انتهت صلاحية هذا الرابط (30 دقيقة). افتح تطبيق اطلبها واضغط على «إعادة إرسال رابط التأكيد».',
+        success: false,
+      })
+    );
+  }
+
+  db.prepare('UPDATE email_action_tokens SET is_used = 1 WHERE id = ?').run(String(row.id));
+  db.prepare('UPDATE customers SET is_email_verified = 1 WHERE id = ? OR LOWER(email) = LOWER(?)').run(
+    String(row.customer_id || ''),
+    email
+  );
+
+  recordAuditLog({
+    actor_name: email,
+    actor_role: 'customer',
+    action: 'CUSTOMER_EMAIL_LINK_VERIFIED',
+    entity_type: 'customers',
+    entity_id: String(row.customer_id || email),
+    details: `تأكيد بريد العميل (${email}) عبر رابط التفعيل`,
+  });
+
+  return res.status(200).send(
+    renderActionResultPage({
+      title: 'تم تأكيد الحساب – اطلبها',
+      heading: 'تم تأكيد بريدك الإلكتروني بنجاح!',
+      body: `تم تفعيل حسابك (${email}) بنجاح. ارجع الآن إلى تطبيق اطلبها واضغط على «تم التأكيد — متابعة» لإكمال بياناتك الشخصية.`,
+      success: true,
+      ctaHref: `otlobha://verified?email=${encodeURIComponent(email)}`,
+      ctaLabel: 'فتح تطبيق اطلبها',
+    })
+  );
+});
+
+// Check whether user clicked verification link & issue session automatically
+const handleCustomerCheckVerified = (req: express.Request, res: express.Response) => {
+  const { email: rawEmail, password } = (req.body || {}) as { email?: string; password?: string };
+  const email = normalizeEmail(String(rawEmail || ''));
+  const cleanPass = String(password || '');
+  if (!email || !cleanPass) {
+    return res.status(400).json({ error: 'يرجى إدخال البريد الإلكتروني وكلمة المرور' });
+  }
+
+  const customerRow = db.prepare('SELECT * FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | Record<string, unknown>
+    | undefined;
+  if (!customerRow) {
+    return res.status(404).json({ error: 'لا يوجد حساب بهذا البريد الإلكتروني' });
+  }
+  const storedHash = String(customerRow.password_hash || '').trim();
+  if (!storedHash || !verifyPassword(cleanPass, storedHash)) {
+    return res.status(401).json({ error: 'بيانات الحساب غير متطابقة' });
+  }
+  if (!Boolean(customerRow.is_email_verified)) {
+    return res.json({
+      ok: true,
+      verified: false,
+      message: 'لم يتم تأكيد البريد بعد — افتح رسالة Gmail واضغط على رابط التأكيد ثم اضغط متابعة.',
+    });
+  }
+
+  db.prepare("UPDATE customers SET last_login_at = datetime('now') WHERE id = ?").run(String(customerRow.id));
+  const freshRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(customerRow.id)) as Record<string, unknown>;
+  const tokens = issueSessionForUser(req, res, {
+    userId: String(freshRow.id),
+    role: 'customer',
+    actorType: 'customer',
+    tokenVersion: Number(freshRow.token_version || 0),
+  });
+  const sanitized = sanitizeCustomerRow(freshRow);
+  return res.json({
+    ok: true,
+    verified: true,
+    role: 'customer',
+    needs_profile_completion: sanitized.needs_profile_completion,
+    user: sanitized,
+    tokens: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
+    },
+  });
+};
+
+app.post('/api/mobile/customer/register/check-verified', handleCustomerCheckVerified);
+app.post('/api/auth/customer/register/check-verified', handleCustomerCheckVerified);
+
+// Forgot Password via Clickable Reset Link (NO OTP Code)
+const handleCustomerSendPasswordResetLink = async (req: express.Request, res: express.Response) => {
+  const ip = getClientIp(req);
+  const ipLimit = checkRateLimit(`cust_reset_link_ip:${ip}`, 10, 10 * 60 * 1000);
+  if (!ipLimit.allowed) {
+    res.setHeader('Retry-After', String(ipLimit.retryAfterSec));
+    return res.status(429).json({ error: 'تم تجاوز عدد طلبات استعادة كلمة المرور، يرجى المحاولة بعد قليل' });
+  }
+
+  const { email: rawEmail } = (req.body || {}) as { email?: string };
+  const email = normalizeEmail(String(rawEmail || ''));
+  if (!email) {
+    return res.status(400).json({ error: 'يرجى إدخال بريد إلكتروني صحيح' });
+  }
+
+  const customer = db.prepare('SELECT id, full_name, status FROM customers WHERE LOWER(email) = LOWER(?)').get(email) as
+    | { id: string; full_name: string; status: string }
+    | undefined;
+  if (!customer) {
+    return res.status(404).json({ error: 'لا يوجد حساب عميل مسجل بهذا البريد الإلكتروني' });
+  }
+  if (customer.status === 'suspended') {
+    return res.status(403).json({ error: 'هذا الحساب موقوف حاليًا، يرجى التواصل مع الدعم الفني' });
+  }
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashActionToken(rawToken);
+  const tokenId = uid('eat');
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+  db.prepare(
+    "UPDATE email_action_tokens SET is_used = 1 WHERE LOWER(email) = LOWER(?) AND action_type = 'reset_password' AND is_used = 0"
+  ).run(email);
+  db.prepare(
+    `INSERT INTO email_action_tokens (id, customer_id, email, action_type, token_hash, is_used, expires_at)
+     VALUES (?, ?, ?, 'reset_password', ?, 0, ?)`
+  ).run(tokenId, customer.id, email, tokenHash, expiresAt);
+
+  const resetUrl = `${resolvePublicAppUrl(req)}/auth/reset-password?token=${encodeURIComponent(rawToken)}`;
+  const mailRes = await dispatchBrandedHtmlEmail(email, {
+    subject: 'إعادة تعيين كلمة المرور – تطبيق اطلبها',
+    plainText: `تلقينا طلبًا لتغيير كلمة المرور لحسابك في اطلبها. اضغط على الرابط التالي لتعيين كلمة مرور جديدة (صالح لمدة 30 دقيقة):\n${resetUrl}`,
+    html: `
+      <div dir="rtl" style="font-family: Tahoma, Arial, sans-serif; padding: 24px; background: #F8FAFC;">
+        <div style="max-width: 500px; margin: 0 auto; background: #FFFFFF; border-radius: 18px; padding: 28px; border: 1px solid #E2E8F0;">
+          <h2 style="color: #A92224; margin: 0 0 10px;">تغيير كلمة المرور – اطلبها</h2>
+          <p style="color: #334155; font-size: 15px; line-height: 1.7;">مرحبًا ${escapeHtmlSafe(customer.full_name || 'عميلنا العزيز')}، اضغط على الزر بالأسفل لاختيار كلمة مرور جديدة لحسابك:</p>
+          <div style="text-align: center; margin: 26px 0;">
+            <a href="${escapeHtmlSafe(resetUrl)}" style="display: inline-block; background: #A92224; color: #FFFFFF; text-decoration: none; padding: 14px 30px; border-radius: 12px; font-weight: bold; font-size: 15px;">
+              تعيين كلمة مرور جديدة
+            </a>
+          </div>
+          <p style="color: #64748B; font-size: 12.5px; line-height: 1.6;">الرابط صالح لمدة 30 دقيقة ولمرة واحدة فقط. إذا لم تطلب تغيير كلمة المرور يمكنك تجاهل هذه الرسالة.</p>
+          <p style="direction: ltr; word-break: break-all; font-size: 12px; color: #0F172A; background: #F1F5F9; padding: 10px; border-radius: 8px;">${escapeHtmlSafe(resetUrl)}</p>
+        </div>
+      </div>
+    `,
+  });
+
+  if (!mailRes.ok) {
+    db.prepare('DELETE FROM email_action_tokens WHERE id = ?').run(tokenId);
+    return res.status(503).json({ error: mailRes.error });
+  }
+
+  recordAuditLog({
+    actor_name: customer.full_name || email,
+    actor_role: 'customer',
+    action: 'CUSTOMER_PASSWORD_RESET_LINK_SENT',
+    entity_type: 'customers',
+    entity_id: customer.id,
+    details: `إرسال رابط تغيير كلمة المرور إلى ${email} عبر Gmail SMTP`,
+  });
+
+  return res.json({
+    ok: true,
+    email,
+    message: `تم إرسال رابط تغيير كلمة المرور إلى بريدك الإلكتروني (${email}). افتح الرسالة واضغط على الرابط لتعيين كلمة مرور جديدة.`,
+    expires_in_sec: 1800,
+    delivery_channel: mailRes.delivery_channel,
+  });
+};
+
+app.post('/api/mobile/customer/forgot-password/send-link', handleCustomerSendPasswordResetLink);
+app.post('/api/auth/customer/forgot-password/send-link', handleCustomerSendPasswordResetLink);
+
+// Hosted RTL HTML page for resetting password directly from the email link
+app.get('/auth/reset-password', (req, res) => {
+  const rawToken = String(req.query.token || '').trim();
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (!rawToken) {
+    return res.status(400).send(
+      renderActionResultPage({
+        title: 'رابط غير صالح – اطلبها',
+        heading: 'رابط تغيير كلمة المرور غير مكتمل',
+        body: 'افتح الرابط من رسالة البريد الإلكتروني أو اطلب رابطًا جديدًا من تطبيق اطلبها.',
+        success: false,
+      })
+    );
+  }
+  const tokenHash = hashActionToken(rawToken);
+  const row = db
+    .prepare("SELECT * FROM email_action_tokens WHERE token_hash = ? AND action_type = 'reset_password' LIMIT 1")
+    .get(tokenHash) as Record<string, unknown> | undefined;
+
+  if (!row || Boolean(row.is_used) || Date.now() > new Date(String(row.expires_at)).getTime()) {
+    return res.status(410).send(
+      renderActionResultPage({
+        title: 'انتهت صلاحية الرابط – اطلبها',
+        heading: 'الرابط غير صالح أو منتهي الصلاحية',
+        body: 'انتهت صلاحية رابط تغيير كلمة المرور أو تم استخدامه مسبقًا. اطلب رابطًا جديدًا من شاشة «هل نسيت كلمة المرور؟» في التطبيق.',
+        success: false,
+      })
+    );
+  }
+
+  const email = escapeHtmlSafe(String(row.email || ''));
+  const safeToken = escapeHtmlSafe(rawToken);
+
+  return res.status(200).send(`<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>تعيين كلمة مرور جديدة – اطلبها</title>
+</head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#F8FAFC;font-family:Tahoma,Arial,sans-serif;padding:20px;color:#0F172A;">
+  <div style="width:100%;max-width:440px;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:20px;padding:30px 24px;box-shadow:0 12px 32px rgba(15,23,42,0.06);">
+    <h1 style="margin:0 0 8px;font-size:21px;font-weight:800;color:#0F172A;text-align:center;">تعيين كلمة مرور جديدة</h1>
+    <p style="margin:0 0 22px;font-size:13.5px;color:#475569;text-align:center;">الحساب: <strong style="direction:ltr;display:inline-block;">${email}</strong></p>
+    <form id="resetForm" style="display:flex;flex-direction:column;gap:14px;">
+      <div>
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">كلمة المرور الجديدة (6 أحرف على الأقل)</label>
+        <input id="pw1" type="password" required minlength="6" dir="ltr" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #CBD5E1;border-radius:12px;font-size:15px;" />
+      </div>
+      <div>
+        <label style="display:block;font-size:13px;font-weight:700;margin-bottom:6px;color:#334155;">تأكيد كلمة المرور الجديدة</label>
+        <input id="pw2" type="password" required minlength="6" dir="ltr" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #CBD5E1;border-radius:12px;font-size:15px;" />
+      </div>
+      <div id="msgBox" style="display:none;padding:11px 14px;border-radius:10px;font-size:13.5px;line-height:1.6;"></div>
+      <button id="submitBtn" type="submit" style="margin-top:4px;padding:13px;border:none;border-radius:12px;background:#A92224;color:#FFFFFF;font-weight:700;font-size:15px;cursor:pointer;">حفظ كلمة المرور الجديدة</button>
+    </form>
+    <div id="doneBox" style="display:none;text-align:center;margin-top:14px;">
+      <a href="otlobha://password-reset-done" style="display:inline-block;padding:12px 24px;border-radius:12px;background:#0D9488;color:#FFFFFF;text-decoration:none;font-weight:700;font-size:14.5px;">العودة إلى تطبيق اطلبها</a>
+    </div>
+  </div>
+  <script>
+    const form = document.getElementById('resetForm');
+    const msgBox = document.getElementById('msgBox');
+    const submitBtn = document.getElementById('submitBtn');
+    const doneBox = document.getElementById('doneBox');
+    function showMsg(text, ok) {
+      msgBox.style.display = 'block';
+      msgBox.style.background = ok ? '#F0FDFA' : '#FEF2F2';
+      msgBox.style.color = ok ? '#0F766E' : '#B91C1C';
+      msgBox.style.border = ok ? '1px solid #99F6E4' : '1px solid #FECACA';
+      msgBox.textContent = text;
+    }
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const p1 = document.getElementById('pw1').value;
+      const p2 = document.getElementById('pw2').value;
+      if (p1.length < 6) { showMsg('كلمة المرور يجب أن لا تقل عن 6 أحرف', false); return; }
+      if (p1 !== p2) { showMsg('كلمتا المرور غير متطابقتين', false); return; }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'جاري الحفظ...';
+      try {
+        const res = await fetch('/api/auth/customer/reset-password-by-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: '${safeToken}', new_password: p1 })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showMsg(data.error || 'تعذر تحديث كلمة المرور', false);
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'حفظ كلمة المرور الجديدة';
+          return;
+        }
+        showMsg(data.message || 'تم تغيير كلمة المرور بنجاح! يمكنك الآن العودة للتطبيق وتسجيل الدخول.', true);
+        form.style.display = 'none';
+        doneBox.style.display = 'block';
+      } catch (_) {
+        showMsg('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى.', false);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'حفظ كلمة المرور الجديدة';
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
+app.post('/api/auth/customer/reset-password-by-token', (req, res) => {
+  const { token, new_password } = (req.body || {}) as { token?: string; new_password?: string };
+  const rawToken = String(token || '').trim();
+  const cleanPass = String(new_password || '');
+  if (!rawToken) {
+    return res.status(400).json({ error: 'رابط التغيير غير صالح' });
+  }
+  if (cleanPass.length < 6) {
+    return res.status(400).json({ error: 'كلمة المرور الجديدة يجب أن لا تقل عن 6 أحرف' });
+  }
+
+  const tokenHash = hashActionToken(rawToken);
+  const row = db
+    .prepare("SELECT * FROM email_action_tokens WHERE token_hash = ? AND action_type = 'reset_password' LIMIT 1")
+    .get(tokenHash) as Record<string, unknown> | undefined;
+
+  if (!row || Boolean(row.is_used)) {
+    return res.status(400).json({ error: 'هذا الرابط غير صالح أو تم استخدامه بالفعل' });
+  }
+  if (Date.now() > new Date(String(row.expires_at)).getTime()) {
+    return res.status(410).json({ error: 'انتهت صلاحية الرابط، يرجى طلب رابط جديد من التطبيق' });
+  }
+
+  const email = String(row.email || '');
+  const customer = db.prepare('SELECT * FROM customers WHERE id = ? OR LOWER(email) = LOWER(?) LIMIT 1').get(
+    String(row.customer_id || ''),
+    email
+  ) as Record<string, unknown> | undefined;
+  if (!customer) {
+    return res.status(404).json({ error: 'حساب العميل غير موجود' });
+  }
+
+  db.prepare('UPDATE email_action_tokens SET is_used = 1 WHERE id = ?').run(String(row.id));
+  db.prepare(
+    'UPDATE customers SET password_hash = ?, is_email_verified = 1, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?'
+  ).run(hashPassword(cleanPass), String(customer.id));
+
+  recordAuditLog({
+    actor_name: String(customer.full_name || email),
+    actor_role: 'customer',
+    action: 'CUSTOMER_PASSWORD_RESET_BY_LINK',
+    entity_type: 'customers',
+    entity_id: String(customer.id),
+    details: `تغيير كلمة مرور العميل (${email}) عبر رابط البريد الإلكتروني`,
+  });
+
+  return res.json({
+    ok: true,
+    message: 'تم تغيير كلمة المرور بنجاح! يمكنك الآن العودة إلى تطبيق اطلبها وتسجيل الدخول بكلمة المرور الجديدة.',
+  });
+});
 
 const handleCustomerRegisterRequestOtp = async (req: express.Request, res: express.Response) => {
   const ip = getClientIp(req);
@@ -7446,6 +8292,13 @@ app.post('/api/mobile/customer/login', (req, res) => {
   if (!verifyPassword(cleanPass, storedHash)) {
     return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
   }
+  if (!Boolean(customerRow.is_email_verified)) {
+    return res.status(403).json({
+      error: 'حسابك غير مفعّل بعد — يرجى فتح رابط التأكيد المرسل إلى بريدك الإلكتروني أولًا',
+      code: 'EMAIL_NOT_VERIFIED',
+      email: String(customerRow.email || ''),
+    });
+  }
 
   db.prepare("UPDATE customers SET last_login_at = datetime('now') WHERE id = ?").run(String(customerRow.id));
   const freshRow = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(customerRow.id)) as Record<string, unknown>;
@@ -7466,10 +8319,12 @@ app.post('/api/mobile/customer/login', (req, res) => {
     details: `تسجيل دخول العميل ${String(freshRow.full_name)} بكلمة المرور`,
   });
 
+  const sanitized = sanitizeCustomerRow(freshRow);
   return res.json({
     ok: true,
     role: 'customer',
-    user: sanitizeCustomerRow(freshRow),
+    needs_profile_completion: sanitized.needs_profile_completion,
+    user: sanitized,
     tokens: {
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,

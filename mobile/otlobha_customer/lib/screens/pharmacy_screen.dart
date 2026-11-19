@@ -1,8 +1,8 @@
-import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../core/api_client.dart';
+import '../core/safe_camera_picker.dart';
 
 class PharmacyScreen extends StatefulWidget {
   final OtlobhaCustomerApi api;
@@ -27,21 +27,46 @@ class PharmacyScreen extends StatefulWidget {
 class _PharmacyScreenState extends State<PharmacyScreen> {
   String _selectedPharmacyId = '';
   final TextEditingController _rxCtrl = TextEditingController();
-  final ImagePicker _picker = ImagePicker();
   Uint8List? _rxPhotoBytes;
   String? _rxImageDataUrl;
   bool _sending = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _recoverLostPhoto();
+  }
+
+  Future<void> _recoverLostPhoto() async {
+    final lost = await SafeCameraPicker.recoverLostImage(expectedTargetKey: 'pharmacy_rx');
+    if (lost != null && mounted) {
+      setState(() {
+        _rxPhotoBytes = lost.bytes;
+        _rxImageDataUrl = lost.dataUrl;
+      });
+    }
+  }
+
   Future<void> _pickRxPhoto(ImageSource source) async {
-    final file = await _picker.pickImage(source: source, maxWidth: 1000, imageQuality: 78);
-    if (file != null) {
-      final bytes = await file.readAsBytes();
-      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-      if (mounted) {
+    try {
+      final result = await SafeCameraPicker.pickImage(
+        source: source,
+        targetKey: 'pharmacy_rx',
+        maxWidth: 1000,
+        maxHeight: 1000,
+        imageQuality: 76,
+      );
+      if (result != null && mounted) {
         setState(() {
-          _rxPhotoBytes = bytes;
-          _rxImageDataUrl = dataUrl;
+          _rxPhotoBytes = result.bytes;
+          _rxImageDataUrl = result.dataUrl;
         });
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر فتح الكاميرا أو قراءة الصورة، تأكد من منح صلاحية الكاميرا وحاول مرة أخرى')),
+        );
       }
     }
   }

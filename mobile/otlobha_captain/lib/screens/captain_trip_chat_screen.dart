@@ -37,9 +37,19 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
   bool _sending = false;
   bool _updatingStatus = false;
   bool _tripClosed = false;
+  bool _hasPopped = false;
   bool _wsConnected = false;
   bool _showMap = true;
   bool _disposed = false;
+
+  void _safeCloseScreen() {
+    if (_hasPopped || !mounted) return;
+    _hasPopped = true;
+    final nav = Navigator.of(context);
+    if (nav.canPop()) {
+      nav.pop();
+    }
+  }
 
   WebSocketChannel? _channel;
   StreamSubscription? _wsSub;
@@ -149,7 +159,7 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
               if (!mounted) return;
               setState(() => _trip = Map<String, dynamic>.from(payload['trip'] as Map));
             } else if (type == 'trip:completed' && payload['trip_id'] == widget.tripId) {
-              if (_tripClosed) return;
+              if (_tripClosed || _hasPopped) return;
               _tripClosed = true;
               _reconnectTimer?.cancel();
               if (!mounted) return;
@@ -158,9 +168,9 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
                   content: Text('تم إنهاء المشوار وحذفه من النظام (حصة التطبيق 10%: ${payload['fee_10pct'] ?? '--'} ج.م)'),
                 ),
               );
-              Navigator.of(context).pop();
+              _safeCloseScreen();
             } else if (type == 'trip:cancelled' && payload['trip_id'] == widget.tripId) {
-              if (_tripClosed) return;
+              if (_tripClosed || _hasPopped) return;
               _tripClosed = true;
               _reconnectTimer?.cancel();
               if (!mounted) return;
@@ -174,7 +184,7 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
                   ),
                 ),
               );
-              Navigator.of(context).pop();
+              _safeCloseScreen();
             } else if (type == 'captain:location' &&
                 !_tripClosed &&
                 payload['captain_id'] == widget.captainId &&
@@ -265,8 +275,10 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
   }
 
   Future<void> _finishTrip() async {
-    if (_updatingStatus || _tripClosed) return;
+    if (_updatingStatus || _tripClosed || _hasPopped) return;
     setState(() => _updatingStatus = true);
+    _tripClosed = true;
+    _reconnectTimer?.cancel();
     try {
       final res = await widget.api.finishTrip(
         widget.tripId,
@@ -274,16 +286,15 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
         actorName: widget.captainName,
         captainId: widget.captainId,
       );
-      _tripClosed = true;
-      _reconnectTimer?.cancel();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('تم إنهاء المشوار (${res['fare']} ج.م) وإضافة 10% (${res['fee_10pct']} ج.م) لحساب التطبيق ✓'),
         ),
       );
-      Navigator.of(context).pop();
+      _safeCloseScreen();
     } catch (e) {
+      _tripClosed = false;
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     } finally {
       if (mounted) setState(() => _updatingStatus = false);
@@ -291,7 +302,7 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
   }
 
   Future<void> _cancelTrip() async {
-    if (_updatingStatus || _tripClosed) return;
+    if (_updatingStatus || _tripClosed || _hasPopped) return;
     final currentFare = ((_trip?['final_fare'] ?? _trip?['estimated_fare'] ?? 0) as num).toDouble();
     final penalty = (currentFare * 0.10).toStringAsFixed(2);
     final confirmed = await showDialog<bool>(
@@ -312,8 +323,10 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
         ),
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true || _tripClosed || _hasPopped) return;
     setState(() => _updatingStatus = true);
+    _tripClosed = true;
+    _reconnectTimer?.cancel();
     try {
       final res = await widget.api.cancelTrip(
         widget.tripId,
@@ -321,14 +334,13 @@ class _CaptainTripChatScreenState extends State<CaptainTripChatScreen> {
         actorName: widget.captainName,
         captainId: widget.captainId,
       );
-      _tripClosed = true;
-      _reconnectTimer?.cancel();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('تم إلغاء الرحلة وحذفها — تم قيد غرامة 10% (${res['penalty_10pct']} ج.م)')),
       );
-      Navigator.of(context).pop();
+      _safeCloseScreen();
     } catch (e) {
+      _tripClosed = false;
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     } finally {
       if (mounted) setState(() => _updatingStatus = false);

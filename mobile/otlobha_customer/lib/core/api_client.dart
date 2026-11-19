@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiException implements Exception {
   final String message;
@@ -121,6 +122,10 @@ class OtlobhaCustomerApi {
     return clean;
   }
 
+  static const String _prefAccessToken = 'otlobha_cust_access_token';
+  static const String _prefRefreshToken = 'otlobha_cust_refresh_token';
+  static const String _prefUserJson = 'otlobha_cust_user_json';
+
   void setTokens({String? accessToken, String? refreshToken}) {
     if (accessToken != null && accessToken.isNotEmpty) {
       _accessToken = accessToken;
@@ -128,11 +133,68 @@ class OtlobhaCustomerApi {
     if (refreshToken != null && refreshToken.isNotEmpty) {
       _refreshToken = refreshToken;
     }
+    _persistTokensAsync();
   }
 
   void clearTokens() {
     _accessToken = null;
     _refreshToken = null;
+    _clearPersistedTokensAsync();
+  }
+
+  Future<void> _persistTokensAsync() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_accessToken != null && _accessToken!.isNotEmpty) {
+        await prefs.setString(_prefAccessToken, _accessToken!);
+      }
+      if (_refreshToken != null && _refreshToken!.isNotEmpty) {
+        await prefs.setString(_prefRefreshToken, _refreshToken!);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _clearPersistedTokensAsync() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_prefAccessToken);
+      await prefs.remove(_prefRefreshToken);
+      await prefs.remove(_prefUserJson);
+    } catch (_) {}
+  }
+
+  Future<void> persistUserSnapshot(Map<String, dynamic> user) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefUserJson, jsonEncode(user));
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>?> restorePersistedSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedAccess = prefs.getString(_prefAccessToken);
+      final savedRefresh = prefs.getString(_prefRefreshToken);
+      final savedUserRaw = prefs.getString(_prefUserJson);
+      if (savedAccess != null && savedAccess.isNotEmpty) {
+        _accessToken = savedAccess;
+      }
+      if (savedRefresh != null && savedRefresh.isNotEmpty) {
+        _refreshToken = savedRefresh;
+      }
+      if (!hasTokens && (_refreshToken == null || _refreshToken!.isEmpty)) {
+        return null;
+      }
+      if (savedUserRaw != null && savedUserRaw.isNotEmpty) {
+        final decoded = jsonDecode(savedUserRaw);
+        if (decoded is Map) {
+          return Map<String, dynamic>.from(decoded);
+        }
+      }
+      return <String, dynamic>{};
+    } catch (_) {
+      return null;
+    }
   }
 
   Map<String, String> _headers({bool json = false, bool includeAuth = true}) {
@@ -238,9 +300,16 @@ class OtlobhaCustomerApi {
 
   Future<Map<String, dynamic>> updateProfile({
     String? fullName,
+    int? age,
+    String? country,
+    String? city,
     String? phone,
+    String? secondaryPhone,
     String? addressLandmark,
     String? defaultZoneId,
+    double? lastLat,
+    double? lastLng,
+    bool? profileCompleted,
   }) async {
     final res = await _sendWithAuth(
       (h) => http.patch(
@@ -248,14 +317,110 @@ class OtlobhaCustomerApi {
         headers: h,
         body: jsonEncode({
           if (fullName != null) 'full_name': fullName,
+          if (age != null) 'age': age,
+          if (country != null) 'country': country,
+          if (city != null) 'city': city,
           if (phone != null) 'phone': phone,
+          if (secondaryPhone != null) 'secondary_phone': secondaryPhone,
           if (addressLandmark != null) 'address_landmark': addressLandmark,
           if (defaultZoneId != null && defaultZoneId.isNotEmpty) 'default_zone_id': defaultZoneId,
+          if (lastLat != null) 'last_lat': lastLat,
+          if (lastLng != null) 'last_lng': lastLng,
+          if (profileCompleted != null) 'profile_completed': profileCompleted,
         }),
       ),
       json: true,
     );
-    return _decode(res, endpointHint: '/api/mobile/customer/me');
+    final data = _decode(res, endpointHint: '/api/mobile/customer/me');
+    if (data['customer'] is Map) {
+      await persistUserSnapshot(Map<String, dynamic>.from(data['customer'] as Map));
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> signInWithGoogle(String idToken) async {
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/customer/auth/google'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({'id_token': idToken}),
+      ),
+    );
+    final data = _decode(res, endpointHint: '/api/mobile/customer/auth/google');
+    final tokens = data['tokens'];
+    if (tokens is Map) {
+      setTokens(
+        accessToken: tokens['access_token']?.toString(),
+        refreshToken: tokens['refresh_token']?.toString(),
+      );
+    }
+    if (data['user'] is Map) {
+      await persistUserSnapshot(Map<String, dynamic>.from(data['user'] as Map));
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> sendRegisterVerificationLink({
+    required String fullName,
+    required String email,
+    String? phone,
+    required String password,
+  }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/customer/register/send-verification-link'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({
+          'full_name': fullName.trim(),
+          'email': cleanEmail,
+          if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
+          'password': password,
+        }),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/mobile/customer/register/send-verification-link');
+  }
+
+  Future<Map<String, dynamic>> checkRegisterEmailVerified({
+    required String email,
+    required String password,
+  }) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/customer/register/check-verified'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({
+          'email': cleanEmail,
+          'password': password,
+        }),
+      ),
+    );
+    final data = _decode(res, endpointHint: '/api/mobile/customer/register/check-verified');
+    final tokens = data['tokens'];
+    if (tokens is Map) {
+      setTokens(
+        accessToken: tokens['access_token']?.toString(),
+        refreshToken: tokens['refresh_token']?.toString(),
+      );
+    }
+    if (data['user'] is Map) {
+      await persistUserSnapshot(Map<String, dynamic>.from(data['user'] as Map));
+    }
+    return data;
+  }
+
+  Future<Map<String, dynamic>> sendPasswordResetLink(String email) async {
+    final cleanEmail = normalizeEmail(email) ?? sanitizeEmailInput(email);
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/mobile/customer/forgot-password/send-link'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({'email': cleanEmail}),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/mobile/customer/forgot-password/send-link');
   }
 
   Future<Map<String, dynamic>> requestCustomerRegisterOtp({

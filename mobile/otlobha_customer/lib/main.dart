@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'core/api_client.dart';
@@ -15,6 +16,7 @@ import 'screens/notifications_screen.dart';
 import 'screens/order_chat_screen.dart';
 import 'screens/trip_chat_screen.dart';
 import 'screens/customer_otp_login_screen.dart';
+import 'screens/complete_profile_screen.dart';
 import 'screens/support_screen.dart';
 
 Future<void> main() async {
@@ -71,6 +73,8 @@ class _CustomerShellState extends State<CustomerShell> {
   bool _isAuthenticated = false;
   bool _isGuest = false;
   bool _showAuthScreen = true;
+  bool _needsProfileCompletion = false;
+  Map<String, dynamic> _currentUserSnapshot = {};
   int _index = 0; // 0: الرئيسية | 1: العروض | 2: الخدمات (المنتصف) | 3: السلة | 4: الملف الشخصي
   String _serviceSubView = 'hub';
   bool _loading = true;
@@ -90,6 +94,10 @@ class _CustomerShellState extends State<CustomerShell> {
   StreamSubscription? _ridesSub;
   Map<String, dynamic>? _pendingPushTap;
 
+  static const String _prefGuestMode = 'otlobha_cust_is_guest';
+  static const String _prefTabIndex = 'otlobha_cust_tab_index';
+  static const String _prefServiceSubView = 'otlobha_cust_service_sub_view';
+
   @override
   void initState() {
     super.initState();
@@ -99,9 +107,72 @@ class _CustomerShellState extends State<CustomerShell> {
         if (_isAuthenticated && !_isGuest) _silentSync();
       },
     );
+    _restoreSavedNavigationAndSession();
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       if (_isAuthenticated && !_isGuest) _silentSync();
     });
+  }
+
+  Future<void> _persistNavState({int? tabIndex, String? subView, bool? guest}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (tabIndex != null) await prefs.setInt(_prefTabIndex, tabIndex);
+      if (subView != null) await prefs.setString(_prefServiceSubView, subView);
+      if (guest != null) await prefs.setBool(_prefGuestMode, guest);
+    } catch (_) {}
+  }
+
+  bool _checkNeedsProfileCompletion(Map<String, dynamic> user) {
+    if (user['needs_profile_completion'] == true) return true;
+    if (user['profile_completed'] == false) return true;
+    final phone = (user['phone'] ?? '').toString().trim();
+    if (phone.isEmpty && user['profile_completed'] != true) return true;
+    return false;
+  }
+
+  Future<void> _restoreSavedNavigationAndSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedTab = prefs.getInt(_prefTabIndex) ?? 0;
+      final savedSub = prefs.getString(_prefServiceSubView) ?? 'hub';
+      final savedGuest = prefs.getBool(_prefGuestMode) ?? false;
+      final savedUser = await api.restorePersistedSession();
+
+      if (!mounted) return;
+      if (savedUser != null && api.hasTokens) {
+        final needsProfile = _checkNeedsProfileCompletion(savedUser);
+        setState(() {
+          _isAuthenticated = true;
+          _isGuest = false;
+          _showAuthScreen = false;
+          _needsProfileCompletion = needsProfile;
+          _currentUserSnapshot = savedUser;
+          _customerEmail = savedUser['email']?.toString() ?? '';
+          _customerName = savedUser['full_name']?.toString() ?? '';
+          _customerPhone = savedUser['phone']?.toString() ?? '';
+          _addressLandmark = savedUser['address_landmark']?.toString() ?? '';
+          final zoneId = savedUser['default_zone_id']?.toString() ?? '';
+          if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
+          _index = savedTab.clamp(0, 4);
+          _serviceSubView = savedSub;
+        });
+        if (!needsProfile) {
+          _connectRidesWs();
+          _loadData();
+          CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+        }
+      } else if (savedGuest) {
+        setState(() {
+          _isGuest = true;
+          _isAuthenticated = false;
+          _showAuthScreen = false;
+          _customerName = 'زائر اطلبها';
+          _index = savedTab.clamp(0, 4);
+          _serviceSubView = savedSub;
+        });
+        _loadData();
+      }
+    } catch (_) {}
   }
 
   void _handlePushNotificationTap(Map<String, dynamic> data) {
@@ -328,12 +399,14 @@ class _CustomerShellState extends State<CustomerShell> {
       _isGuest = true;
       _isAuthenticated = false;
       _showAuthScreen = false;
+      _needsProfileCompletion = false;
       if (!wasAlreadyGuest) {
         _customerName = 'زائر اطلبها';
         _customerEmail = '';
         _customerPhone = '';
       }
     });
+    _persistNavState(guest: true);
     if (!wasAlreadyGuest) {
       _loadData();
     }
@@ -442,11 +515,14 @@ class _CustomerShellState extends State<CustomerShell> {
     final devId = push.deviceId;
     await push.unregisterOnLogout(api);
     await api.logout(fcmToken: token, deviceId: devId);
+    await _persistNavState(guest: false, tabIndex: 0, subView: 'hub');
     if (!mounted) return;
     setState(() {
       _isAuthenticated = false;
       _isGuest = false;
       _showAuthScreen = true;
+      _needsProfileCompletion = false;
+      _currentUserSnapshot = {};
       _customerName = '';
       _customerEmail = '';
       _customerPhone = '';
@@ -773,10 +849,13 @@ class _CustomerShellState extends State<CustomerShell> {
           onContinueAsGuest: _enterGuestMode,
           onVerified: (user) {
             final wasGuest = _isGuest;
+            final needsProfile = _checkNeedsProfileCompletion(user);
             setState(() {
               _isAuthenticated = true;
               _isGuest = false;
               _showAuthScreen = false;
+              _needsProfileCompletion = needsProfile;
+              _currentUserSnapshot = Map<String, dynamic>.from(user);
               _customerEmail = user['email']?.toString() ?? '';
               _customerName = user['full_name']?.toString() ?? '';
               _customerPhone = user['phone']?.toString() ?? '';
@@ -785,16 +864,48 @@ class _CustomerShellState extends State<CustomerShell> {
               if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
               if (!wasGuest) _index = 0;
             });
-            _connectRidesWs();
-            _loadData();
-            CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
-            if (_pendingPushTap != null) {
-              final pending = _pendingPushTap!;
-              _pendingPushTap = null;
-              WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+            api.persistUserSnapshot(user);
+            _persistNavState(guest: false, tabIndex: _index);
+            if (!needsProfile) {
+              _connectRidesWs();
+              _loadData();
+              CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+              if (_pendingPushTap != null) {
+                final pending = _pendingPushTap!;
+                _pendingPushTap = null;
+                WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+              }
             }
           },
         ),
+      );
+    }
+
+    if (_isAuthenticated && !_isGuest && _needsProfileCompletion) {
+      return CompleteProfileScreen(
+        api: api,
+        initialUser: _currentUserSnapshot,
+        onLogout: _logout,
+        onCompleted: (updatedUser) {
+          setState(() {
+            _needsProfileCompletion = false;
+            _currentUserSnapshot = Map<String, dynamic>.from(updatedUser);
+            _customerName = updatedUser['full_name']?.toString() ?? _customerName;
+            _customerPhone = updatedUser['phone']?.toString() ?? _customerPhone;
+            _addressLandmark = updatedUser['address_landmark']?.toString() ?? _addressLandmark;
+            final zoneId = updatedUser['default_zone_id']?.toString() ?? '';
+            if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
+          });
+          api.persistUserSnapshot(updatedUser);
+          _connectRidesWs();
+          _loadData();
+          CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+          if (_pendingPushTap != null) {
+            final pending = _pendingPushTap!;
+            _pendingPushTap = null;
+            WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+          }
+        },
       );
     }
 
@@ -813,11 +924,17 @@ class _CustomerShellState extends State<CustomerShell> {
           _orderChannel = 'free_text';
           _index = 3;
         }),
-        onOpenService: (sub) => setState(() {
-          _serviceSubView = sub;
-          _index = 2;
-        }),
-        onOpenOffers: () => setState(() => _index = 1),
+        onOpenService: (sub) {
+          setState(() {
+            _serviceSubView = sub;
+            _index = 2;
+          });
+          _persistNavState(tabIndex: 2, subView: sub);
+        },
+        onOpenOffers: () {
+          setState(() => _index = 1);
+          _persistNavState(tabIndex: 1);
+        },
         onOpenOrderChat: _openOrderChat,
         onOpenTripChat: _openTripChat,
         onRateCaptain: _showCaptainRatingDialog,
@@ -833,10 +950,16 @@ class _CustomerShellState extends State<CustomerShell> {
         bootstrap: _bootstrap,
         cart: _quickCart,
         onAddProduct: _onQuickAdd,
-        onOpenCart: () => setState(() => _index = 3),
+        onOpenCart: () {
+          setState(() => _index = 3);
+          _persistNavState(tabIndex: 3);
+        },
         onRefresh: _loadData,
         activeSubView: _serviceSubView,
-        onSelectSubView: (sub) => setState(() => _serviceSubView = sub),
+        onSelectSubView: (sub) {
+          setState(() => _serviceSubView = sub);
+          _persistNavState(subView: sub);
+        },
         onOpenFreeOrderCart: () => setState(() {
           _orderChannel = 'free_text';
           _index = 3;
@@ -1067,6 +1190,7 @@ class _CustomerShellState extends State<CustomerShell> {
                   _serviceSubView = 'hub';
                   _index = 2;
                 });
+                _persistNavState(tabIndex: 2, subView: 'hub');
               },
             ),
             ListTile(
@@ -1079,6 +1203,7 @@ class _CustomerShellState extends State<CustomerShell> {
                   _serviceSubView = 'stores';
                   _index = 2;
                 });
+                _persistNavState(tabIndex: 2, subView: 'stores');
               },
             ),
             ListTile(
@@ -1091,6 +1216,7 @@ class _CustomerShellState extends State<CustomerShell> {
                   _serviceSubView = 'pharmacy';
                   _index = 2;
                 });
+                _persistNavState(tabIndex: 2, subView: 'pharmacy');
               },
             ),
             ListTile(
@@ -1103,6 +1229,7 @@ class _CustomerShellState extends State<CustomerShell> {
                   _serviceSubView = 'rides_parcels';
                   _index = 2;
                 });
+                _persistNavState(tabIndex: 2, subView: 'rides_parcels');
               },
             ),
             ListTile(
@@ -1115,6 +1242,7 @@ class _CustomerShellState extends State<CustomerShell> {
                   _serviceSubView = 'market';
                   _index = 2;
                 });
+                _persistNavState(tabIndex: 2, subView: 'market');
               },
             ),
             ListTile(
@@ -1225,7 +1353,10 @@ class _CustomerShellState extends State<CustomerShell> {
       final active = _index == idx;
       return Expanded(
         child: InkWell(
-          onTap: () => setState(() => _index = idx),
+          onTap: () {
+            setState(() => _index = idx);
+            _persistNavState(tabIndex: idx);
+          },
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Column(
@@ -1278,10 +1409,12 @@ class _CustomerShellState extends State<CustomerShell> {
               Expanded(
                 child: GestureDetector(
                   onTap: () {
+                    final nextSub = _index != 2 ? 'hub' : _serviceSubView;
                     setState(() {
-                      if (_index != 2) _serviceSubView = 'hub';
+                      _serviceSubView = nextSub;
                       _index = 2;
                     });
+                    _persistNavState(tabIndex: 2, subView: nextSub);
                   },
                   child: Column(
                     mainAxisSize: MainAxisSize.min,

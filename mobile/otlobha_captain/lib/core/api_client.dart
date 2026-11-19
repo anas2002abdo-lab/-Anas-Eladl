@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiException implements Exception {
   final String message;
@@ -72,6 +73,10 @@ class OtlobhaCaptainApi {
     return clean;
   }
 
+  static const String _prefAccessToken = 'otlobha_cap_access_token';
+  static const String _prefRefreshToken = 'otlobha_cap_refresh_token';
+  static const String _prefCaptainId = 'otlobha_cap_active_id';
+
   void setTokens({String? accessToken, String? refreshToken}) {
     if (accessToken != null && accessToken.isNotEmpty) {
       _accessToken = accessToken;
@@ -79,11 +84,62 @@ class OtlobhaCaptainApi {
     if (refreshToken != null && refreshToken.isNotEmpty) {
       _refreshToken = refreshToken;
     }
+    _persistTokensAsync();
   }
 
   void clearTokens() {
     _accessToken = null;
     _refreshToken = null;
+    _clearPersistedSessionAsync();
+  }
+
+  Future<void> _persistTokensAsync() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_accessToken != null && _accessToken!.isNotEmpty) {
+        await prefs.setString(_prefAccessToken, _accessToken!);
+      }
+      if (_refreshToken != null && _refreshToken!.isNotEmpty) {
+        await prefs.setString(_prefRefreshToken, _refreshToken!);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _clearPersistedSessionAsync() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_prefAccessToken);
+      await prefs.remove(_prefRefreshToken);
+      await prefs.remove(_prefCaptainId);
+    } catch (_) {}
+  }
+
+  Future<void> persistActiveCaptainId(String captainId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefCaptainId, captainId);
+    } catch (_) {}
+  }
+
+  Future<String?> restorePersistedSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedAccess = prefs.getString(_prefAccessToken);
+      final savedRefresh = prefs.getString(_prefRefreshToken);
+      final savedId = prefs.getString(_prefCaptainId);
+      if (savedAccess != null && savedAccess.isNotEmpty) {
+        _accessToken = savedAccess;
+      }
+      if (savedRefresh != null && savedRefresh.isNotEmpty) {
+        _refreshToken = savedRefresh;
+      }
+      if (!hasTokens || savedId == null || savedId.isEmpty) {
+        return null;
+      }
+      return savedId;
+    } catch (_) {
+      return null;
+    }
   }
 
   Map<String, String> _headers({bool json = false, bool includeAuth = true}) {

@@ -177,6 +177,10 @@ jobs:
           echo "Guest bootstrap HTTP status: $GUEST_STATUS"
           test "$GUEST_STATUS" = "200"
 
+          REG_OTP_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' -d '{}' "${SERVICE_URL}/api/mobile/customer/register/request-otp")"
+          echo "Customer register OTP route validation HTTP status: $REG_OTP_STATUS"
+          test "$REG_OTP_STATUS" = "400"
+
           {
             echo "## Otlobha Unified Backend — Public Cloud Run URL"
             echo ""

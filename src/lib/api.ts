@@ -329,6 +329,53 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ identifier, password }),
     }),
+  getAuthPublicConfig: () =>
+    request<{ ok: boolean; google_web_client_id: string }>('/api/auth/public-config'),
+  loginCustomerWithGoogle: (id_token: string) =>
+    request<{ ok: boolean; role: 'customer'; is_new_user?: boolean; needs_profile_completion?: boolean; user: any; tokens?: any }>(
+      '/api/mobile/customer/auth/google',
+      {
+        method: 'POST',
+        body: JSON.stringify({ id_token }),
+      }
+    ),
+  sendCustomerVerificationLink: (body: {
+    full_name: string;
+    email: string;
+    phone?: string;
+    password: string;
+  }) =>
+    request<{
+      ok: boolean;
+      email: string;
+      already_verified?: boolean;
+      message?: string;
+      expires_in_sec?: number;
+    }>('/api/mobile/customer/register/send-verification-link', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  checkCustomerEmailVerified: (email: string, password: string) =>
+    request<{
+      ok: boolean;
+      verified: boolean;
+      role?: 'customer';
+      needs_profile_completion?: boolean;
+      user?: any;
+      tokens?: any;
+      message?: string;
+    }>('/api/mobile/customer/register/check-verified', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  sendCustomerPasswordResetLink: (email: string) =>
+    request<{ ok: boolean; email: string; message?: string; expires_in_sec?: number }>(
+      '/api/mobile/customer/forgot-password/send-link',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      }
+    ),
   requestCustomerPasswordReset: (email: string) =>
     request<{ ok: boolean; email: string; message?: string; expires_in_sec: number }>(
       '/api/mobile/customer/forgot-password/request',
@@ -347,9 +394,16 @@ export const api = {
     ),
   updateCustomerProfile: (body: {
     full_name?: string;
+    age?: number | null;
+    country?: string;
+    city?: string;
     phone?: string;
+    secondary_phone?: string;
     address_landmark?: string;
     default_zone_id?: string;
+    last_lat?: number;
+    last_lng?: number;
+    profile_completed?: boolean;
   }) =>
     request<{ ok: boolean; customer: any }>('/api/mobile/customer/me', {
       method: 'PATCH',

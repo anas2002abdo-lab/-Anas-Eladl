@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../core/api_client.dart';
+import '../core/safe_camera_picker.dart';
 
 class CaptainOrderChatScreen extends StatefulWidget {
   final OtlobhaCaptainApi api;
@@ -27,7 +28,6 @@ class CaptainOrderChatScreen extends StatefulWidget {
 class _CaptainOrderChatScreenState extends State<CaptainOrderChatScreen> {
   final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
-  final ImagePicker _picker = ImagePicker();
 
   Map<String, dynamic>? _order;
   List<Map<String, dynamic>> _messages = [];
@@ -46,6 +46,16 @@ class _CaptainOrderChatScreenState extends State<CaptainOrderChatScreen> {
     super.initState();
     _loadChat();
     _connectWs();
+    _recoverLostChatPhoto();
+  }
+
+  Future<void> _recoverLostChatPhoto() async {
+    final lost = await SafeCameraPicker.recoverLostImage(
+      expectedTargetPrefix: 'order_chat_${widget.orderId}_',
+    );
+    if (lost == null || !mounted) return;
+    final isProof = (lost.targetKey ?? '').endsWith('_proof');
+    await _uploadCapturedPhoto(lost.dataUrl, isDeliveryProof: isProof);
   }
 
   @override
@@ -167,11 +177,22 @@ class _CaptainOrderChatScreenState extends State<CaptainOrderChatScreen> {
 
   Future<void> _captureAndSendPhoto({required bool isDeliveryProof, required ImageSource source}) async {
     try {
-      final picked = await _picker.pickImage(source: source, maxWidth: 1000, imageQuality: 78);
-      if (picked == null) return;
-      final bytes = await picked.readAsBytes();
-      final b64 = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      final picked = await SafeCameraPicker.pickImage(
+        source: source,
+        targetKey: 'order_chat_${widget.orderId}_${isDeliveryProof ? 'proof' : 'regular'}',
+        maxWidth: 1000,
+        maxHeight: 1000,
+        imageQuality: 76,
+      );
+      if (picked == null || !mounted) return;
+      await _uploadCapturedPhoto(picked.dataUrl, isDeliveryProof: isDeliveryProof);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
 
+  Future<void> _uploadCapturedPhoto(String b64, {required bool isDeliveryProof}) async {
+    try {
       setState(() {
         if (isDeliveryProof) {
           _uploadingProof = true;

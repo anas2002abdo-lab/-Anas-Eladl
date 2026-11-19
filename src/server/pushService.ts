@@ -6,6 +6,7 @@ import {
   type App,
   type ServiceAccount,
 } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
 import { db, uid } from './db.ts';
 
@@ -658,4 +659,81 @@ export function enqueueSystemPushNotification(
   createAndSendNotification(params).catch((err) => {
     console.error('[FCM] System event push error:', err instanceof Error ? err.message : err);
   });
+}
+
+export interface VerifiedGoogleIdentity {
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+  name: string;
+  picture?: string;
+}
+
+/**
+ * Verifies a Firebase Auth ID token (preferred when Firebase Admin is configured)
+ * or a standard Google Sign-In OAuth2 ID token via Google's tokeninfo endpoint.
+ */
+export async function verifyGoogleOrFirebaseToken(idToken: string): Promise<VerifiedGoogleIdentity | null> {
+  const cleanToken = String(idToken || '').trim();
+  if (!cleanToken) return null;
+
+  const fbApp = ensureFirebaseAdmin();
+  if (fbApp) {
+    try {
+      const decoded = await getAuth(fbApp).verifyIdToken(cleanToken, false);
+      const email = String(decoded.email || '').trim().toLowerCase();
+      if (email) {
+        return {
+          uid: decoded.uid,
+          email,
+          emailVerified: Boolean(decoded.email_verified),
+          name: String(decoded.name || '').trim(),
+          picture: typeof decoded.picture === 'string' ? decoded.picture : undefined,
+        };
+      }
+    } catch {
+      // May be a raw Google OAuth2 ID token rather than a Firebase ID token; fall through to tokeninfo
+    }
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(cleanToken)}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (!resp.ok) return null;
+    const payload = (await resp.json()) as Record<string, unknown>;
+    const email = String(payload.email || '').trim().toLowerCase();
+    const sub = String(payload.sub || '').trim();
+    const emailVerified = payload.email_verified === true || payload.email_verified === 'true';
+    const iss = String(payload.iss || '');
+    const validIssuer = iss === 'https://accounts.google.com' || iss === 'accounts.google.com';
+    const expSec = Number(payload.exp || 0);
+    if (!email || !sub || !validIssuer || !emailVerified || (expSec > 0 && expSec * 1000 < Date.now())) {
+      return null;
+    }
+    const allowedWebClientId = String(
+      process.env.GOOGLE_WEB_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || ''
+    ).trim();
+    const allowedAndroidClientIds = String(process.env.GOOGLE_ANDROID_CLIENT_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const allowedAudiences = [allowedWebClientId, ...allowedAndroidClientIds].filter(Boolean);
+    if (allowedAudiences.length > 0 && !allowedAudiences.includes(String(payload.aud || '').trim())) {
+      return null;
+    }
+    return {
+      uid: `google_${sub}`,
+      email,
+      emailVerified: true,
+      name: String(payload.name || '').trim(),
+      picture: typeof payload.picture === 'string' ? payload.picture : undefined,
+    };
+  } catch {
+    return null;
+  }
 }

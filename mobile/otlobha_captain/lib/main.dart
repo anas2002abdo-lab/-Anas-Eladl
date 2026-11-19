@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'core/api_client.dart';
@@ -15,6 +16,7 @@ import 'screens/captain_pos_screen.dart';
 import 'screens/captain_settlement_screen.dart';
 import 'screens/captain_profile_screen.dart';
 import 'screens/captain_trip_chat_screen.dart';
+import 'screens/register_kyc_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -83,6 +85,8 @@ class _CaptainShellState extends State<CaptainShell> {
   StreamSubscription? _ridesSub;
   Map<String, dynamic>? _pendingPushTap;
 
+  static const String _prefTabIndex = 'otlobha_cap_tab_index';
+
   @override
   void initState() {
     super.initState();
@@ -92,9 +96,84 @@ class _CaptainShellState extends State<CaptainShell> {
         if (_activeCaptainId != null) _silentSync();
       },
     );
-    _loadAll();
+    _restorePersistedSession();
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) => _silentSync());
     _gpsTimer = Timer.periodic(const Duration(seconds: 20), (_) => _pushCaptainGps());
+  }
+
+  Future<void> _persistTabIndex(int idx) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefTabIndex, idx);
+    } catch (_) {}
+  }
+
+  Future<void> _restorePersistedSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedId = await api.restorePersistedSession();
+      final savedTab = prefs.getInt(_prefTabIndex) ?? 0;
+      final kycDraftActive = prefs.getBool(RegisterKycScreen.prefDraftActive) ?? false;
+
+      if (!mounted) return;
+      if (savedId != null && savedId.isNotEmpty) {
+        setState(() {
+          _activeCaptainId = savedId;
+          _index = savedTab.clamp(0, 4);
+        });
+        _connectRidesWs();
+        await _loadAll();
+        _pushCaptainGps();
+        CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+        return;
+      }
+
+      setState(() => _loading = false);
+
+      // If Android killed the Activity during first-time camera capture in KYC registration,
+      // automatically reopen RegisterKycScreen with the saved form & captured photos!
+      if (kycDraftActive && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _activeCaptainId != null) return;
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => Directionality(
+                textDirection: TextDirection.rtl,
+                child: RegisterKycScreen(
+                  api: api,
+                  onRegistered: (newId) {
+                    if (Navigator.of(context).canPop()) {
+                      Navigator.of(context).pop();
+                    }
+                    _onCaptainLoggedIn(newId);
+                  },
+                ),
+              ),
+            ),
+          );
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _onCaptainLoggedIn(String id) {
+    setState(() {
+      _activeCaptainId = id;
+      _index = 0;
+    });
+    api.persistActiveCaptainId(id);
+    _persistTabIndex(0);
+    _connectRidesWs();
+    _loadAll();
+    _pushCaptainGps();
+    CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+    if (_pendingPushTap != null) {
+      final pending = _pendingPushTap!;
+      _pendingPushTap = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+    }
   }
 
   void _handlePushNotificationTap(Map<String, dynamic> data) {
@@ -286,6 +365,7 @@ class _CaptainShellState extends State<CaptainShell> {
     final devId = push.deviceId;
     await push.unregisterOnLogout(api);
     await api.logout(fcmToken: token, deviceId: devId);
+    await _persistTabIndex(0);
     if (!mounted) return;
     setState(() {
       _activeCaptainId = null;
@@ -474,21 +554,7 @@ class _CaptainShellState extends State<CaptainShell> {
         textDirection: TextDirection.rtl,
         child: CaptainLoginScreen(
           api: api,
-          onLoggedIn: (id) {
-            setState(() {
-              _activeCaptainId = id;
-              _index = 0;
-            });
-            _connectRidesWs();
-            _loadAll();
-            _pushCaptainGps();
-            CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
-            if (_pendingPushTap != null) {
-              final pending = _pendingPushTap!;
-              _pendingPushTap = null;
-              WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
-            }
-          },
+          onLoggedIn: _onCaptainLoggedIn,
         ),
       );
     }
@@ -615,7 +681,10 @@ class _CaptainShellState extends State<CaptainShell> {
                   ),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _index,
-          onDestinationSelected: (i) => setState(() => _index = i),
+          onDestinationSelected: (i) {
+            setState(() => _index = i);
+            _persistTabIndex(i);
+          },
           destinations: [
             NavigationDestination(
               icon: Badge(

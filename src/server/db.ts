@@ -938,9 +938,47 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE merchants ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0');
   }
   const custTvCols = db.prepare("PRAGMA table_info('customers')").all() as Array<{ name: string }>;
-  if (!custTvCols.some((c) => c.name === 'token_version')) {
+  const hasCustCol = (name: string) => custTvCols.some((c) => c.name === name);
+  if (!hasCustCol('token_version')) {
     db.exec('ALTER TABLE customers ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0');
   }
+  if (!hasCustCol('age')) {
+    db.exec('ALTER TABLE customers ADD COLUMN age INTEGER');
+  }
+  if (!hasCustCol('country')) {
+    db.exec("ALTER TABLE customers ADD COLUMN country TEXT NOT NULL DEFAULT 'مصر'");
+  }
+  if (!hasCustCol('city')) {
+    db.exec("ALTER TABLE customers ADD COLUMN city TEXT NOT NULL DEFAULT 'المنزلة'");
+  }
+  if (!hasCustCol('secondary_phone')) {
+    db.exec('ALTER TABLE customers ADD COLUMN secondary_phone TEXT');
+  }
+  if (!hasCustCol('google_uid')) {
+    db.exec('ALTER TABLE customers ADD COLUMN google_uid TEXT');
+  }
+  if (!hasCustCol('auth_provider')) {
+    db.exec("ALTER TABLE customers ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'email'");
+  }
+  if (!hasCustCol('profile_completed')) {
+    db.exec('ALTER TABLE customers ADD COLUMN profile_completed INTEGER NOT NULL DEFAULT 0');
+    // Existing customers who already had a phone number before this migration keep direct access
+    db.exec("UPDATE customers SET profile_completed = 1 WHERE phone IS NOT NULL AND TRIM(phone) != ''");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_action_tokens (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT,
+      email TEXT NOT NULL,
+      action_type TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      is_used INTEGER NOT NULL DEFAULT 0,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_email_action_tokens_email_type ON email_action_tokens(email, action_type);
+  `);
 }
 
 export function ensureBootstrapSuperAdmin(): { created: boolean; reason?: string } {

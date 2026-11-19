@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../core/api_client.dart';
+import '../core/safe_camera_picker.dart';
 
 class MarketWalletScreen extends StatefulWidget {
   final OtlobhaCustomerApi api;
@@ -30,19 +31,47 @@ class _MarketWalletScreenState extends State<MarketWalletScreen> {
   final TextEditingController _titleCtrl = TextEditingController();
   final TextEditingController _priceCtrl = TextEditingController(text: '350');
   final TextEditingController _descCtrl = TextEditingController();
-  final ImagePicker _picker = ImagePicker();
   Uint8List? _mktPhotoBytes;
   String? _mktImageDataUrl;
   bool _submitting = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _recoverLostPhoto();
+  }
+
+  Future<void> _recoverLostPhoto() async {
+    final lost = await SafeCameraPicker.recoverLostImage(expectedTargetKey: 'market_photo');
+    if (lost != null && mounted) {
+      setState(() {
+        _mktPhotoBytes = lost.bytes;
+        _mktImageDataUrl = lost.dataUrl;
+      });
+    }
+  }
+
   Future<void> _pickMarketPhoto(ImageSource source) async {
-    final picked = await _picker.pickImage(source: source, maxWidth: 1000, imageQuality: 78);
-    if (picked == null) return;
-    final bytes = await picked.readAsBytes();
-    setState(() {
-      _mktPhotoBytes = bytes;
-      _mktImageDataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-    });
+    try {
+      final result = await SafeCameraPicker.pickImage(
+        source: source,
+        targetKey: 'market_photo',
+        maxWidth: 1000,
+        maxHeight: 1000,
+        imageQuality: 76,
+      );
+      if (result == null || !mounted) return;
+      setState(() {
+        _mktPhotoBytes = result.bytes;
+        _mktImageDataUrl = result.dataUrl;
+      });
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر فتح الكاميرا أو قراءة الصورة، تأكد من منح صلاحية الكاميرا وحاول مرة أخرى')),
+        );
+      }
+    }
   }
 
   Widget _buildListingThumbnail(dynamic imageUrlRaw) {

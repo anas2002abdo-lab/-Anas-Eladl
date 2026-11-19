@@ -115,8 +115,13 @@ echo "GET ${SERVICE_URL}/api/mobile/customer/guest-bootstrap -> HTTP ${GUEST_STA
 head -c 250 /tmp/otlobha_guest.json
 echo ""
 
-if [ "$HEALTH_STATUS" != "200" ] || [ "$GUEST_STATUS" != "200" ]; then
-  echo "ERROR: Verification failed (health=${HEALTH_STATUS}, guest-bootstrap=${GUEST_STATUS})."
+REG_OTP_STATUS="$(curl -sS -o /tmp/otlobha_reg_otp.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' -d '{}' "${SERVICE_URL}/api/mobile/customer/register/request-otp")"
+echo "POST ${SERVICE_URL}/api/mobile/customer/register/request-otp (empty validation check) -> HTTP ${REG_OTP_STATUS}"
+cat /tmp/otlobha_reg_otp.json
+echo ""
+
+if [ "$HEALTH_STATUS" != "200" ] || [ "$GUEST_STATUS" != "200" ] || [ "$REG_OTP_STATUS" != "400" ]; then
+  echo "ERROR: Verification failed (health=${HEALTH_STATUS}, guest-bootstrap=${GUEST_STATUS}, register-otp=${REG_OTP_STATUS})."
   exit 1
 fi
 

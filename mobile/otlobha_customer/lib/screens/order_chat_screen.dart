@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../core/api_client.dart';
+import '../core/safe_camera_picker.dart';
 
 class OrderChatScreen extends StatefulWidget {
   final OtlobhaCustomerApi api;
@@ -27,7 +28,6 @@ class OrderChatScreen extends StatefulWidget {
 class _OrderChatScreenState extends State<OrderChatScreen> {
   final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
-  final ImagePicker _picker = ImagePicker();
 
   Map<String, dynamic>? _order;
   List<Map<String, dynamic>> _messages = [];
@@ -198,10 +198,15 @@ class _OrderChatScreenState extends State<OrderChatScreen> {
 
   Future<void> _sendImage() async {
     try {
-      final picked = await _picker.pickImage(source: ImageSource.gallery, maxWidth: 1000, imageQuality: 78);
-      if (picked == null) return;
-      final bytes = await picked.readAsBytes();
-      final b64 = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      final picked = await SafeCameraPicker.pickImage(
+        source: ImageSource.gallery,
+        targetKey: 'order_chat_${widget.orderId}',
+        maxWidth: 1000,
+        maxHeight: 1000,
+        imageQuality: 76,
+      );
+      if (picked == null || !mounted) return;
+      final b64 = picked.dataUrl;
       setState(() => _sending = true);
       final res = await widget.api.sendOrderChatMessage(widget.orderId, {
         'sender_role': 'customer',
