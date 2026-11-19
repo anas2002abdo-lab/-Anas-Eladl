@@ -7,7 +7,7 @@ void main() {
   testWidgets('OtlobhaCustomerApp shows Google Sign-In, Email Link Register, Reset Link, and Guest options', (WidgetTester tester) async {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(const OtlobhaCustomerApp());
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.byType(OtlobhaCustomerApp), findsOneWidget);
     expect(find.byType(MaterialApp), findsOneWidget);
@@ -21,18 +21,25 @@ void main() {
     expect(find.text('الدخول كزائر'), findsOneWidget);
 
     // Switch to Register mode (link-based, no OTP code)
-    await tester.ensureVisible(find.text('إنشاء حساب جديد'));
-    await tester.tap(find.text('إنشاء حساب جديد'));
-    await tester.pump();
+    final registerTab = find.text('إنشاء حساب جديد');
+    await tester.ensureVisible(registerTab);
+    await tester.pumpAndSettle();
+    await tester.tap(registerTab);
+    await tester.pumpAndSettle();
     expect(find.text('إرسال رابط تأكيد الحساب'), findsOneWidget);
 
     // Switch back to Login and open Forgot Password mode (link-based, no OTP code)
-    await tester.ensureVisible(find.text('تسجيل الدخول').first);
-    await tester.tap(find.text('تسجيل الدخول').first);
-    await tester.pump();
-    await tester.ensureVisible(find.text('هل نسيت كلمة المرور؟'));
-    await tester.tap(find.text('هل نسيت كلمة المرور؟'));
-    await tester.pump();
+    final loginTab = find.text('تسجيل الدخول').first;
+    await tester.ensureVisible(loginTab);
+    await tester.pumpAndSettle();
+    await tester.tap(loginTab);
+    await tester.pumpAndSettle();
+
+    final forgotBtn = find.text('هل نسيت كلمة المرور؟');
+    await tester.ensureVisible(forgotBtn);
+    await tester.pumpAndSettle();
+    await tester.tap(forgotBtn);
+    await tester.pumpAndSettle();
     expect(find.text('استعادة كلمة المرور'), findsOneWidget);
     expect(find.text('إرسال رابط تغيير كلمة المرور'), findsOneWidget);
   });

@@ -337,11 +337,13 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
         foregroundColor: const Color(0xFF0F172A),
         side: const BorderSide(color: Color(0xFFCBD5E1), width: 1.2),
         minimumSize: const Size.fromHeight(52),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
       onPressed: (_loading || _googleLoading) ? null : _signInWithGoogle,
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
         children: [
           if (_googleLoading)
             const SizedBox(
@@ -368,9 +370,13 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
               ),
             ),
           const SizedBox(width: 10),
-          Text(
-            _googleLoading ? 'جاري الاتصال بجوجل...' : 'المتابعة باستخدام حساب جوجل',
-            style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800),
+          Flexible(
+            child: Text(
+              _googleLoading ? 'جاري الاتصال بجوجل...' : 'المتابعة باستخدام حساب جوجل',
+              textAlign: TextAlign.center,
+              softWrap: true,
+              style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800),
+            ),
           ),
         ],
       ),
@@ -470,11 +476,16 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
                             Row(
                               children: [
                                 Expanded(child: Divider(color: Colors.grey.shade300)),
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(horizontal: 10),
-                                  child: Text(
-                                    'أو بالبريد الإلكتروني',
-                                    style: TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
+                                ConstrainedBox(
+                                  constraints: const BoxConstraints(maxWidth: 240),
+                                  child: const Padding(
+                                    padding: EdgeInsets.symmetric(horizontal: 10),
+                                    child: Text(
+                                      'أو بالبريد الإلكتروني',
+                                      textAlign: TextAlign.center,
+                                      softWrap: true,
+                                      style: TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
+                                    ),
                                   ),
                                 ),
                                 Expanded(child: Divider(color: Colors.grey.shade300)),
@@ -769,8 +780,11 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
                               ),
                             ),
                             const SizedBox(height: 10),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            Wrap(
+                              alignment: WrapAlignment.spaceBetween,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              spacing: 8,
+                              runSpacing: 4,
                               children: [
                                 TextButton.icon(
                                   onPressed: (_loading || _regResendSec > 0) ? null : _sendVerificationLink,
@@ -793,10 +807,14 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                const Text(
-                                  'تغيير كلمة المرور عبر البريد',
-                                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+                                const Expanded(
+                                  child: Text(
+                                    'تغيير كلمة المرور عبر البريد',
+                                    softWrap: true,
+                                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+                                  ),
                                 ),
+                                const SizedBox(width: 8),
                                 TextButton.icon(
                                   onPressed: () => setState(() => _mode = _AuthScreenMode.login),
                                   icon: const Icon(Icons.arrow_forward, size: 16),
@@ -903,8 +921,11 @@ class _CustomerOtpLoginScreenState extends State<CustomerOtpLoginScreen> {
                               ),
                             ),
                             const SizedBox(height: 8),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            Wrap(
+                              alignment: WrapAlignment.spaceBetween,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              spacing: 8,
+                              runSpacing: 4,
                               children: [
                                 TextButton.icon(
                                   onPressed: (_loading || _forgotResendSec > 0) ? null : _sendPasswordResetLink,
