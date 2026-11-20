@@ -5,6 +5,7 @@ class CartScreen extends StatefulWidget {
   final OtlobhaCustomerApi api;
   final Map<String, dynamic> bootstrap;
   final Map<String, int> cart;
+  final Map<String, Map<String, dynamic>> cartProductsCache;
   final String selectedMerchantId;
   final String selectedZoneId;
   final String customerName;
@@ -29,6 +30,7 @@ class CartScreen extends StatefulWidget {
     required this.api,
     required this.bootstrap,
     required this.cart,
+    this.cartProductsCache = const {},
     required this.selectedMerchantId,
     required this.selectedZoneId,
     required this.customerName,
@@ -85,26 +87,34 @@ class _CartScreenState extends State<CartScreen> {
 
     final selectedZone = zones.firstWhere((z) => z['id'] == effectiveZoneId, orElse: () => {'name_ar': 'وسط مدينة المنزلة', 'remote_area_fee': 0});
 
+    final bootstrapProductById = <String, Map<String, dynamic>>{};
+    for (final p in allProducts) {
+      if (p is Map && p['id'] != null) {
+        bootstrapProductById[p['id'].toString()] = Map<String, dynamic>.from(p);
+      }
+    }
+
     final cartItems = <Map<String, dynamic>>[];
     final merchantGroups = <String, Map<String, dynamic>>{};
     double subtotal = 0;
-    for (final p in allProducts) {
-      final qty = widget.cart[p['id']] ?? 0;
-      if (qty > 0) {
-        final unit = ((p['sale_price'] ?? p['base_price']) as num).toDouble();
-        subtotal += unit * qty;
-        final itemMap = {'product': p, 'qty': qty, 'unit': unit};
-        cartItems.add(itemMap);
-        final mId = (p['merchant_id'] ?? effectiveMerchantId).toString();
-        merchantGroups.putIfAbsent(mId, () => {
-          'merchant_id': mId,
-          'merchant_name': (p['merchant_name'] ?? 'متجر في اطلبها').toString(),
-          'items': <Map<String, dynamic>>[],
-          'subtotal': 0.0,
-        });
-        (merchantGroups[mId]!['items'] as List<Map<String, dynamic>>).add(itemMap);
-        merchantGroups[mId]!['subtotal'] = (merchantGroups[mId]!['subtotal'] as double) + unit * qty;
-      }
+    for (final entry in widget.cart.entries) {
+      final qty = entry.value;
+      if (qty <= 0) continue;
+      final p = widget.cartProductsCache[entry.key] ?? bootstrapProductById[entry.key];
+      if (p == null) continue;
+      final unit = ((p['sale_price'] ?? p['base_price']) as num).toDouble();
+      subtotal += unit * qty;
+      final itemMap = {'product': p, 'qty': qty, 'unit': unit};
+      cartItems.add(itemMap);
+      final mId = (p['merchant_id'] ?? effectiveMerchantId).toString();
+      merchantGroups.putIfAbsent(mId, () => {
+        'merchant_id': mId,
+        'merchant_name': (p['merchant_name'] ?? 'متجر في اطلبها').toString(),
+        'items': <Map<String, dynamic>>[],
+        'subtotal': 0.0,
+      });
+      (merchantGroups[mId]!['items'] as List<Map<String, dynamic>>).add(itemMap);
+      merchantGroups[mId]!['subtotal'] = (merchantGroups[mId]!['subtotal'] as double) + unit * qty;
     }
 
     final remoteFee = ((selectedZone['remote_area_fee'] ?? 0) as num).toDouble();

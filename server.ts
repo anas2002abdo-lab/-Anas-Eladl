@@ -3,22 +3,35 @@ import express from 'express';
 import crypto from 'crypto';
 import http from 'http';
 import path from 'path';
+import zlib from 'zlib';
 import nodemailer from 'nodemailer';
 import { createServer as createViteServer } from 'vite';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
+  buildFtsMatchQuery,
   db,
   dbPath,
   ensureBootstrapSuperAdmin,
   hashPassword,
   initDatabase,
+  isProductsFtsReady,
   postDoubleEntryLedger,
   recordAuditLog,
   sha256Otp,
   uid,
   verifyPassword,
 } from './src/server/db.ts';
-import { startSqlitePersistSync } from './src/server/sqlitePersist.ts';
+import { startSqlitePersistSync, type SqlitePersistController } from './src/server/sqlitePersist.ts';
+import { registerCloudSyncRoutes } from './src/server/cloudSyncRoutes.ts';
+import { registerMasterCatalogRoutes, extractSize } from './src/server/masterCatalog.ts';
+import {
+  createCategoryPathResolver,
+  enrichAndOrderCategories,
+  getCategoryAndDescendantIds,
+  isCategoryDescendant,
+  recomputeAllCategoryPaths,
+  resolveOrCreateCategoryPath,
+} from './src/server/categoryHierarchy.ts';
 import {
   ALL_ADMIN_ROLES,
   authenticateWsUpgrade,
@@ -44,6 +57,7 @@ import {
   enqueueSystemPushNotification,
   getFcmStatus,
   registerDeviceToken,
+  setNotificationCreatedListener,
   unregisterDeviceToken,
   verifyGoogleOrFirebaseToken,
   type PushUserRole,
@@ -58,6 +72,50 @@ ensureBootstrapSuperAdmin();
 
 const app = express();
 app.set('trust proxy', 1);
+
+let sqlitePersistRef: SqlitePersistController | null = null;
+app.use('/api', (req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') {
+    res.on('finish', () => {
+      if (res.statusCode < 400) {
+        sqlitePersistRef?.scheduleFlush(`api:${req.method}`, 1200);
+      }
+    });
+  }
+
+  // Zero-dependency async Gzip compression for /api JSON payloads >= 1 KB (cuts mobile transfer size by ~85%)
+  const acceptEnc = String(req.headers['accept-encoding'] || '').toLowerCase();
+  if (acceptEnc.includes('gzip')) {
+    const origJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      if (res.headersSent) return res;
+      let rawStr: string;
+      try {
+        rawStr = JSON.stringify(body);
+      } catch {
+        return origJson(body);
+      }
+      if (!rawStr || rawStr.length < 1024) {
+        return origJson(body);
+      }
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      zlib.gzip(Buffer.from(rawStr, 'utf8'), { level: 6 }, (err, compressed) => {
+        if (res.headersSent) return;
+        if (err) {
+          res.send(rawStr);
+          return;
+        }
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Content-Length', String(compressed.length));
+        res.end(compressed);
+      });
+      return res;
+    }) as typeof res.json;
+  }
+
+  next();
+});
 
 const SENSITIVE_FILE_EXT_RE = /\.(db|db-wal|db-shm|db-journal|sqlite|sqlite3|sql|bak|pem|key|log)$/i;
 const SENSITIVE_ROOT_FILES = new Set([
@@ -191,6 +249,8 @@ function getClientIp(req: express.Request): string {
 }
 
 app.use(express.json({ limit: '25mb' }));
+registerCloudSyncRoutes(app);
+registerMasterCatalogRoutes(app);
 
 function parseLocalizedNumber(val: unknown): number {
   if (typeof val === 'number') return val;
@@ -236,6 +296,62 @@ function broadcastToRooms(roomKeys: string[], payload: Record<string, unknown>) 
     }
   }
 }
+
+setNotificationCreatedListener((ev) => {
+  const wsPayload: Record<string, unknown> = {
+    type: 'notification:new',
+    notification: {
+      id: ev.id,
+      target_app: ev.targetApp,
+      target_zone: ev.targetZone,
+      recipient_id: ev.recipientId,
+      category: ev.category,
+      title_ar: ev.titleAr,
+      body_ar: ev.bodyAr,
+      deep_link: ev.deepLink,
+      channel_id: ev.channelId,
+      order_id: ev.orderId || '',
+      trip_id: ev.tripId || '',
+      parcel_id: ev.parcelId || '',
+      status: ev.status || '',
+      email: ev.extraData?.email || '',
+      is_read: false,
+      created_at: ev.createdAt,
+    },
+  };
+
+  if (ev.targetApp === 'customer' || ev.targetApp === 'all') {
+    if (ev.recipientId) {
+      broadcastToRooms([`customer:${ev.recipientId}`], wsPayload);
+    } else {
+      const targetRooms: string[] = [];
+      const isVerifyEmailBroadcast = ev.deepLink.toLowerCase() === 'verify_email';
+      for (const roomKey of chatRooms.keys()) {
+        if (!roomKey.startsWith('customer:')) continue;
+        if (isVerifyEmailBroadcast) {
+          const cid = roomKey.slice('customer:'.length);
+          const row = db.prepare('SELECT is_email_verified FROM customers WHERE id = ?').get(cid) as
+            | { is_email_verified?: number }
+            | undefined;
+          if (row && Boolean(row.is_email_verified)) continue;
+        }
+        targetRooms.push(roomKey);
+      }
+      if (targetRooms.length > 0) {
+        broadcastToRooms(targetRooms, wsPayload);
+      }
+    }
+  }
+
+  if (ev.targetApp === 'captain' || ev.targetApp === 'all') {
+    if (ev.recipientId) {
+      broadcastToRooms([`captain:${ev.recipientId}`], wsPayload);
+    } else {
+      const capRooms = Array.from(chatRooms.keys()).filter((k) => k.startsWith('captain:'));
+      if (capRooms.length > 0) broadcastToRooms(capRooms, wsPayload);
+    }
+  }
+});
 
 function broadcastOrderChat(orderId: string, payload: Record<string, unknown>) {
   const row = db
@@ -638,16 +754,149 @@ app.get('/api/auth/bootstrap-status', (_req, res) => {
   });
 });
 
+function findMatchingSuperAdmin(rawIdentifier: string, password: string): Record<string, unknown> | null {
+  const ident = String(rawIdentifier || '').trim().toLowerCase();
+  const pw = String(password || '');
+  if (!ident || !pw) return null;
+
+  const configuredAlias = String(process.env.SUPER_ADMIN_USERNAME || '').trim().toLowerCase();
+  const superAdmins = db
+    .prepare(
+      `SELECT a.id, a.email, a.password_hash, a.full_name, a.role_code, a.custom_permissions_json, a.is_active, a.token_version, a.last_login_at, a.created_at,
+              r.name_ar as role_name_ar, r.name_en as role_name_en, r.permissions_json
+       FROM admin_users a
+       JOIN roles r ON r.code = a.role_code
+       WHERE a.is_active = 1 AND a.role_code = 'super_admin'`
+    )
+    .all() as Array<Record<string, unknown>>;
+
+  for (const admin of superAdmins) {
+    const adminEmail = String(admin.email || '').trim().toLowerCase();
+    const emailLocal = adminEmail.includes('@') ? adminEmail.split('@')[0] : adminEmail;
+    const isMatch =
+      ident === adminEmail ||
+      ident === emailLocal ||
+      ident === 'admin' ||
+      ident === 'superadmin' ||
+      (configuredAlias.length > 0 && ident === configuredAlias);
+    if (isMatch && verifyPassword(pw, String(admin.password_hash || ''))) {
+      return admin;
+    }
+  }
+  return null;
+}
+
+function ensureSuperAdminCustomerAccount(admin: Record<string, unknown>): Record<string, unknown> {
+  const adminId = String(admin.id);
+  const adminEmail = String(admin.email || '').trim().toLowerCase();
+  const adminName = String(admin.full_name || 'إدارة اطلبها').trim() || 'إدارة اطلبها';
+  const adminHash = String(admin.password_hash || '');
+  const fallbackId = `cust_admin_${adminId.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 12)}`;
+
+  let existing = db
+    .prepare('SELECT * FROM customers WHERE LOWER(email) = LOWER(?) OR id = ? LIMIT 1')
+    .get(adminEmail, fallbackId) as Record<string, unknown> | undefined;
+
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO customers (id, email, phone, password_hash, full_name, status, default_zone_id, address_landmark, is_email_verified, auth_provider, profile_completed)
+       VALUES (?, ?, NULL, ?, ?, 'active', 'zn_city_center', 'إدارة منصة اطلبها - المنزلة', 1, 'email', 1)`
+    ).run(fallbackId, adminEmail, adminHash, adminName);
+    existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(fallbackId) as Record<string, unknown>;
+  } else {
+    db.prepare(
+      `UPDATE customers
+       SET status = 'active', is_email_verified = 1, profile_completed = 1, last_login_at = datetime('now')
+       WHERE id = ?`
+    ).run(String(existing.id));
+    existing = db.prepare('SELECT * FROM customers WHERE id = ?').get(String(existing.id)) as Record<string, unknown>;
+  }
+  return existing;
+}
+
+function ensureSuperAdminCaptainAccount(admin: Record<string, unknown>): Record<string, unknown> {
+  const adminId = String(admin.id);
+  const adminName = String(admin.full_name || 'إدارة اطلبها').trim() || 'إدارة اطلبها';
+  const adminHash = String(admin.password_hash || '');
+  const capId = `cap_admin_${adminId.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 12)}`;
+
+  let existing = db
+    .prepare('SELECT * FROM captains WHERE id = ? OR user_id = ? LIMIT 1')
+    .get(capId, adminId) as Record<string, unknown> | undefined;
+
+  if (!existing) {
+    const usernameTaken = db.prepare("SELECT id FROM captains WHERE LOWER(username) = 'admin'").get();
+    const capUsername = usernameTaken ? `admin_${adminId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 6)}` : 'admin';
+    const phoneTaken = db.prepare("SELECT id FROM captains WHERE phone = '01099990000'").get();
+    const capPhone = phoneTaken ? `0109${Date.now().toString().slice(-7)}` : '01099990000';
+    const nidTaken = db.prepare("SELECT id FROM captains WHERE national_id = '29901010000001'").get();
+    const capNid = nidTaken ? `299${Date.now().toString().slice(-11)}` : '29901010000001';
+
+    db.prepare(
+      `INSERT INTO captains (
+         id, user_id, username, password_hash, full_name, phone, national_id, city, zone_name,
+         vehicle_type, vehicle_model, plate_number, is_eligible_for_rides, allowed_services_json,
+         verification_status, availability_status, lat, lng, cash_on_hand, cash_limit
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'المنزلة', 'وسط مدينة المنزلة (شارع حسن طوبار وبورسعيد)', 'moto', 'حساب إدارة اطلبها', 'ADMIN-01', 1, '["stores","pharmacy","parcels","rides"]', 'approved', 'offline', 31.1583, 31.9369, 0, 5000)`
+    ).run(capId, adminId, capUsername, adminHash, `${adminName} (إدارة)`, capPhone, capNid);
+    existing = db.prepare('SELECT * FROM captains WHERE id = ?').get(capId) as Record<string, unknown>;
+  } else {
+    db.prepare(
+      "UPDATE captains SET verification_status = 'approved', is_eligible_for_rides = 1 WHERE id = ?"
+    ).run(String(existing.id));
+    existing = db.prepare('SELECT * FROM captains WHERE id = ?').get(String(existing.id)) as Record<string, unknown>;
+  }
+  return existing;
+}
+
+function ensureSuperAdminMerchantAccount(admin: Record<string, unknown>): Record<string, unknown> {
+  const adminId = String(admin.id);
+  const adminEmail = String(admin.email || '').trim().toLowerCase();
+  const adminName = String(admin.full_name || 'إدارة اطلبها').trim() || 'إدارة اطلبها';
+  const adminHash = String(admin.password_hash || '');
+  const merId = `mer_admin_${adminId.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 12)}`;
+
+  let existing = db
+    .prepare('SELECT * FROM merchants WHERE LOWER(email) = LOWER(?) OR id = ? LIMIT 1')
+    .get(adminEmail, merId) as Record<string, unknown> | undefined;
+
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO merchants (
+         id, email, password_hash, business_name_ar, business_name_en, merchant_type, branch_name,
+         zone_name, phone, owner_name, address_detail, terms_accepted, terms_accepted_at,
+         is_email_verified, verification_status, supports_free_order, is_open_now, lat, lng
+       ) VALUES (?, ?, ?, 'متجر إدارة اطلبها', 'Otlobha Admin Store', 'supermarket', 'الفرع الرئيسي - المنزلة', 'وسط مدينة المنزلة (شارع حسن طوبار وبورسعيد)', '01000000000', ?, 'إدارة منصة اطلبها - المنزلة', 1, datetime('now'), 1, 'approved', 1, 1, 31.1583, 31.9369)`
+    ).run(merId, adminEmail, adminHash, adminName);
+
+    db.prepare(
+      "INSERT OR IGNORE INTO categories (id, scope, merchant_id, name_ar, name_en, image_url, sort_order, is_offers_section, is_active) VALUES (?, 'merchant', ?, 'العروض', 'Offers', '', 0, 1, 1)"
+    ).run(`cat_offers_${merId}`, merId);
+
+    existing = db.prepare('SELECT * FROM merchants WHERE id = ?').get(merId) as Record<string, unknown>;
+  } else {
+    db.prepare(
+      "UPDATE merchants SET verification_status = 'approved', is_email_verified = 1, terms_accepted = 1 WHERE id = ?"
+    ).run(String(existing.id));
+    existing = db.prepare('SELECT * FROM merchants WHERE id = ?').get(String(existing.id)) as Record<string, unknown>;
+  }
+  return existing;
+}
+
 app.post('/api/auth/admin/login', (req, res) => {
-  const { email: rawEmail, password } = (req.body || {}) as { email?: string; password?: string };
-  const email = String(rawEmail || '').trim().toLowerCase();
+  const { email: rawEmail, username: rawUsername, password } = (req.body || {}) as {
+    email?: string;
+    username?: string;
+    password?: string;
+  };
+  const ident = String(rawEmail || rawUsername || '').trim().toLowerCase();
   const pw = String(password || '');
 
-  if (!email || !pw) {
-    return res.status(400).json({ error: 'يرجى إدخال البريد الإلكتروني وكلمة المرور' });
+  if (!ident || !pw) {
+    return res.status(400).json({ error: 'يرجى إدخال البريد الإلكتروني أو اسم المستخدم وكلمة المرور' });
   }
 
-  const admin = db
+  let admin = db
     .prepare(
       `SELECT a.id, a.email, a.password_hash, a.full_name, a.role_code, a.custom_permissions_json, a.is_active, a.token_version, a.last_login_at, a.created_at,
               r.name_ar as role_name_ar, r.name_en as role_name_en, r.permissions_json
@@ -655,7 +904,11 @@ app.post('/api/auth/admin/login', (req, res) => {
        JOIN roles r ON r.code = a.role_code
        WHERE LOWER(a.email) = LOWER(?)`
     )
-    .get(email) as Record<string, unknown> | undefined;
+    .get(ident) as Record<string, unknown> | undefined;
+
+  if (!admin) {
+    admin = findMatchingSuperAdmin(ident, pw) || undefined;
+  }
 
   if (!admin || !verifyPassword(pw, String(admin.password_hash || ''))) {
     return res.status(401).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
@@ -1746,6 +1999,33 @@ app.delete('/api/merchants/:id', requireAuth, requirePermission('merchants.verif
 
 app.get('/api/orders', allowAnyUserOrGuest, (req, res) => {
   const auth = req.auth!;
+  const paginated = req.query.paginated === '1' || req.query.paginated === 'true';
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const defaultLimit = paginated ? 60 : 200;
+  const maxLimit = paginated ? 200 : 500;
+  const limit = Math.min(maxLimit, Math.max(1, parseInt(String(req.query.limit || defaultLimit), 10) || defaultLimit));
+  const offset = (page - 1) * limit;
+  const statusFilter = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+  const merchantFilter = typeof req.query.merchant_id === 'string' ? req.query.merchant_id.trim() : '';
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (statusFilter && statusFilter !== 'all') {
+    clauses.push('o.status = ?');
+    params.push(statusFilter);
+  }
+  if (merchantFilter && merchantFilter !== 'all') {
+    clauses.push('o.merchant_id = ?');
+    params.push(merchantFilter);
+  }
+  if (q) {
+    const like = `%${q}%`;
+    clauses.push('(o.order_number LIKE ? OR o.customer_name LIKE ? OR o.customer_phone LIKE ? OR o.merchant_name LIKE ?)');
+    params.push(like, like, like, like);
+  }
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+
   const rows = db
     .prepare(
       `SELECT o.*,
@@ -1758,13 +2038,31 @@ app.get('/api/orders', allowAnyUserOrGuest, (req, res) => {
        FROM orders o
        LEFT JOIN captains c ON c.id = o.captain_id
        LEFT JOIN merchants m ON m.id = o.merchant_id
-       ORDER BY o.created_at DESC`
+       ${whereSql}
+       ORDER BY o.created_at DESC
+       LIMIT ? OFFSET ?`
     )
-    .all() as Array<Record<string, unknown>>;
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
 
   const sectionsMap = getOrderStoreSectionsMap(rows.map((r) => String(r.id)));
   const adminViewAuth = { ...auth, role: 'super_admin' as const, permissions: ['*'] };
   const mapped = rows.map((row) => mapOrderRowWithSections(row, sectionsMap.get(String(row.id)) || [], adminViewAuth));
+
+  if (paginated) {
+    const total = (
+      db.prepare(`SELECT COUNT(*) as c FROM orders o ${whereSql}`).get(...params) as { c: number }
+    ).c;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    return res.json({
+      items: mapped,
+      total,
+      page,
+      limit,
+      total_pages: totalPages,
+      has_more: offset + mapped.length < total,
+    });
+  }
+
   res.json(mapped);
 });
 
@@ -3555,8 +3853,9 @@ app.get('/api/categories', (req, res) => {
   }
   sql += ' ORDER BY c.is_offers_section DESC, c.sort_order ASC, c.scope ASC';
   const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+  const enriched = enrichAndOrderCategories(rows);
   res.json(
-    rows.map((c) => ({
+    enriched.map((c) => ({
       ...c,
       is_active: Boolean(c.is_active),
       is_offers_section: Boolean(c.is_offers_section),
@@ -3571,13 +3870,17 @@ app.post('/api/categories', requireAuth, requireRole('merchant', ...ALL_ADMIN_RO
     return res.status(403).json({ error: 'صلاحيات دورك الوظيفي لا تسمح بإدارة الأقسام' });
   }
 
-  const { scope, merchant_id, name_ar, name_en, image_url, sort_order, is_offers_section } = req.body;
-  if (!name_ar || (!scope && auth.role !== 'merchant')) {
-    return res.status(400).json({ error: 'اسم القسم ونطاقه مطلوبان' });
+  const { scope, merchant_id, parent_id, path_ar, name_ar, name_en, image_url, sort_order, is_offers_section } = req.body;
+  const rawPath = String(path_ar || '').trim();
+  if (!name_ar && !rawPath) {
+    return res.status(400).json({ error: 'اسم القسم أو مسار القسم مطلوب' });
+  }
+  if (!scope && auth.role !== 'merchant') {
+    return res.status(400).json({ error: 'نطاق القسم مطلوب' });
   }
 
   let effectiveMerchantId: string | null = merchant_id ? String(merchant_id).trim() : null;
-  let effectiveScope = String(scope || '').trim();
+  let effectiveScope: 'merchant' | 'pharmacy' | 'market' = (String(scope || 'merchant').trim() as 'merchant' | 'pharmacy' | 'market');
 
   if (auth.role === 'merchant') {
     if (effectiveMerchantId && effectiveMerchantId !== auth.id) {
@@ -3591,32 +3894,117 @@ app.post('/api/categories', requireAuth, requireRole('merchant', ...ALL_ADMIN_RO
     effectiveScope = merRow.merchant_type === 'pharmacy' ? 'pharmacy' : 'merchant';
   }
 
+  // If user pasted a hierarchical Excel path like "سوبر ماركت > مخبوزات > كرواسون وكيك;"
+  if (rawPath || (String(name_ar || '').includes('>') && !parent_id)) {
+    const pathText = rawPath || String(name_ar || '');
+    const resolver = createCategoryPathResolver({ scope: effectiveScope, merchantId: effectiveMerchantId });
+    const resolved = resolveOrCreateCategoryPath(resolver, pathText, null);
+    if (!resolved.category_id) {
+      return res.status(400).json({ error: 'مسار القسم غير صالح. استخدم الصيغة: رئيسي > فرعي > فرعي أخير;' });
+    }
+    if (image_url && String(image_url).trim()) {
+      db.prepare('UPDATE categories SET image_url = ? WHERE id = ?').run(String(image_url).trim(), resolved.category_id);
+    }
+    recomputeAllCategoryPaths();
+    recordAuditLog({
+      actor_name: auth.fullName,
+      actor_role: auth.role,
+      action: 'CATEGORY_PATH_CREATED',
+      entity_type: 'categories',
+      entity_id: resolved.category_id,
+      details: `إنشاء مسار أقسام هرمي: ${resolved.excel_path} (${resolved.created_count} قسم جديد)`,
+    });
+    return res.status(201).json({
+      id: resolved.category_id,
+      excel_path: resolved.excel_path,
+      created_count: resolved.created_count,
+      is_offers_section: Boolean(resolved.is_offers_section),
+    });
+  }
+
   const trimmedAr = String(name_ar).trim();
   if (!trimmedAr) return res.status(400).json({ error: 'اسم القسم مطلوب' });
+  const cleanParentId = parent_id ? String(parent_id).trim() : null;
+  if (cleanParentId) {
+    const parentRow = db.prepare('SELECT id FROM categories WHERE id = ?').get(cleanParentId);
+    if (!parentRow) return res.status(400).json({ error: 'القسم الأب المحدد غير موجود' });
+  }
+
   const isOffers =
     Boolean(is_offers_section) || ['العروض', 'عروض', 'عروض المتجر', 'offers'].includes(trimmedAr.toLowerCase());
   const id = uid('cat');
   db.prepare(
-    'INSERT INTO categories (id, scope, merchant_id, name_ar, name_en, image_url, sort_order, is_offers_section, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)'
+    'INSERT INTO categories (id, scope, merchant_id, parent_id, level, full_path_ar, name_ar, name_en, image_url, sort_order, is_offers_section, is_active) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1)'
   ).run(
     id,
     effectiveScope,
     effectiveMerchantId,
+    cleanParentId,
+    `${trimmedAr};`,
     trimmedAr,
     String(name_en || trimmedAr).trim(),
     String(image_url || ''),
     Number(sort_order || 0),
     isOffers ? 1 : 0
   );
+  recomputeAllCategoryPaths();
   recordAuditLog({
     actor_name: auth.fullName,
     actor_role: auth.role,
     action: 'CATEGORY_CREATED',
     entity_type: 'categories',
     entity_id: id,
-    details: `إضافة قسم جديد: ${trimmedAr} (${effectiveScope}${effectiveMerchantId ? ` · ${effectiveMerchantId}` : ''})`,
+    details: `إضافة قسم جديد: ${trimmedAr} (${effectiveScope}${cleanParentId ? ` · تحت ${cleanParentId}` : ' · رئيسي'})`,
   });
   res.status(201).json({ id, is_offers_section: isOffers });
+});
+
+app.post('/api/categories/import-excel', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLES), (req, res) => {
+  const auth = req.auth!;
+  const isAdmin = isAdminAuth(auth);
+  if (isAdmin && !hasAuthPermission(auth, 'merchants.verify', 'pharmacy.verify_license')) {
+    return res.status(403).json({ error: 'صلاحيات دورك الوظيفي لا تسمح باستيراد الأقسام' });
+  }
+  const paths = Array.isArray(req.body?.paths) ? req.body.paths : [];
+  if (paths.length === 0) {
+    return res.status(400).json({ error: 'لا توجد مسارات أقسام للاستيراد' });
+  }
+  if (paths.length > 5000) {
+    return res.status(400).json({ error: 'الحد الأقصى 5000 مسار في الدفعة الواحدة' });
+  }
+  const effectiveMerchantId = auth.role === 'merchant' ? auth.id : req.body?.merchant_id ? String(req.body.merchant_id).trim() : null;
+  const effectiveScope: 'merchant' | 'pharmacy' | 'market' =
+    auth.role === 'merchant'
+      ? 'merchant'
+      : ((String(req.body?.scope || 'merchant').trim() as 'merchant' | 'pharmacy' | 'market') || 'merchant');
+
+  const resolver = createCategoryPathResolver({ scope: effectiveScope, merchantId: effectiveMerchantId });
+  let totalCreated = 0;
+  let processed = 0;
+
+  const tx = db.transaction(() => {
+    for (const rawEntry of paths) {
+      const text = typeof rawEntry === 'string' ? rawEntry : String(rawEntry?.path_ar || rawEntry?.category || '');
+      if (!text.trim()) continue;
+      const r = resolveOrCreateCategoryPath(resolver, text, null);
+      if (r.category_id) {
+        processed += 1;
+        totalCreated += r.created_count;
+      }
+    }
+  });
+  tx();
+  recomputeAllCategoryPaths();
+
+  recordAuditLog({
+    actor_name: auth.fullName,
+    actor_role: auth.role,
+    action: 'CATEGORIES_EXCEL_IMPORTED',
+    entity_type: 'categories',
+    entity_id: 'bulk',
+    details: `استيراد شجرة أقسام بالـ Excel: معالجة ${processed} مسار وإنشاء ${totalCreated} قسم جديد`,
+  });
+  res.json({ ok: true, processed_paths: processed, created_count: totalCreated });
 });
 
 app.patch('/api/categories/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLES), (req, res) => {
@@ -3634,7 +4022,7 @@ app.patch('/api/categories/:id', requireAuth, requireRole('merchant', ...ALL_ADM
     return res.status(403).json({ error: 'غير مصرح لك بتعديل قسم لا يخص متجرك' });
   }
 
-  const { name_ar, name_en, merchant_id, image_url, sort_order, is_active, is_offers_section } = req.body;
+  const { name_ar, name_en, merchant_id, parent_id, image_url, sort_order, is_active, is_offers_section } = req.body;
   if (auth.role === 'merchant' && merchant_id !== undefined && String(merchant_id || '') !== auth.id) {
     return res.status(403).json({ error: 'غير مصرح لك بنقل ملكية القسم إلى متجر آخر' });
   }
@@ -3658,18 +4046,33 @@ app.patch('/api/categories/:id', requireAuth, requireRole('merchant', ...ALL_ADM
         : null
       : existing.merchant_id;
 
+  let nextParentId: string | null = existing.parent_id ? String(existing.parent_id) : null;
+  if (parent_id !== undefined) {
+    const cleanPid = parent_id ? String(parent_id).trim() : null;
+    if (cleanPid) {
+      if (cleanPid === id || isCategoryDescendant(cleanPid, id)) {
+        return res.status(400).json({ error: 'لا يمكن جعل القسم فرعيًا تحت نفسه أو تحت أحد أقسامه الفرعية' });
+      }
+      const pExists = db.prepare('SELECT id FROM categories WHERE id = ?').get(cleanPid);
+      if (!pExists) return res.status(400).json({ error: 'القسم الأب المحدد غير موجود' });
+    }
+    nextParentId = cleanPid;
+  }
+
   db.prepare(
-    'UPDATE categories SET name_ar = ?, name_en = ?, merchant_id = ?, image_url = ?, sort_order = ?, is_offers_section = ?, is_active = ? WHERE id = ?'
+    'UPDATE categories SET name_ar = ?, name_en = ?, merchant_id = ?, parent_id = ?, image_url = ?, sort_order = ?, is_offers_section = ?, is_active = ? WHERE id = ?'
   ).run(
     nextNameAr,
     name_en !== undefined ? String(name_en).trim() : existing.name_en,
     nextMerchantId,
+    nextParentId,
     image_url !== undefined ? String(image_url || '') : existing.image_url || '',
     sort_order !== undefined ? Number(sort_order) : existing.sort_order,
     nextIsOffers,
     is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
     id
   );
+  recomputeAllCategoryPaths();
   recordAuditLog({
     actor_name: auth.fullName,
     actor_role: auth.role,
@@ -3695,6 +4098,11 @@ app.delete('/api/categories/:id', requireAuth, requireRole('merchant', ...ALL_AD
     return res.status(403).json({ error: 'غير مصرح لك بحذف قسم لا يخص متجرك' });
   }
 
+  const childCount = (db.prepare('SELECT COUNT(*) as c FROM categories WHERE parent_id = ?').get(id) as { c: number }).c;
+  if (childCount > 0) {
+    return res.status(400).json({ error: `لا يمكن حذف القسم لاحتوائه على ${childCount} قسم فرعي؛ احذف أو انقل الأقسام الفرعية أولًا` });
+  }
+
   const linked = (db.prepare('SELECT COUNT(*) as c FROM products WHERE category_id = ?').get(id) as { c: number }).c;
   if (linked > 0) {
     return res.status(400).json({ error: `لا يمكن حذف القسم لارتباطه بـ ${linked} منتجات؛ يمكنك إيقاف تفعيله بدلًا من الحذف` });
@@ -3713,44 +4121,149 @@ app.delete('/api/categories/:id', requireAuth, requireRole('merchant', ...ALL_AD
 
 app.get('/api/products', (req, res) => {
   const auth = optionalAuth(req);
-  const merchantId = req.query.merchant_id as string | undefined;
+  const merchantId = typeof req.query.merchant_id === 'string' ? req.query.merchant_id.trim() : '';
+  const categoryId = typeof req.query.category_id === 'string' ? req.query.category_id.trim() : '';
+  const offersOnly = req.query.offers_only === '1' || req.query.offers_only === 'true';
   const approvedOnly = req.query.approved_only === '1' || req.query.approved_only === 'true';
+  const rawQuery = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const paginated = req.query.paginated === '1' || req.query.paginated === 'true';
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const defaultLimit = paginated ? 60 : 250;
+  const maxLimit = paginated ? 200 : 500;
+  const limit = Math.min(maxLimit, Math.max(1, parseInt(String(req.query.limit || defaultLimit), 10) || defaultLimit));
+  const offset = (page - 1) * limit;
+
   const clauses: string[] = [];
   const params: unknown[] = [];
-  if (merchantId) {
+
+  if (merchantId && merchantId !== 'all') {
     clauses.push('p.merchant_id = ?');
     params.push(merchantId);
   }
+  if (categoryId && categoryId !== 'all' && categoryId !== 'offers') {
+    const descendantIds = getCategoryAndDescendantIds(categoryId);
+    if (descendantIds.length > 1) {
+      clauses.push(`p.category_id IN (${descendantIds.map(() => '?').join(',')})`);
+      params.push(...descendantIds);
+    } else {
+      clauses.push('p.category_id = ?');
+      params.push(categoryId);
+    }
+  }
+  if (offersOnly || categoryId === 'offers') {
+    clauses.push('(p.is_offer = 1 OR c.is_offers_section = 1 OR (p.sale_price IS NOT NULL AND p.sale_price < p.base_price))');
+  }
+
   if (isAdminAuth(auth)) {
     if (approvedOnly) {
       clauses.push("p.is_available = 1 AND m.verification_status = 'approved' AND c.is_active = 1");
     }
   } else if (auth?.role === 'merchant') {
-    clauses.push("(p.merchant_id = ? OR (p.is_available = 1 AND m.verification_status = 'approved' AND c.is_active = 1))");
-    params.push(auth.id);
+    if (approvedOnly) {
+      clauses.push("p.is_available = 1 AND m.verification_status = 'approved' AND c.is_active = 1");
+    } else {
+      clauses.push("(p.merchant_id = ? OR (p.is_available = 1 AND m.verification_status = 'approved' AND c.is_active = 1))");
+      params.push(auth.id);
+    }
   } else {
     clauses.push("p.is_available = 1 AND m.verification_status = 'approved' AND c.is_active = 1");
   }
-  const sql = `
-    SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, c.is_offers_section as category_is_offers
+
+  let usedFts = false;
+  if (rawQuery) {
+    const ftsQuery = isProductsFtsReady() ? buildFtsMatchQuery(rawQuery) : null;
+    if (ftsQuery) {
+      usedFts = true;
+      clauses.push('(p.id IN (SELECT product_id FROM products_fts WHERE products_fts MATCH ?) OR LOWER(COALESCE(p.product_code, \'\')) = LOWER(?))');
+      params.push(ftsQuery, rawQuery);
+    } else {
+      const like = `%${rawQuery}%`;
+      clauses.push('(p.name_ar LIKE ? OR p.name_en LIKE ? OR p.product_code LIKE ? OR p.description LIKE ? OR c.name_ar LIKE ?)');
+      params.push(like, like, like, like, like);
+    }
+  }
+
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const baseFromSql = `
     FROM products p
     JOIN merchants m ON m.id = p.merchant_id
     JOIN categories c ON c.id = p.category_id
-    ${clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''}
-    ORDER BY p.updated_at DESC
+    ${whereSql}
   `;
-  const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
-  res.json(
-    rows.map((p) => {
-      const hasDiscount = p.sale_price !== null && p.sale_price !== undefined && Number(p.sale_price) < Number(p.base_price);
-      return {
-        ...p,
-        is_offer: Boolean(p.is_offer) || Boolean(p.category_is_offers) || hasDiscount,
-        requires_prescription: Boolean(p.requires_prescription),
-        is_available: Boolean(p.is_available),
-      };
-    })
-  );
+
+  const mapProductRow = (p: Record<string, unknown>) => {
+    const hasDiscount = p.sale_price !== null && p.sale_price !== undefined && Number(p.sale_price) < Number(p.base_price);
+    return {
+      ...p,
+      is_offer: Boolean(p.is_offer) || Boolean(p.category_is_offers) || hasDiscount,
+      requires_prescription: Boolean(p.requires_prescription),
+      is_available: Boolean(p.is_available),
+    };
+  };
+
+  let rows: Array<Record<string, unknown>> = [];
+  try {
+    rows = db
+      .prepare(
+        `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, COALESCE(NULLIF(c.full_path_ar, ''), c.name_ar || ';') as category_path, c.is_offers_section as category_is_offers
+         ${baseFromSql}
+         ORDER BY p.is_offer DESC, p.updated_at DESC
+         LIMIT ? OFFSET ?`
+      )
+      .all(...params, limit, offset) as Array<Record<string, unknown>>;
+  } catch (queryErr) {
+    if (usedFts && rawQuery) {
+      // Graceful fallback to LIKE if an unusual punctuation query causes an FTS5 syntax error
+      clauses.pop();
+      params.pop();
+      params.pop();
+      const like = `%${rawQuery}%`;
+      clauses.push('(p.name_ar LIKE ? OR p.name_en LIKE ? OR p.product_code LIKE ? OR p.description LIKE ? OR c.name_ar LIKE ?)');
+      params.push(like, like, like, like, like);
+      const fallbackWhere = `WHERE ${clauses.join(' AND ')}`;
+      rows = db
+        .prepare(
+          `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, c.is_offers_section as category_is_offers
+           FROM products p
+           JOIN merchants m ON m.id = p.merchant_id
+           JOIN categories c ON c.id = p.category_id
+           ${fallbackWhere}
+           ORDER BY p.is_offer DESC, p.updated_at DESC
+           LIMIT ? OFFSET ?`
+        )
+        .all(...params, limit, offset) as Array<Record<string, unknown>>;
+    } else {
+      throw queryErr;
+    }
+  }
+
+  const mapped = rows.map(mapProductRow);
+
+  if (paginated) {
+    const finalWhere = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const total = (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c
+           FROM products p
+           JOIN merchants m ON m.id = p.merchant_id
+           JOIN categories c ON c.id = p.category_id
+           ${finalWhere}`
+        )
+        .get(...params) as { c: number }
+    ).c;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    return res.json({
+      items: mapped,
+      total,
+      page,
+      limit,
+      total_pages: totalPages,
+      has_more: offset + mapped.length < total,
+    });
+  }
+
+  res.json(mapped);
 });
 
 app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLES), (req, res) => {
@@ -3764,8 +4277,15 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     product_code,
     merchant_id,
     category_id,
+    category_path,
+    master_product_id,
     name_ar,
     name_en,
+    brand,
+    size_label,
+    barcode,
+    merchant_sku,
+    min_order_qty,
     description,
     image_url,
     base_price,
@@ -3782,14 +4302,30 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
   if (auth.role === 'merchant' && merchant_id && String(merchant_id).trim() !== auth.id) {
     return res.status(403).json({ error: 'غير مصرح لك بإضافة منتج لمتجر آخر' });
   }
-  if (!effectiveMerchantId || !category_id || !String(name_ar || '').trim()) {
-    return res.status(400).json({ error: 'التاجر والقسم واسم المنتج مطلوبة' });
+  const cleanCategoryPath = String(category_path || '').trim();
+  if (!effectiveMerchantId || (!category_id && !cleanCategoryPath) || !String(name_ar || '').trim()) {
+    return res.status(400).json({ error: 'التاجر والقسم (أو مسار القسم) واسم المنتج مطلوبة' });
   }
 
-  const merchantRow = db.prepare('SELECT id FROM merchants WHERE id = ?').get(effectiveMerchantId);
+  const merchantRow = db.prepare('SELECT id, merchant_type FROM merchants WHERE id = ?').get(effectiveMerchantId) as
+    | { id: string; merchant_type?: string }
+    | undefined;
   if (!merchantRow) return res.status(404).json({ error: 'المتجر المحدد غير موجود' });
 
-  const catRow = db.prepare('SELECT id, scope, merchant_id, is_offers_section, name_ar FROM categories WHERE id = ?').get(category_id) as
+  let resolvedCategoryId = String(category_id || '').trim();
+  if (cleanCategoryPath) {
+    const catScope = merchantRow.merchant_type === 'pharmacy' ? 'pharmacy' : 'merchant';
+    const resolver = createCategoryPathResolver({ scope: catScope, merchantId: auth.role === 'merchant' ? effectiveMerchantId : null });
+    const resolved = resolveOrCreateCategoryPath(resolver, cleanCategoryPath, resolvedCategoryId || null);
+    if (resolved.category_id) {
+      resolvedCategoryId = resolved.category_id;
+    }
+    if (resolved.created_count > 0) {
+      recomputeAllCategoryPaths();
+    }
+  }
+
+  const catRow = db.prepare('SELECT id, scope, merchant_id, is_offers_section, name_ar FROM categories WHERE id = ?').get(resolvedCategoryId) as
     | { id: string; scope: string; merchant_id: string | null; is_offers_section?: number; name_ar?: string }
     | undefined;
   if (!catRow) return res.status(400).json({ error: 'القسم المحدد غير موجود' });
@@ -3807,6 +4343,18 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
   }
   const parsedStock = Math.max(0, Math.floor(Number(stock_quantity ?? 10)));
   const parsedThreshold = Math.max(0, Math.floor(Number(low_stock_threshold ?? 5)));
+  const parsedMinQty = Math.max(1, Math.floor(Number(min_order_qty ?? 1)));
+  const parsedSize = extractSize({ size_label, name_ar, name_en });
+  const cleanMasterId = String(master_product_id || '').trim() || null;
+
+  if (cleanMasterId) {
+    const dupMasterListing = db
+      .prepare('SELECT id FROM products WHERE merchant_id = ? AND master_product_id = ? AND is_available = 1')
+      .get(effectiveMerchantId, cleanMasterId);
+    if (dupMasterListing) {
+      return res.status(409).json({ error: 'لديك بالفعل عرض نشط لهذا المنتج المركزي في متجرك؛ قم بتعديل السعر أو المخزون بدلًا من التكرار' });
+    }
+  }
 
   const id = uid('prd');
   let finalCode = String(product_code || '').trim();
@@ -3831,18 +4379,27 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
 
   db.prepare(`
     INSERT INTO products (
-      id, product_code, merchant_id, category_id, name_ar, name_en, description, image_url,
+      id, product_code, merchant_id, category_id, master_product_id, name_ar, name_en, description, image_url,
+      brand, size_label, size_value, size_unit, barcode, merchant_sku, min_order_qty,
       base_price, sale_price, is_offer, stock_quantity, low_stock_threshold, requires_prescription, addons_text, is_available
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     finalCode,
     effectiveMerchantId,
-    category_id,
+    resolvedCategoryId,
+    cleanMasterId,
     String(name_ar).trim(),
     String(name_en || name_ar).trim(),
     String(description || ''),
     String(image_url || ''),
+    String(brand || '').trim(),
+    String(size_label || parsedSize?.displayLabel || '').trim(),
+    parsedSize?.canonicalValue ?? null,
+    parsedSize?.canonicalUnit ?? '',
+    String(barcode || '').trim() || null,
+    String(merchant_sku || '').trim(),
+    parsedMinQty,
     parsedBase,
     parsedSale,
     effectiveIsOffer,
@@ -3890,8 +4447,8 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'ملف الإكسل لا يحتوي على صفوف منتجات صالحة' });
   }
-  if (rows.length > 2000) {
-    return res.status(400).json({ error: 'الحد الأقصى للاستيراد في الدفعة الواحدة هو 2000 صف' });
+  if (rows.length > 10000) {
+    return res.status(400).json({ error: 'الحد الأقصى للاستيراد في الدفعة الواحدة هو 10,000 صف' });
   }
   const merchant = db.prepare('SELECT * FROM merchants WHERE id = ?').get(effectiveMerchantId) as Record<string, unknown> | undefined;
   if (!merchant) {
@@ -3912,13 +4469,20 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
   let categoriesCreated = 0;
   const errors: string[] = [];
 
-  const existingCodes = new Set(
-    (
-      db
-        .prepare("SELECT product_code FROM products WHERE product_code IS NOT NULL AND TRIM(product_code) != ''")
-        .all() as Array<{ product_code: string }>
-    ).map((r) => r.product_code.toUpperCase())
-  );
+  // Pre-load existing product codes and categories into in-memory maps so 10,000-row imports execute in milliseconds
+  const prodCodeMap = new Map<string, { id: string; merchant_id: string }>();
+  const existingCodes = new Set<string>();
+  const existingProdRows = db
+    .prepare("SELECT id, merchant_id, product_code FROM products WHERE product_code IS NOT NULL AND TRIM(product_code) != ''")
+    .all() as Array<{ id: string; merchant_id: string; product_code: string }>;
+  for (const r of existingProdRows) {
+    const key = String(r.product_code).trim().toUpperCase();
+    existingCodes.add(key);
+    if (!prodCodeMap.has(key)) {
+      prodCodeMap.set(key, { id: String(r.id), merchant_id: String(r.merchant_id) });
+    }
+  }
+
   let nextAutoSeq = 1001 + existingCodes.size;
   const nextGeneratedCode = () => {
     while (existingCodes.has(`PRD-${nextAutoSeq}`)) nextAutoSeq += 1;
@@ -3928,13 +4492,11 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
     return code;
   };
 
-  const findCatStmt = db.prepare(
-    "SELECT id, is_offers_section FROM categories WHERE scope != 'market' AND (merchant_id = ? OR merchant_id IS NULL) AND (LOWER(TRIM(name_ar)) = LOWER(TRIM(?)) OR LOWER(TRIM(name_en)) = LOWER(TRIM(?))) ORDER BY CASE WHEN merchant_id = ? THEN 0 ELSE 1 END LIMIT 1"
-  );
-  const insertCatStmt = db.prepare(
-    'INSERT INTO categories (id, scope, merchant_id, name_ar, name_en, image_url, sort_order, is_offers_section, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)'
-  );
-  const findProdByCodeStmt = db.prepare('SELECT id, merchant_id FROM products WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?)) LIMIT 1');
+  const categoryResolver = createCategoryPathResolver({
+    scope: catScope as 'merchant' | 'pharmacy',
+    merchantId: effectiveMerchantId,
+  });
+
   const insertProdStmt = db.prepare(`
     INSERT INTO products (
       id, product_code, merchant_id, category_id, name_ar, name_en, description, image_url,
@@ -3957,58 +4519,55 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
       const rawCode = String(rawRow.product_code ?? '').trim();
       const rawCategory = String(rawRow.category_name ?? '').trim();
       const rawImage = String(rawRow.image_url ?? '').trim();
-      const parsedPrice = Number(String(rawRow.price ?? '').replace(/[^\d.-]/g, ''));
+      const parsedPrice = parseLocalizedNumber(rawRow.price ?? 0);
 
       if (!nameAr) {
         skipped += 1;
-        errors.push(`صف ${rowNum}: اسم المنتج فارغ`);
+        if (errors.length < 100) errors.push(`صف ${rowNum}: اسم المنتج فارغ`);
         return;
       }
       if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
         skipped += 1;
-        errors.push(`صف ${rowNum} (${nameAr}): سعر غير صالح`);
+        if (errors.length < 100) errors.push(`صف ${rowNum} (${nameAr}): سعر غير صالح`);
         return;
       }
 
       let categoryId = defaultCat?.id || 'cat_grocery';
       let categoryIsOffers = 0;
       if (rawCategory) {
-        const matchedCat = findCatStmt.get(effectiveMerchantId, rawCategory, rawCategory, effectiveMerchantId) as
-          | { id: string; is_offers_section?: number }
-          | undefined;
-        if (matchedCat) {
-          categoryId = matchedCat.id;
-          categoryIsOffers = matchedCat.is_offers_section ? 1 : 0;
-        } else {
-          const newCatId = uid('cat');
-          const looksLikeOffers = ['العروض', 'عروض', 'عروض المتجر', 'offers'].includes(rawCategory.toLowerCase()) ? 1 : 0;
-          insertCatStmt.run(newCatId, catScope, effectiveMerchantId, rawCategory, rawCategory, '', 10 + categoriesCreated, looksLikeOffers);
-          categoryId = newCatId;
-          categoryIsOffers = looksLikeOffers;
-          categoriesCreated += 1;
+        const resolvedCat = resolveOrCreateCategoryPath(categoryResolver, rawCategory, categoryId);
+        if (resolvedCat.category_id) {
+          categoryId = resolvedCat.category_id;
+          categoryIsOffers = resolvedCat.is_offers_section;
+          categoriesCreated += resolvedCat.created_count;
         }
       }
 
       if (rawCode) {
-        const existingProd = findProdByCodeStmt.get(rawCode) as { id: string; merchant_id: string } | undefined;
+        const codeKey = rawCode.toUpperCase();
+        const existingProd = prodCodeMap.get(codeKey);
         if (existingProd) {
           if (String(existingProd.merchant_id) !== effectiveMerchantId) {
             skipped += 1;
-            errors.push(`صف ${rowNum} (${rawCode}): كود المنتج مملوك لمتجر آخر ولا يمكن تعديله`);
+            if (errors.length < 100) errors.push(`صف ${rowNum} (${rawCode}): كود المنتج مملوك لمتجر آخر ولا يمكن تعديله`);
             return;
           }
           updateProdStmt.run(categoryId, nameAr, nameAr, parsedPrice, rawImage, rawImage, categoryIsOffers, existingProd.id, effectiveMerchantId);
           updated += 1;
           return;
         }
-        existingCodes.add(rawCode.toUpperCase());
-        insertProdStmt.run(uid('prd'), rawCode, effectiveMerchantId, categoryId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
+        const newProdId = uid('prd');
+        existingCodes.add(codeKey);
+        prodCodeMap.set(codeKey, { id: newProdId, merchant_id: effectiveMerchantId });
+        insertProdStmt.run(newProdId, rawCode, effectiveMerchantId, categoryId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
         created += 1;
         return;
       }
 
       const generatedCode = nextGeneratedCode();
-      insertProdStmt.run(uid('prd'), generatedCode, effectiveMerchantId, categoryId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
+      const newProdId = uid('prd');
+      prodCodeMap.set(generatedCode.toUpperCase(), { id: newProdId, merchant_id: effectiveMerchantId });
+      insertProdStmt.run(newProdId, generatedCode, effectiveMerchantId, categoryId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
       created += 1;
     });
   });
@@ -4030,7 +4589,7 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
     updated,
     skipped,
     categories_created: categoriesCreated,
-    errors: errors.slice(0, 20),
+    errors: errors.slice(0, 30),
   });
 });
 
@@ -4079,7 +4638,21 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
     return res.status(400).json({ error: 'سعر العرض غير صالح أو يتجاوز السعر الأساسي' });
   }
 
-  const nextCatId = String(b.category_id ?? existing.category_id);
+  let nextCatId = String(b.category_id ?? existing.category_id);
+  const patchCategoryPath = String(b.category_path || '').trim();
+  if (patchCategoryPath) {
+    const merInfo = db.prepare('SELECT merchant_type FROM merchants WHERE id = ?').get(existing.merchant_id) as
+      | { merchant_type?: string }
+      | undefined;
+    const catScope = merInfo?.merchant_type === 'pharmacy' ? 'pharmacy' : 'merchant';
+    const resolver = createCategoryPathResolver({
+      scope: catScope,
+      merchantId: auth.role === 'merchant' ? String(existing.merchant_id) : null,
+    });
+    const resolved = resolveOrCreateCategoryPath(resolver, patchCategoryPath, nextCatId);
+    if (resolved.category_id) nextCatId = resolved.category_id;
+    if (resolved.created_count > 0) recomputeAllCategoryPaths();
+  }
   const catRow = db.prepare('SELECT merchant_id, is_offers_section, name_ar FROM categories WHERE id = ?').get(nextCatId) as
     | { merchant_id?: string | null; is_offers_section?: number; name_ar?: string }
     | undefined;
@@ -4094,9 +4667,17 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
   const requestedIsOffer = b.is_offer !== undefined ? Boolean(b.is_offer) : Boolean(existing.is_offer);
   const nextIsOffer = requestedIsOffer || catIsOffers || (nextSale !== null && nextSale < nextBase) ? 1 : 0;
 
+  const nextBrand = b.brand !== undefined ? String(b.brand || '').trim() : String(existing.brand || '');
+  const nextSizeLabel = b.size_label !== undefined ? String(b.size_label || '').trim() : String(existing.size_label || '');
+  const nextParsedSize = extractSize({ size_label: nextSizeLabel, name_ar: String(b.name_ar ?? existing.name_ar), name_en: String(b.name_en ?? existing.name_en) });
+  const nextBarcode = b.barcode !== undefined ? (String(b.barcode || '').trim() || null) : (existing.barcode ?? null);
+  const nextMerchantSku = b.merchant_sku !== undefined ? String(b.merchant_sku || '').trim() : String(existing.merchant_sku || '');
+  const nextMinQty = b.min_order_qty !== undefined ? Math.max(1, Math.floor(Number(b.min_order_qty))) : Number(existing.min_order_qty || 1);
+
   db.prepare(`
     UPDATE products SET
       product_code = ?, merchant_id = ?, category_id = ?, name_ar = ?, name_en = ?, description = ?, image_url = ?,
+      brand = ?, size_label = ?, size_value = ?, size_unit = ?, barcode = ?, merchant_sku = ?, min_order_qty = ?,
       base_price = ?, sale_price = ?, is_offer = ?, stock_quantity = ?, low_stock_threshold = ?,
       requires_prescription = ?, addons_text = ?, is_available = ?, updated_at = datetime('now')
     WHERE id = ?
@@ -4108,6 +4689,13 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
     b.name_en ?? existing.name_en,
     b.description !== undefined ? b.description : existing.description,
     b.image_url !== undefined ? b.image_url : existing.image_url,
+    nextBrand,
+    nextSizeLabel || nextParsedSize?.displayLabel || '',
+    nextParsedSize?.canonicalValue ?? existing.size_value ?? null,
+    nextParsedSize?.canonicalUnit ?? existing.size_unit ?? '',
+    nextBarcode,
+    nextMerchantSku,
+    nextMinQty,
     nextBase,
     nextSale,
     nextIsOffer,
@@ -4160,19 +4748,45 @@ app.delete('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMI
 // 8. Otlobha Market C2C CRUD & Moderation
 app.get('/api/market', (req, res) => {
   const auth = optionalAuth(req);
-  let rows: Array<Record<string, unknown>>;
+  const paginated = req.query.paginated === '1' || req.query.paginated === 'true';
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || (paginated ? '40' : '120')), 10) || 120));
+  const offset = (page - 1) * limit;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+  const clauses: string[] = [];
+  const params: unknown[] = [];
   if (isAdminAuth(auth) && hasAuthPermission(auth, 'market.approve', 'market.delete', 'market.disputes')) {
-    rows = db.prepare('SELECT * FROM market_listings ORDER BY created_at DESC').all() as Array<Record<string, unknown>>;
+    // admin sees all
   } else if (auth) {
-    rows = db
-      .prepare("SELECT * FROM market_listings WHERE moderation_status = 'approved' OR seller_id = ? ORDER BY created_at DESC")
-      .all(auth.id) as Array<Record<string, unknown>>;
+    clauses.push("(moderation_status = 'approved' OR seller_id = ?)");
+    params.push(auth.id);
   } else {
-    rows = db
-      .prepare("SELECT * FROM market_listings WHERE moderation_status = 'approved' ORDER BY created_at DESC")
-      .all() as Array<Record<string, unknown>>;
+    clauses.push("moderation_status = 'approved'");
   }
-  res.json(rows.map((m) => ({ ...m, is_negotiable: Boolean(m.is_negotiable) })));
+  if (q) {
+    const like = `%${q}%`;
+    clauses.push('(title LIKE ? OR description LIKE ? OR category_ar LIKE ?)');
+    params.push(like, like, like);
+  }
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db
+    .prepare(`SELECT * FROM market_listings ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
+  const mapped = rows.map((m) => ({ ...m, is_negotiable: Boolean(m.is_negotiable) }));
+
+  if (paginated) {
+    const total = (db.prepare(`SELECT COUNT(*) as c FROM market_listings ${whereSql}`).get(...params) as { c: number }).c;
+    return res.json({
+      items: mapped,
+      total,
+      page,
+      limit,
+      total_pages: Math.max(1, Math.ceil(total / limit)),
+      has_more: offset + mapped.length < total,
+    });
+  }
+  res.json(mapped);
 });
 
 app.post('/api/market', requireAuth, (req, res) => {
@@ -4328,15 +4942,19 @@ app.patch('/api/market/:id/moderate', requireAuth, requirePermission('market.app
 
 // 9. Finance, Wallets, Double-Entry Ledger & Settlements
 app.get('/api/finance/ledger', requireAuth, requirePermission('ledger.view'), (_req, res) => {
-  const wallets = db.prepare('SELECT * FROM wallets').all() as Array<Record<string, unknown>>;
-  const entries = db.prepare('SELECT * FROM ledger_entries ORDER BY created_at DESC LIMIT 60').all();
-  const settlements = db.prepare('SELECT * FROM settlements ORDER BY created_at DESC').all();
+  const wallets = db
+    .prepare('SELECT * FROM wallets ORDER BY (available_balance + pending_balance) DESC, id ASC LIMIT 200')
+    .all() as Array<Record<string, unknown>>;
+  const walletsTotalCount = (db.prepare('SELECT COUNT(*) as c FROM wallets').get() as { c: number }).c;
+  const entries = db.prepare('SELECT * FROM ledger_entries ORDER BY created_at DESC LIMIT 80').all();
+  const settlements = db.prepare('SELECT * FROM settlements ORDER BY created_at DESC LIMIT 150').all();
   const sums = db.prepare('SELECT COALESCE(SUM(debit),0) as total_debit, COALESCE(SUM(credit),0) as total_credit FROM ledger_entries').get() as {
     total_debit: number;
     total_credit: number;
   };
   res.json({
     wallets: wallets.map((w) => ({ ...w, is_frozen: Boolean(w.is_frozen) })),
+    wallets_total_count: walletsTotalCount,
     entries,
     settlements,
     reconciliation: {
@@ -4930,7 +5548,7 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
 });
 
 // 11. Mobile Customer & Captain Endpoints (Flutter + Live Preview)
-app.get('/api/mobile/customer/guest-bootstrap', (_req, res) => {
+function buildBootstrapStaticCatalogSnapshot() {
   const services = db.prepare('SELECT * FROM service_configs').all() as Array<Record<string, unknown>>;
   const zones = db.prepare('SELECT * FROM service_zones WHERE is_active = 1').all() as Array<Record<string, unknown>>;
   const merchants = db.prepare("SELECT * FROM merchants WHERE verification_status = 'approved'").all() as Array<Record<string, unknown>>;
@@ -4944,6 +5562,8 @@ app.get('/api/mobile/customer/guest-bootstrap', (_req, res) => {
        ORDER BY c.is_offers_section DESC, c.sort_order ASC`
     )
     .all() as Array<Record<string, unknown>>;
+
+  // High-scale cap: never dump 500,000 products into bootstrap; return top 100 featured/offer items + paginated /api/products for full browsing
   const products = db
     .prepare(
       `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, c.is_offers_section as category_is_offers
@@ -4952,25 +5572,64 @@ app.get('/api/mobile/customer/guest-bootstrap', (_req, res) => {
        JOIN categories c ON c.id = p.category_id
        WHERE p.is_available = 1
          AND m.verification_status = 'approved'
-         AND c.is_active = 1`
+         AND c.is_active = 1
+       ORDER BY p.is_offer DESC, p.updated_at DESC
+       LIMIT 100`
     )
     .all() as Array<Record<string, unknown>>;
-  const market = db.prepare("SELECT * FROM market_listings WHERE moderation_status = 'approved' ORDER BY created_at DESC").all() as Array<Record<string, unknown>>;
+
+  const productsTotalCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as c
+         FROM products p
+         JOIN merchants m ON m.id = p.merchant_id
+         WHERE p.is_available = 1 AND m.verification_status = 'approved'`
+      )
+      .get() as { c: number }
+  ).c;
+
+  // Fast index-only distinct category map per merchant so store section strips work accurately even with 500K products
+  const merchantCatPairs = db
+    .prepare(
+      `SELECT p.merchant_id, p.category_id, COUNT(*) as product_count
+       FROM products p
+       JOIN merchants m ON m.id = p.merchant_id
+       WHERE p.is_available = 1 AND m.verification_status = 'approved'
+       GROUP BY p.merchant_id, p.category_id`
+    )
+    .all() as Array<{ merchant_id: string; category_id: string; product_count: number }>;
+
+  const merchantCategoryIds: Record<string, string[]> = {};
+  const merchantProductCounts: Record<string, number> = {};
+  for (const row of merchantCatPairs) {
+    if (!merchantCategoryIds[row.merchant_id]) merchantCategoryIds[row.merchant_id] = [];
+    merchantCategoryIds[row.merchant_id].push(row.category_id);
+    merchantProductCounts[row.merchant_id] = (merchantProductCounts[row.merchant_id] || 0) + Number(row.product_count || 0);
+  }
+
+  const market = db
+    .prepare("SELECT * FROM market_listings WHERE moderation_status = 'approved' ORDER BY created_at DESC LIMIT 60")
+    .all() as Array<Record<string, unknown>>;
   const coupons = db
     .prepare('SELECT id, code, applicable_services_json, discount_type, discount_value, max_discount, min_order_amount, is_active FROM coupons WHERE is_active = 1')
     .all() as Array<Record<string, unknown>>;
 
-  res.json({
-    is_guest: true,
-    customer: null,
+  return {
     services: services.map((s) => ({ ...s, is_enabled: Boolean(s.is_enabled) })),
     zones,
-    merchants: merchants.map(sanitizePublicMerchantRow),
+    merchants: merchants.map((m) => ({
+      ...sanitizePublicMerchantRow(m),
+      product_count: merchantProductCounts[String(m.id)] || 0,
+    })),
     categories: categories.map((c) => ({
       ...c,
       is_active: Boolean(c.is_active),
       is_offers_section: Boolean(c.is_offers_section),
     })),
+    merchant_category_ids: merchantCategoryIds,
+    products_total_count: productsTotalCount,
+    products_paginated: true,
     products: products.map((p) => {
       const hasDiscount = p.sale_price !== null && p.sale_price !== undefined && Number(p.sale_price) < Number(p.base_price);
       return {
@@ -4981,19 +5640,43 @@ app.get('/api/mobile/customer/guest-bootstrap', (_req, res) => {
       };
     }),
     market: market.map((m) => ({ ...m, is_negotiable: Boolean(m.is_negotiable) })),
-    orders: [],
-    trips: [],
-    parcels: [],
-    ratings: [],
-    pending_ratings: [],
     coupons: coupons.map((c) => ({
       ...c,
       is_active: Boolean(c.is_active),
       applicable_services: JSON.parse(String(c.applicable_services_json || '[]')),
     })),
+    payment_settings: getPaymentSettingsRow(),
+  };
+}
+
+app.get('/api/mobile/customer/guest-bootstrap', (req, res) => {
+  const isLite = req.query.lite === '1' || req.query.lite === 'true';
+  if (isLite) {
+    return res.json({
+      is_guest: true,
+      lite: true,
+      customer: null,
+      orders: [],
+      trips: [],
+      parcels: [],
+      ratings: [],
+      pending_ratings: [],
+      wallet: { available_balance: 0, pending_balance: 0, is_frozen: false },
+      notifications: [],
+    });
+  }
+  const catalog = buildBootstrapStaticCatalogSnapshot();
+  res.json({
+    is_guest: true,
+    customer: null,
+    ...catalog,
+    orders: [],
+    trips: [],
+    parcels: [],
+    ratings: [],
+    pending_ratings: [],
     wallet: { available_balance: 0, pending_balance: 0, is_frozen: false },
     notifications: [],
-    payment_settings: getPaymentSettingsRow(),
   });
 });
 
@@ -5002,34 +5685,30 @@ app.get('/api/mobile/customer/bootstrap', (req, res) => {
   if (!auth) {
     return res.status(401).json({ error: 'يرجى تسجيل الدخول أولاً للمتابعة' });
   }
-  const services = db.prepare('SELECT * FROM service_configs').all() as Array<Record<string, unknown>>;
-  const zones = db.prepare('SELECT * FROM service_zones WHERE is_active = 1').all() as Array<Record<string, unknown>>;
-  const merchants = db.prepare("SELECT * FROM merchants WHERE verification_status = 'approved'").all() as Array<Record<string, unknown>>;
-  const categories = db
-    .prepare(
-      `SELECT c.*
-       FROM categories c
-       LEFT JOIN merchants m ON m.id = c.merchant_id
-       WHERE c.is_active = 1
-         AND (c.merchant_id IS NULL OR m.verification_status = 'approved')
-       ORDER BY c.is_offers_section DESC, c.sort_order ASC`
-    )
-    .all() as Array<Record<string, unknown>>;
-  const products = db
-    .prepare(
-      `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, c.is_offers_section as category_is_offers
-       FROM products p
-       JOIN merchants m ON m.id = p.merchant_id
-       JOIN categories c ON c.id = p.category_id
-       WHERE p.is_available = 1
-         AND m.verification_status = 'approved'
-         AND c.is_active = 1`
-    )
-    .all() as Array<Record<string, unknown>>;
-  const market = db.prepare("SELECT * FROM market_listings WHERE moderation_status = 'approved' ORDER BY created_at DESC").all() as Array<Record<string, unknown>>;
-  const coupons = db
-    .prepare('SELECT id, code, applicable_services_json, discount_type, discount_value, max_discount, min_order_amount, is_active FROM coupons WHERE is_active = 1')
-    .all() as Array<Record<string, unknown>>;
+
+  const isLite = req.query.lite === '1' || req.query.lite === 'true';
+
+  const targetCustomerId = String(
+    req.query.customer_id || req.headers['x-otlobha-customer-id'] || (auth?.role === 'customer' ? auth.id : '')
+  ).trim();
+  const targetCaptainId = String(
+    req.query.captain_id || req.headers['x-otlobha-captain-id'] || (auth?.role === 'captain' ? auth.id : '')
+  ).trim();
+
+  let customerProfile: Record<string, unknown> | null = null;
+  let customerPhoneForScope = '';
+  if (targetCustomerId) {
+    const cRow = db
+      .prepare('SELECT id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified FROM customers WHERE id = ?')
+      .get(targetCustomerId) as Record<string, unknown> | undefined;
+    if (cRow) {
+      customerPhoneForScope = String(cRow.phone || '').trim();
+      customerProfile = {
+        ...cRow,
+        is_email_verified: Boolean(cRow.is_email_verified),
+      };
+    }
+  }
 
   let trips: Array<Record<string, unknown>> = [];
   let parcels: Array<Record<string, unknown>> = [];
@@ -5039,60 +5718,108 @@ app.get('/api/mobile/customer/bootstrap', (req, res) => {
   let notifications: Array<Record<string, unknown>> = [];
   let wallet: Record<string, unknown> = { available_balance: 0, pending_balance: 0, is_frozen: false };
 
-  // Always load recent trips, parcels, and orders with full store_sections & coordinates so both CustomerMobilePreview and CaptainMobilePreview work seamlessly in multi-portal mode
-  trips = db
-    .prepare(
-      `SELECT t.*,
-              c.lat as captain_lat,
-              c.lng as captain_lng,
-              c.location_updated_at as captain_location_updated_at,
-              c.vehicle_model as captain_vehicle_model,
-              c.plate_number as captain_plate_number,
-              COALESCE(t.captain_phone, c.phone) as captain_phone,
-              (SELECT COUNT(*) FROM trip_chat_messages m WHERE m.trip_id = t.id) as chat_count
-       FROM trips t
-       LEFT JOIN captains c ON c.id = t.captain_id
-       ORDER BY t.created_at DESC LIMIT 40`
-    )
-    .all() as Array<Record<string, unknown>>;
+  const scopeStrictlyToCustomer = auth.role === 'customer' && Boolean(targetCustomerId);
 
-  parcels = db.prepare('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT 30').all() as Array<Record<string, unknown>>;
+  if (scopeStrictlyToCustomer) {
+    trips = db
+      .prepare(
+        `SELECT t.*,
+                c.lat as captain_lat,
+                c.lng as captain_lng,
+                c.location_updated_at as captain_location_updated_at,
+                c.vehicle_model as captain_vehicle_model,
+                c.plate_number as captain_plate_number,
+                COALESCE(t.captain_phone, c.phone) as captain_phone,
+                (SELECT COUNT(*) FROM trip_chat_messages m WHERE m.trip_id = t.id) as chat_count
+         FROM trips t
+         LEFT JOIN captains c ON c.id = t.captain_id
+         WHERE t.customer_id = ? ${customerPhoneForScope ? 'OR t.customer_phone = ?' : ''}
+         ORDER BY t.created_at DESC LIMIT 30`
+      )
+      .all(...(customerPhoneForScope ? [targetCustomerId, customerPhoneForScope] : [targetCustomerId])) as Array<Record<string, unknown>>;
 
-  const allOrderRows = db
-    .prepare(
-      `SELECT o.*,
-              c.lat as captain_lat,
-              c.lng as captain_lng,
-              c.location_updated_at as captain_location_updated_at,
-              m.lat as merchant_lat,
-              m.lng as merchant_lng,
-              (SELECT COUNT(*) FROM order_chat_messages m WHERE m.order_id = o.id) as chat_count
-       FROM orders o
-       LEFT JOIN captains c ON c.id = o.captain_id
-       LEFT JOIN merchants m ON m.id = o.merchant_id
-       ORDER BY o.created_at DESC LIMIT 50`
-    )
-    .all() as Array<Record<string, unknown>>;
-  const allSecMap = getOrderStoreSectionsMap(allOrderRows.map((r) => String(r.id)));
-  orders = allOrderRows.map((r) => mapOrderRowWithSections(r, allSecMap.get(String(r.id)) || [], auth));
+    parcels = db
+      .prepare(
+        `SELECT * FROM deliveries
+         WHERE customer_id = ? ${customerPhoneForScope ? 'OR sender_phone = ?' : ''}
+         ORDER BY created_at DESC LIMIT 25`
+      )
+      .all(...(customerPhoneForScope ? [targetCustomerId, customerPhoneForScope] : [targetCustomerId])) as Array<Record<string, unknown>>;
 
-  const targetCustomerId = String(
-    req.query.customer_id || req.headers['x-otlobha-customer-id'] || (auth?.role === 'customer' ? auth.id : '')
-  ).trim();
-  const targetCaptainId = String(
-    req.query.captain_id || req.headers['x-otlobha-captain-id'] || (auth?.role === 'captain' ? auth.id : '')
-  ).trim();
+    const scopedOrderRows = db
+      .prepare(
+        `SELECT o.*,
+                c.lat as captain_lat,
+                c.lng as captain_lng,
+                c.location_updated_at as captain_location_updated_at,
+                m.lat as merchant_lat,
+                m.lng as merchant_lng,
+                (SELECT COUNT(*) FROM order_chat_messages m WHERE m.order_id = o.id) as chat_count
+         FROM orders o
+         LEFT JOIN captains c ON c.id = o.captain_id
+         LEFT JOIN merchants m ON m.id = o.merchant_id
+         WHERE o.customer_id = ? ${customerPhoneForScope ? 'OR o.customer_phone = ?' : ''}
+         ORDER BY o.created_at DESC LIMIT 40`
+      )
+      .all(...(customerPhoneForScope ? [targetCustomerId, customerPhoneForScope] : [targetCustomerId])) as Array<Record<string, unknown>>;
+    const scopedSecMap = getOrderStoreSectionsMap(scopedOrderRows.map((r) => String(r.id)));
+    orders = scopedOrderRows.map((r) => mapOrderRowWithSections(r, scopedSecMap.get(String(r.id)) || [], auth));
+  } else {
+    // Admin / Captain / Multi-portal preview mode: bounded recent rows
+    trips = db
+      .prepare(
+        `SELECT t.*,
+                c.lat as captain_lat,
+                c.lng as captain_lng,
+                c.location_updated_at as captain_location_updated_at,
+                c.vehicle_model as captain_vehicle_model,
+                c.plate_number as captain_plate_number,
+                COALESCE(t.captain_phone, c.phone) as captain_phone,
+                (SELECT COUNT(*) FROM trip_chat_messages m WHERE m.trip_id = t.id) as chat_count
+         FROM trips t
+         LEFT JOIN captains c ON c.id = t.captain_id
+         ORDER BY t.created_at DESC LIMIT 40`
+      )
+      .all() as Array<Record<string, unknown>>;
+
+    parcels = db.prepare('SELECT * FROM deliveries ORDER BY created_at DESC LIMIT 30').all() as Array<Record<string, unknown>>;
+
+    const allOrderRows = db
+      .prepare(
+        `SELECT o.*,
+                c.lat as captain_lat,
+                c.lng as captain_lng,
+                c.location_updated_at as captain_location_updated_at,
+                m.lat as merchant_lat,
+                m.lng as merchant_lng,
+                (SELECT COUNT(*) FROM order_chat_messages m WHERE m.order_id = o.id) as chat_count
+         FROM orders o
+         LEFT JOIN captains c ON c.id = o.captain_id
+         LEFT JOIN merchants m ON m.id = o.merchant_id
+         ORDER BY o.created_at DESC LIMIT 50`
+      )
+      .all() as Array<Record<string, unknown>>;
+    const allSecMap = getOrderStoreSectionsMap(allOrderRows.map((r) => String(r.id)));
+    orders = allOrderRows.map((r) => mapOrderRowWithSections(r, allSecMap.get(String(r.id)) || [], auth));
+  }
 
   if (targetCustomerId) {
     const wRow = db
       .prepare("SELECT id, user_id, owner_name, owner_type, available_balance, pending_balance, is_frozen FROM wallets WHERE user_id = ? AND owner_type = 'customer' LIMIT 1")
       .get(targetCustomerId) as Record<string, unknown> | undefined;
     if (wRow) wallet = { ...wRow, is_frozen: Boolean(wRow.is_frozen) };
+    const isVerifiedCust = Boolean(customerProfile?.is_email_verified);
     notifications = db
-      .prepare("SELECT * FROM notifications WHERE target_app IN ('customer', 'all') AND (recipient_id IS NULL OR recipient_id = ?) ORDER BY created_at DESC LIMIT 30")
-      .all(targetCustomerId) as Array<Record<string, unknown>>;
+      .prepare(
+        `SELECT * FROM notifications
+         WHERE target_app IN ('customer', 'all')
+           AND (recipient_id IS NULL OR recipient_id = ?)
+           AND NOT (? = 1 AND LOWER(COALESCE(deep_link, '')) = 'verify_email' AND recipient_id IS NULL)
+         ORDER BY created_at DESC LIMIT 30`
+      )
+      .all(targetCustomerId, isVerifiedCust ? 1 : 0) as Array<Record<string, unknown>>;
     ratings = db
-      .prepare('SELECT * FROM captain_ratings WHERE customer_id = ? ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 60')
+      .prepare('SELECT * FROM captain_ratings WHERE customer_id = ? ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 40')
       .all(targetCustomerId) as Array<Record<string, unknown>>;
     pendingRatings = ratings.filter((r) => r.status === 'pending');
   } else if (targetCaptainId) {
@@ -5104,7 +5831,7 @@ app.get('/api/mobile/customer/bootstrap', (req, res) => {
       .prepare("SELECT * FROM notifications WHERE target_app IN ('captain', 'all') AND (recipient_id IS NULL OR recipient_id = ?) ORDER BY created_at DESC LIMIT 30")
       .all(targetCaptainId) as Array<Record<string, unknown>>;
     ratings = db
-      .prepare('SELECT * FROM captain_ratings WHERE captain_id = ? ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 60')
+      .prepare('SELECT * FROM captain_ratings WHERE captain_id = ? ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 40')
       .all(targetCaptainId) as Array<Record<string, unknown>>;
     pendingRatings = ratings.filter((r) => r.status === 'pending');
   } else {
@@ -5112,57 +5839,33 @@ app.get('/api/mobile/customer/bootstrap', (req, res) => {
       .prepare("SELECT * FROM notifications WHERE target_app IN ('customer', 'all') ORDER BY created_at DESC LIMIT 30")
       .all() as Array<Record<string, unknown>>;
     ratings = db
-      .prepare('SELECT * FROM captain_ratings ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 60')
+      .prepare('SELECT * FROM captain_ratings ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 40')
       .all() as Array<Record<string, unknown>>;
     pendingRatings = ratings.filter((r) => r.status === 'pending');
   }
 
-  let customerProfile: Record<string, unknown> | null = null;
-  if (targetCustomerId) {
-    const cRow = db
-      .prepare('SELECT id, email, phone, full_name, default_zone_id, address_landmark, is_email_verified FROM customers WHERE id = ?')
-      .get(targetCustomerId) as Record<string, unknown> | undefined;
-    if (cRow) {
-      customerProfile = {
-        ...cRow,
-        is_email_verified: Boolean(cRow.is_email_verified),
-      };
-    }
-  }
-
-  res.json({
+  const dynamicPayload = {
     customer: customerProfile,
-    services: services.map((s) => ({ ...s, is_enabled: Boolean(s.is_enabled) })),
-    zones,
-    merchants: merchants.map(sanitizePublicMerchantRow),
-    categories: categories.map((c) => ({
-      ...c,
-      is_active: Boolean(c.is_active),
-      is_offers_section: Boolean(c.is_offers_section),
-    })),
-    products: products.map((p) => {
-      const hasDiscount = p.sale_price !== null && p.sale_price !== undefined && Number(p.sale_price) < Number(p.base_price);
-      return {
-        ...p,
-        is_offer: Boolean(p.is_offer) || Boolean(p.category_is_offers) || hasDiscount,
-        requires_prescription: Boolean(p.requires_prescription),
-        is_available: Boolean(p.is_available),
-      };
-    }),
-    market: market.map((m) => ({ ...m, is_negotiable: Boolean(m.is_negotiable) })),
     orders,
     trips,
     parcels,
     ratings,
     pending_ratings: pendingRatings,
-    coupons: coupons.map((c) => ({
-      ...c,
-      is_active: Boolean(c.is_active),
-      applicable_services: JSON.parse(String(c.applicable_services_json || '[]')),
-    })),
     wallet,
     notifications: notifications.map((n) => ({ ...n, is_read: Boolean(n.is_read) })),
-    payment_settings: getPaymentSettingsRow(),
+  };
+
+  if (isLite) {
+    return res.json({
+      lite: true,
+      ...dynamicPayload,
+    });
+  }
+
+  const catalog = buildBootstrapStaticCatalogSnapshot();
+  res.json({
+    ...catalog,
+    ...dynamicPayload,
   });
 });
 
@@ -5731,19 +6434,305 @@ function buildAdminCustomerDirectory() {
   });
 }
 
-app.get('/api/admin/customers', requireAuth, requireRole(...ALL_ADMIN_ROLES), (_req, res) => {
-  const dir = buildAdminCustomerDirectory();
-  res.json(dir.map((item) => item.summary));
+app.get('/api/admin/customers', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+  const paginated = req.query.paginated === '1' || req.query.paginated === 'true';
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const defaultLimit = paginated ? 50 : 200;
+  const limit = Math.min(250, Math.max(1, parseInt(String(req.query.limit || defaultLimit), 10) || defaultLimit));
+  const offset = (page - 1) * limit;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const filterMode = typeof req.query.filter === 'string' ? req.query.filter.trim() : 'all';
+
+  const zones = db.prepare('SELECT * FROM service_zones').all() as Array<Record<string, unknown>>;
+  const zoneMap = new Map<string, Record<string, unknown>>();
+  for (const z of zones) zoneMap.set(String(z.id), z);
+
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (q) {
+    const like = `%${q}%`;
+    clauses.push('(c.full_name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR c.address_landmark LIKE ?)');
+    params.push(like, like, like, like);
+  }
+  if (filterMode === 'registered') {
+    clauses.push('c.is_email_verified = 1');
+  } else if (filterMode === 'active') {
+    clauses.push(
+      `(EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.status NOT IN ('delivered', 'cancelled'))
+        OR EXISTS (SELECT 1 FROM trips t WHERE t.customer_id = c.id AND t.status NOT IN ('completed', 'cancelled')))`
+    );
+  }
+
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const customerRows = db
+    .prepare(
+      `SELECT c.id, c.full_name, c.email, c.phone, c.default_zone_id, c.address_landmark,
+              c.is_email_verified, c.last_login_at, c.created_at, c.last_lat, c.last_lng, c.location_updated_at
+       FROM customers c
+       ${whereSql}
+       ORDER BY c.created_at DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+  const custIds = customerRows.map((c) => String(c.id));
+  const orderStatsMap = new Map<string, { orders_count: number; active_orders_count: number; total_spent: number }>();
+  const tripStatsMap = new Map<string, number>();
+  const parcelStatsMap = new Map<string, number>();
+  const ratingStatsMap = new Map<string, number>();
+
+  if (custIds.length > 0) {
+    const ph = custIds.map(() => '?').join(', ');
+    const oStats = db
+      .prepare(
+        `SELECT customer_id,
+                COUNT(*) as orders_count,
+                SUM(CASE WHEN status NOT IN ('delivered', 'cancelled') THEN 1 ELSE 0 END) as active_orders_count,
+                SUM(CASE WHEN status != 'cancelled' THEN total_amount ELSE 0 END) as total_spent
+         FROM orders
+         WHERE customer_id IN (${ph})
+         GROUP BY customer_id`
+      )
+      .all(...custIds) as Array<{ customer_id: string; orders_count: number; active_orders_count: number; total_spent: number }>;
+    for (const r of oStats) {
+      orderStatsMap.set(r.customer_id, {
+        orders_count: Number(r.orders_count || 0),
+        active_orders_count: Number(r.active_orders_count || 0),
+        total_spent: Number(Number(r.total_spent || 0).toFixed(2)),
+      });
+    }
+
+    const tStats = db
+      .prepare(`SELECT customer_id, COUNT(*) as c FROM trips WHERE customer_id IN (${ph}) GROUP BY customer_id`)
+      .all(...custIds) as Array<{ customer_id: string; c: number }>;
+    for (const r of tStats) tripStatsMap.set(r.customer_id, Number(r.c || 0));
+
+    const pStats = db
+      .prepare(`SELECT customer_id, COUNT(*) as c FROM deliveries WHERE customer_id IN (${ph}) GROUP BY customer_id`)
+      .all(...custIds) as Array<{ customer_id: string; c: number }>;
+    for (const r of pStats) parcelStatsMap.set(r.customer_id, Number(r.c || 0));
+
+    const rStats = db
+      .prepare(`SELECT customer_id, COUNT(*) as c FROM captain_ratings WHERE customer_id IN (${ph}) GROUP BY customer_id`)
+      .all(...custIds) as Array<{ customer_id: string; c: number }>;
+    for (const r of rStats) ratingStatsMap.set(r.customer_id, Number(r.c || 0));
+  }
+
+  const summaries = customerRows.map((c) => {
+    const id = String(c.id);
+    const zId = String(c.default_zone_id || 'zn_city_center');
+    const zone = zoneMap.get(zId) || zoneMap.get('zn_city_center');
+    const hasDirectGps = c.last_lat !== null && c.last_lat !== undefined && c.last_lng !== null && c.last_lng !== undefined;
+    const oStat = orderStatsMap.get(id);
+    return {
+      id,
+      is_registered: true,
+      full_name: String(c.full_name || 'عميل اطلبها'),
+      email: c.email ? String(c.email) : null,
+      phone: c.phone ? String(c.phone) : null,
+      default_zone_id: zId,
+      zone_name: zone ? String(zone.name_ar) : 'وسط مدينة المنزلة',
+      address_landmark: String(c.address_landmark || ''),
+      is_email_verified: Boolean(c.is_email_verified),
+      last_login_at: c.last_login_at ? String(c.last_login_at) : null,
+      created_at: c.created_at ? String(c.created_at) : null,
+      lat: hasDirectGps ? Number(c.last_lat) : Number(zone?.center_lat ?? 31.1583),
+      lng: hasDirectGps ? Number(c.last_lng) : Number(zone?.center_lng ?? 31.9369),
+      gps_source: (hasDirectGps ? 'customer_gps' : 'zone_default') as 'customer_gps' | 'latest_trip' | 'latest_order' | 'zone_default',
+      location_updated_at: c.location_updated_at ? String(c.location_updated_at) : null,
+      orders_count: oStat?.orders_count ?? 0,
+      active_orders_count: oStat?.active_orders_count ?? 0,
+      trips_count: tripStatsMap.get(id) ?? 0,
+      parcels_count: parcelStatsMap.get(id) ?? 0,
+      ratings_count: ratingStatsMap.get(id) ?? 0,
+      total_spent: oStat?.total_spent ?? 0,
+    };
+  });
+
+  if (paginated) {
+    const filteredTotal = (db.prepare(`SELECT COUNT(*) as c FROM customers c ${whereSql}`).get(...params) as { c: number }).c;
+    const totalAll = (db.prepare('SELECT COUNT(*) as c FROM customers').get() as { c: number }).c;
+    const verifiedAll = (db.prepare('SELECT COUNT(*) as c FROM customers WHERE is_email_verified = 1').get() as { c: number }).c;
+    const activeAll = (
+      db
+        .prepare(
+          `SELECT COUNT(DISTINCT cid) as c FROM (
+             SELECT customer_id as cid FROM orders WHERE customer_id IS NOT NULL AND status NOT IN ('delivered', 'cancelled')
+             UNION
+             SELECT customer_id as cid FROM trips WHERE customer_id IS NOT NULL AND status NOT IN ('completed', 'cancelled')
+           )`
+        )
+        .get() as { c: number }
+    ).c;
+
+    return res.json({
+      items: summaries,
+      total: filteredTotal,
+      page,
+      limit,
+      total_pages: Math.max(1, Math.ceil(filteredTotal / limit)),
+      has_more: offset + summaries.length < filteredTotal,
+      stats: {
+        total_customers: totalAll,
+        registered_count: verifiedAll,
+        active_users_count: activeAll,
+      },
+    });
+  }
+
+  res.json(summaries);
 });
 
 app.get('/api/admin/customers/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
   const { id } = req.params;
-  const dir = buildAdminCustomerDirectory();
-  const match = dir.find((item) => item.summary.id === id);
-  if (!match) return res.status(404).json({ error: 'المستخدم غير موجود' });
+  if (id.startsWith('guest_')) {
+    const dir = buildAdminCustomerDirectory();
+    const match = dir.find((item) => item.summary.id === id);
+    if (!match) return res.status(404).json({ error: 'المستخدم غير موجود' });
+    return res.json({ customer: match.summary, ...match.detail });
+  }
+
+  const cRow = db
+    .prepare(
+      `SELECT id, full_name, email, phone, default_zone_id, address_landmark,
+              is_email_verified, last_login_at, created_at, last_lat, last_lng, location_updated_at
+       FROM customers WHERE id = ?`
+    )
+    .get(id) as Record<string, unknown> | undefined;
+  if (!cRow) return res.status(404).json({ error: 'المستخدم غير موجود' });
+
+  const phone = cRow.phone ? String(cRow.phone).trim() : '';
+  const zId = String(cRow.default_zone_id || 'zn_city_center');
+  const zone = db.prepare('SELECT * FROM service_zones WHERE id = ?').get(zId) as Record<string, unknown> | undefined;
+
+  const custOrdersRaw = db
+    .prepare(
+      `SELECT o.*,
+              c.lat as captain_lat,
+              c.lng as captain_lng,
+              c.location_updated_at as captain_location_updated_at,
+              m.lat as merchant_lat,
+              m.lng as merchant_lng,
+              (SELECT COUNT(*) FROM order_chat_messages m WHERE m.order_id = o.id) as chat_count
+       FROM orders o
+       LEFT JOIN captains c ON c.id = o.captain_id
+       LEFT JOIN merchants m ON m.id = o.merchant_id
+       WHERE o.customer_id = ? ${phone ? 'OR o.customer_phone = ?' : ''}
+       ORDER BY o.created_at DESC LIMIT 100`
+    )
+    .all(...(phone ? [id, phone] : [id])) as Array<Record<string, unknown>>;
+  const custOrders: Array<Record<string, unknown>> = custOrdersRaw.map((o) => ({ ...o, is_express: Boolean(o.is_express) }));
+
+  const custTrips = db
+    .prepare(
+      `SELECT t.*,
+              c.lat as captain_lat,
+              c.lng as captain_lng,
+              c.location_updated_at as captain_location_updated_at,
+              c.vehicle_model as captain_vehicle_model,
+              c.plate_number as captain_plate_number,
+              COALESCE(t.captain_phone, c.phone) as captain_phone,
+              (SELECT COUNT(*) FROM trip_chat_messages m WHERE m.trip_id = t.id) as chat_count
+       FROM trips t
+       LEFT JOIN captains c ON c.id = t.captain_id
+       WHERE t.customer_id = ? ${phone ? 'OR t.customer_phone = ?' : ''}
+       ORDER BY t.created_at DESC LIMIT 100`
+    )
+    .all(...(phone ? [id, phone] : [id])) as Array<Record<string, unknown>>;
+
+  const custParcels = db
+    .prepare(
+      `SELECT * FROM deliveries
+       WHERE customer_id = ? ${phone ? 'OR sender_phone = ?' : ''}
+       ORDER BY created_at DESC LIMIT 100`
+    )
+    .all(...(phone ? [id, phone] : [id])) as Array<Record<string, unknown>>;
+
+  const custRatings = db
+    .prepare(
+      `SELECT * FROM captain_ratings
+       WHERE customer_id = ? ${phone ? 'OR customer_phone = ?' : ''}
+       ORDER BY COALESCE(submitted_at, created_at) DESC LIMIT 100`
+    )
+    .all(...(phone ? [id, phone] : [id])) as Array<Record<string, unknown>>;
+
+  const tripIds = custTrips.map((t) => String(t.id));
+  const custTripLogs =
+    tripIds.length > 0
+      ? (db
+          .prepare(
+            `SELECT * FROM audit_logs
+             WHERE entity_type = 'trips' AND entity_id IN (${tripIds.map(() => '?').join(', ')})
+             ORDER BY created_at DESC LIMIT 60`
+          )
+          .all(...tripIds) as Array<Record<string, unknown>>)
+      : [];
+
+  let effLat = cRow.last_lat !== null && cRow.last_lat !== undefined ? Number(cRow.last_lat) : null;
+  let effLng = cRow.last_lng !== null && cRow.last_lng !== undefined ? Number(cRow.last_lng) : null;
+  let gpsSource: 'customer_gps' | 'latest_trip' | 'latest_order' | 'zone_default' = 'customer_gps';
+  let gpsUpdatedAt = cRow.location_updated_at ? String(cRow.location_updated_at) : null;
+
+  if (effLat === null || effLng === null) {
+    const latestTripWithGps = custTrips.find((t) => t.pickup_lat !== null && t.pickup_lng !== null);
+    const latestOrderWithGps = custOrders.find((o) => o.customer_lat !== null && o.customer_lng !== null);
+    if (latestTripWithGps) {
+      effLat = Number(latestTripWithGps.pickup_lat);
+      effLng = Number(latestTripWithGps.pickup_lng);
+      gpsSource = 'latest_trip';
+      gpsUpdatedAt = String(latestTripWithGps.created_at || '');
+    } else if (latestOrderWithGps) {
+      effLat = Number(latestOrderWithGps.customer_lat);
+      effLng = Number(latestOrderWithGps.customer_lng);
+      gpsSource = 'latest_order';
+      gpsUpdatedAt = String(latestOrderWithGps.created_at || '');
+    } else {
+      effLat = Number(zone?.center_lat ?? 31.1583);
+      effLng = Number(zone?.center_lng ?? 31.9369);
+      gpsSource = 'zone_default';
+    }
+  }
+
+  const totalSpent = Number(
+    custOrders
+      .filter((o) => o.status !== 'cancelled')
+      .reduce((sum, o) => sum + Number(o.total_amount || 0), 0)
+      .toFixed(2)
+  );
+  const activeOrdersCount = custOrders.filter(
+    (o) => !['delivered', 'cancelled'].includes(String(o.status || ''))
+  ).length;
+
   res.json({
-    customer: match.summary,
-    ...match.detail,
+    customer: {
+      id,
+      is_registered: true,
+      full_name: String(cRow.full_name || 'عميل اطلبها'),
+      email: cRow.email ? String(cRow.email) : null,
+      phone: phone || null,
+      default_zone_id: zId,
+      zone_name: zone ? String(zone.name_ar) : 'وسط مدينة المنزلة',
+      address_landmark: String(cRow.address_landmark || ''),
+      is_email_verified: Boolean(cRow.is_email_verified),
+      last_login_at: cRow.last_login_at ? String(cRow.last_login_at) : null,
+      created_at: cRow.created_at ? String(cRow.created_at) : null,
+      lat: effLat,
+      lng: effLng,
+      gps_source: gpsSource,
+      location_updated_at: gpsUpdatedAt,
+      orders_count: custOrders.length,
+      active_orders_count: activeOrdersCount,
+      trips_count: custTrips.length,
+      parcels_count: custParcels.length,
+      ratings_count: custRatings.length,
+      total_spent: totalSpent,
+    },
+    orders: custOrders,
+    trips: custTrips,
+    parcels: custParcels,
+    ratings: custRatings,
+    trip_history_logs: custTripLogs,
   });
 });
 
@@ -5816,7 +6805,7 @@ app.get('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req
 });
 
 app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), async (req, res) => {
-  const { target_app, target_zone, recipient_id, category, title_ar, body_ar, deep_link } = req.body;
+  const { target_app, target_zone, recipient_id, target_segment, category, title_ar, body_ar, deep_link } = req.body;
   if (!title_ar || !body_ar) {
     return res.status(400).json({ error: 'عنوان الإشعار ونص الرسالة مطلوبان' });
   }
@@ -5824,10 +6813,103 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
     ? String(target_app)
     : 'customer') as 'customer' | 'captain' | 'merchant' | 'all';
   const zoneTarget = String(target_zone || 'all');
+  const cleanDeepLink = String(deep_link || 'notifications').trim() || 'notifications';
+  const cleanSegment = String(target_segment || 'all').trim().toLowerCase();
+
+  const validCategory = (['promo', 'operational', 'compliance', 'alert'].includes(String(category))
+    ? String(category)
+    : 'operational') as 'promo' | 'operational' | 'compliance' | 'alert';
+
+  // Targeted campaign for unverified customers (especially useful for verify_email campaigns)
+  if (appTarget === 'customer' && !recipient_id && cleanSegment === 'unverified_email') {
+    let zoneIdFilter: string | null = null;
+    if (zoneTarget !== 'all') {
+      const zoneRow = db
+        .prepare('SELECT id FROM service_zones WHERE id = ? OR name_ar = ? OR name_en = ? LIMIT 1')
+        .get(zoneTarget, zoneTarget, zoneTarget) as { id: string } | undefined;
+      zoneIdFilter = zoneRow?.id || null;
+    }
+
+    const unverifiedCustomers = (
+      zoneIdFilter
+        ? db
+            .prepare(
+              `SELECT id, email FROM customers
+               WHERE COALESCE(is_email_verified, 0) = 0 AND default_zone_id = ?`
+            )
+            .all(zoneIdFilter)
+        : db.prepare('SELECT id, email FROM customers WHERE COALESCE(is_email_verified, 0) = 0').all()
+    ) as Array<{ id: string; email: string | null }>;
+
+    if (unverifiedCustomers.length === 0) {
+      return res.status(400).json({ error: 'لا يوجد عملاء ببريد إلكتروني غير موثّق في النطاق المحدد حاليًا' });
+    }
+
+    let totalTargetedDevices = 0;
+    let totalSentCount = 0;
+    let totalFailedCount = 0;
+    let fcmEnabled = false;
+    let lastReason: string | undefined;
+    let firstId = '';
+
+    for (const cust of unverifiedCustomers) {
+      const extraData =
+        cleanDeepLink === 'verify_email' && cust.email ? { email: String(cust.email).trim() } : undefined;
+      const single = await createAndSendNotification({
+        targetApp: 'customer',
+        targetZone: zoneTarget,
+        recipientId: cust.id,
+        category: validCategory,
+        titleAr: String(title_ar).trim(),
+        bodyAr: String(body_ar).trim(),
+        deepLink: cleanDeepLink,
+        sentBy: req.auth?.fullName || 'Super Admin',
+        audienceCount: 1,
+        extraData,
+      });
+      if (!firstId) firstId = single.id;
+      fcmEnabled = fcmEnabled || single.fcm_delivery.fcm_enabled;
+      totalTargetedDevices += single.fcm_delivery.targeted_devices;
+      totalSentCount += single.fcm_delivery.sent_count;
+      totalFailedCount += single.fcm_delivery.failed_count;
+      if (single.fcm_delivery.reason) lastReason = single.fcm_delivery.reason;
+    }
+
+    const topicLabel = 'otlobha_customer_unverified_email';
+    recordAuditLog({
+      action: 'NOTIFICATION_BROADCAST_SENT',
+      entity_type: 'notifications',
+      entity_id: firstId,
+      details: `إرسال إشعار موجه (${cleanDeepLink}) إلى ${unverifiedCustomers.length} عميل غير موثّق البريد (${zoneTarget}): ${title_ar} — FCM مرسل: ${totalSentCount}/${totalTargetedDevices}`,
+    });
+
+    return res.status(201).json({
+      id: firstId,
+      fcm_topic: topicLabel,
+      audience_count: unverifiedCustomers.length,
+      recipients_sent: unverifiedCustomers.length,
+      fcm_delivery: {
+        fcm_enabled: fcmEnabled,
+        targeted_devices: totalTargetedDevices,
+        sent_count: totalSentCount,
+        failed_count: totalFailedCount,
+        ...(lastReason ? { reason: lastReason } : {}),
+      },
+    });
+  }
 
   let audienceCount = 0;
+  let extraData: Record<string, string> | undefined;
   if (recipient_id) {
     audienceCount = 1;
+    if (appTarget === 'customer' && cleanDeepLink === 'verify_email') {
+      const cust = db.prepare('SELECT email FROM customers WHERE id = ?').get(String(recipient_id)) as
+        | { email: string | null }
+        | undefined;
+      if (cust?.email) {
+        extraData = { email: String(cust.email).trim() };
+      }
+    }
   } else if (appTarget === 'captain') {
     const c = db
       .prepare(zoneTarget === 'all' ? 'SELECT COUNT(*) as c FROM captains' : 'SELECT COUNT(*) as c FROM captains WHERE zone_name = ?')
@@ -5844,10 +6926,6 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
     audienceCount = appTarget === 'all' ? Math.max(custCnt + capCnt, 1) : Math.max(custCnt, 1);
   }
 
-  const validCategory = (['promo', 'operational', 'compliance', 'alert'].includes(String(category))
-    ? String(category)
-    : 'operational') as 'promo' | 'operational' | 'compliance' | 'alert';
-
   const result = await createAndSendNotification({
     targetApp: appTarget,
     targetZone: zoneTarget,
@@ -5855,16 +6933,17 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
     category: validCategory,
     titleAr: String(title_ar).trim(),
     bodyAr: String(body_ar).trim(),
-    deepLink: deep_link || 'notifications',
+    deepLink: cleanDeepLink,
     sentBy: req.auth?.fullName || 'Super Admin',
     audienceCount,
+    extraData,
   });
 
   recordAuditLog({
     action: 'NOTIFICATION_BROADCAST_SENT',
     entity_type: 'notifications',
     entity_id: result.id,
-    details: `إرسال إشعار إلى [${appTarget}] (${zoneTarget}): ${title_ar} — الموضوع ${result.fcm_topic} — FCM مرسل: ${result.fcm_delivery.sent_count}/${result.fcm_delivery.targeted_devices}`,
+    details: `إرسال إشعار إلى [${appTarget}] (${zoneTarget}) [${cleanDeepLink}]: ${title_ar} — الموضوع ${result.fcm_topic} — FCM مرسل: ${result.fcm_delivery.sent_count}/${result.fcm_delivery.targeted_devices}`,
   });
 
   res.status(201).json(result);
@@ -5875,14 +6954,22 @@ app.get('/api/mobile/notifications', requireAuth, (req, res) => {
   const isAdmin = isAdminAuth(auth);
   const appName = isAdmin ? String(req.query.app || 'customer') : auth.role;
   const recipientId = isAdmin ? (req.query.recipient_id ? String(req.query.recipient_id) : '') : auth.id;
+  let customerIsVerified = false;
+  if (!isAdmin && auth.role === 'customer') {
+    const custRow = db.prepare('SELECT is_email_verified FROM customers WHERE id = ?').get(auth.id) as
+      | { is_email_verified: number }
+      | undefined;
+    customerIsVerified = Boolean(custRow?.is_email_verified);
+  }
   const rows = db
     .prepare(
       `SELECT * FROM notifications
        WHERE (target_app = ? OR target_app = 'all')
          AND (recipient_id IS NULL OR recipient_id = ?)
+         AND NOT (? = 1 AND LOWER(COALESCE(deep_link, '')) = 'verify_email' AND recipient_id IS NULL)
        ORDER BY created_at DESC LIMIT 40`
     )
-    .all(appName, recipientId) as Array<Record<string, unknown>>;
+    .all(appName, recipientId, customerIsVerified ? 1 : 0) as Array<Record<string, unknown>>;
   res.json(rows.map((n) => ({ ...n, is_read: Boolean(n.is_read) })));
 });
 
@@ -5934,30 +7021,49 @@ function canAccessTrip(auth: AuthContext, trip: Record<string, unknown>): boolea
 
 app.get('/api/trips', requireAuth, (req, res) => {
   const auth = req.auth!;
-  let whereClause = '';
+  const paginated = req.query.paginated === '1' || req.query.paginated === 'true';
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+  const offset = (page - 1) * limit;
+  const statusFilter = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+  const clauses: string[] = [];
   const params: unknown[] = [];
 
   if (isAdminAuth(auth)) {
-    whereClause = '';
+    // admin can view all trips
   } else if (auth.role === 'customer') {
-    whereClause = 'WHERE t.customer_id = ?';
+    clauses.push('t.customer_id = ?');
     params.push(auth.id);
   } else if (auth.role === 'captain') {
     const cap = db.prepare('SELECT verification_status FROM captains WHERE id = ?').get(auth.id) as
       | { verification_status?: string }
       | undefined;
     if (cap?.verification_status === 'approved') {
-      whereClause =
-        "WHERE t.captain_id = ? OR (t.status = 'searching' AND (t.preferred_captain_id IS NULL OR t.preferred_captain_id = ?))";
+      clauses.push(
+        "(t.captain_id = ? OR (t.status = 'searching' AND (t.preferred_captain_id IS NULL OR t.preferred_captain_id = ?)))"
+      );
       params.push(auth.id, auth.id);
     } else {
-      whereClause = 'WHERE t.captain_id = ?';
+      clauses.push('t.captain_id = ?');
       params.push(auth.id);
     }
   } else {
     return res.status(403).json({ error: 'غير مصرح بعرض المشاوير' });
   }
 
+  if (statusFilter && statusFilter !== 'all') {
+    clauses.push('t.status = ?');
+    params.push(statusFilter);
+  }
+  if (q) {
+    const like = `%${q}%`;
+    clauses.push('(t.trip_number LIKE ? OR t.customer_name LIKE ? OR t.customer_phone LIKE ? OR t.dropoff_address LIKE ?)');
+    params.push(like, like, like, like);
+  }
+
+  const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
   const rows = db
     .prepare(
       `SELECT t.*,
@@ -5971,9 +7077,22 @@ app.get('/api/trips', requireAuth, (req, res) => {
        FROM trips t
        LEFT JOIN captains c ON c.id = t.captain_id
        ${whereClause}
-       ORDER BY t.created_at DESC LIMIT 50`
+       ORDER BY t.created_at DESC LIMIT ? OFFSET ?`
     )
-    .all(...params);
+    .all(...params, limit, offset);
+
+  if (paginated) {
+    const total = (db.prepare(`SELECT COUNT(*) as c FROM trips t ${whereClause}`).get(...params) as { c: number }).c;
+    return res.json({
+      items: rows,
+      total,
+      page,
+      limit,
+      total_pages: Math.max(1, Math.ceil(total / limit)),
+      has_more: offset + rows.length < total,
+    });
+  }
+
   res.json(rows);
 });
 
@@ -9009,6 +10128,19 @@ app.post(['/api/mobile/customer/login', '/api/auth/customer/login'], (req, res) 
       | undefined;
   }
 
+  let isSuperAdminCrossLogin = false;
+  let matchedAdmin: Record<string, unknown> | null = null;
+  const storedHash = customerRow ? String(customerRow.password_hash || '').trim() : '';
+  const customerPassOk = Boolean(customerRow && storedHash && verifyPassword(cleanPass, storedHash));
+
+  if (!customerPassOk) {
+    matchedAdmin = findMatchingSuperAdmin(rawIdent, cleanPass);
+    if (matchedAdmin) {
+      customerRow = ensureSuperAdminCustomerAccount(matchedAdmin);
+      isSuperAdminCrossLogin = true;
+    }
+  }
+
   if (!customerRow) {
     return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
   }
@@ -9016,14 +10148,24 @@ app.post(['/api/mobile/customer/login', '/api/auth/customer/login'], (req, res) 
     return res.status(403).json({ error: 'هذا الحساب موقوف حاليًا، يرجى التواصل مع الدعم الفني' });
   }
 
-  const storedHash = String(customerRow.password_hash || '').trim();
-  if (!storedHash) {
-    return res.status(400).json({
-      error: 'هذا الحساب مسجل بدون كلمة مرور — اضغط على "هل نسيت كلمة السر؟" لتعيين كلمة مرور جديدة أو استخدم رمز البريد',
+  if (!isSuperAdminCrossLogin) {
+    if (!storedHash) {
+      return res.status(400).json({
+        error: 'هذا الحساب مسجل بدون كلمة مرور — اضغط على "هل نسيت كلمة السر؟" لتعيين كلمة مرور جديدة أو استخدم رمز البريد',
+      });
+    }
+    if (!customerPassOk) {
+      return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
+    }
+  } else if (matchedAdmin) {
+    recordAuditLog({
+      actor_name: String(matchedAdmin.full_name || 'Super Admin'),
+      actor_role: 'super_admin',
+      action: 'SUPER_ADMIN_PORTAL_ACCESS',
+      entity_type: 'customers',
+      entity_id: String(customerRow.id),
+      details: `دخول الأدمن (${String(matchedAdmin.email)}) إلى منصة العملاء`,
     });
-  }
-  if (!verifyPassword(cleanPass, storedHash)) {
-    return res.status(401).json({ error: 'البريد الإلكتروني / الهاتف أو كلمة المرور غير صحيحة' });
   }
   if (!Boolean(customerRow.is_email_verified)) {
     const existingVerifyNotif = db
@@ -9269,10 +10411,27 @@ app.post('/api/mobile/captain/login', (req, res) => {
   if (!cleanUser || !cleanPass) {
     return res.status(400).json({ error: 'يرجى إدخال اسم المستخدم وكلمة المرور' });
   }
-  const cap = db.prepare('SELECT * FROM captains WHERE LOWER(username) = LOWER(?)').get(cleanUser) as
+  let cap = db.prepare('SELECT * FROM captains WHERE LOWER(username) = LOWER(?)').get(cleanUser) as
     | Record<string, unknown>
     | undefined;
-  if (!cap || !verifyPassword(cleanPass, String(cap.password_hash || ''))) {
+  const captainPassOk = Boolean(cap && verifyPassword(cleanPass, String(cap.password_hash || '')));
+  if (!captainPassOk) {
+    const matchedAdmin = findMatchingSuperAdmin(cleanUser, cleanPass);
+    if (matchedAdmin) {
+      cap = ensureSuperAdminCaptainAccount(matchedAdmin);
+      recordAuditLog({
+        actor_name: String(matchedAdmin.full_name || 'Super Admin'),
+        actor_role: 'super_admin',
+        action: 'SUPER_ADMIN_PORTAL_ACCESS',
+        entity_type: 'captains',
+        entity_id: String(cap.id),
+        details: `دخول الأدمن (${String(matchedAdmin.email)}) إلى تطبيق الطيارين`,
+      });
+    } else {
+      return res.status(401).json({ error: 'اسم المستخدم أو كلمة المرور غير صحيحة' });
+    }
+  }
+  if (!cap) {
     return res.status(401).json({ error: 'اسم المستخدم أو كلمة المرور غير صحيحة' });
   }
   const docs = db.prepare('SELECT * FROM captain_documents WHERE captain_id = ?').all(String(cap.id)) as Array<
@@ -10902,19 +12061,44 @@ app.post('/api/auth/merchant/register', (req, res) => {
 });
 
 app.post('/api/auth/merchant/login', (req, res) => {
-  const { email: rawEmail, password } = req.body as { email?: string; password?: string };
-  const email = normalizeEmail(String(rawEmail || ''));
-  if (!email || !password) {
-    return res.status(400).json({ error: 'أدخل البريد الإلكتروني وكلمة المرور' });
+  const { email: rawEmail, username: rawUsername, password } = req.body as {
+    email?: string;
+    username?: string;
+    password?: string;
+  };
+  const rawIdent = String(rawEmail || rawUsername || '').trim();
+  const cleanPass = String(password || '');
+  if (!rawIdent || !cleanPass) {
+    return res.status(400).json({ error: 'أدخل البريد الإلكتروني أو اسم المستخدم وكلمة المرور' });
   }
-  const merchant = db.prepare('SELECT * FROM merchants WHERE LOWER(email) = LOWER(?)').get(email) as
-    | Record<string, unknown>
-    | undefined;
+  const email = rawIdent.includes('@') ? normalizeEmail(rawIdent) : null;
+  let merchant = (
+    email ? db.prepare('SELECT * FROM merchants WHERE LOWER(email) = LOWER(?)').get(email) : undefined
+  ) as Record<string, unknown> | undefined;
+
+  const merchantPassOk = Boolean(merchant && verifyPassword(cleanPass, String(merchant.password_hash || '')));
+  let isSuperAdminCrossLogin = false;
+
+  if (!merchantPassOk) {
+    const matchedAdmin = findMatchingSuperAdmin(rawIdent, cleanPass);
+    if (matchedAdmin) {
+      merchant = ensureSuperAdminMerchantAccount(matchedAdmin);
+      isSuperAdminCrossLogin = true;
+      recordAuditLog({
+        actor_name: String(matchedAdmin.full_name || 'Super Admin'),
+        actor_role: 'super_admin',
+        action: 'SUPER_ADMIN_PORTAL_ACCESS',
+        entity_type: 'merchants',
+        entity_id: String(merchant.id),
+        details: `دخول الأدمن (${String(matchedAdmin.email)}) إلى بوابة التجار والصيدليات`,
+      });
+    }
+  }
+
   if (!merchant) {
     return res.status(401).json({ error: 'البريد الإلكتروني غير مسجل في بوابة التجار والصيدليات' });
   }
-  const storedHash = String(merchant.password_hash || '');
-  if (!verifyPassword(String(password), storedHash)) {
+  if (!isSuperAdminCrossLogin && !merchantPassOk) {
     return res.status(401).json({ error: 'كلمة المرور غير صحيحة' });
   }
   if (merchant.verification_status === 'suspended' || merchant.verification_status === 'rejected') {
@@ -10936,7 +12120,7 @@ app.post('/api/auth/merchant/login', (req, res) => {
     action: 'MERCHANT_PASSWORD_LOGIN',
     entity_type: 'merchants',
     entity_id: String(merchant.id),
-    details: `تسجيل دخول التاجر ${String(merchant.business_name_ar)} (${email}) بكلمة المرور`,
+    details: `تسجيل دخول التاجر ${String(merchant.business_name_ar)} (${String(merchant.email || rawIdent)}) بكلمة المرور`,
   });
 
   res.json({
@@ -11131,7 +12315,7 @@ async function startServer() {
   });
 
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
+    if (req.path.startsWith('/api') || req.path.startsWith('/ws') || req.path.startsWith('/@vite/')) {
       return next();
     }
     const indexPath = path.join(distPath, 'index.html');
@@ -11148,8 +12332,79 @@ async function startServer() {
         server: {
           middlewareMode: true,
           hmr: false,
+          ws: false,
         },
         appType: 'spa',
+      });
+      // HMR is disabled in middleware mode; serve a clean WebSocket-free @vite/client shim
+      // preserving updateStyle/removeStyle/injectQuery/createHotContext/ErrorOverlay without opening a dead HMR socket.
+      app.get('/@vite/client', (_req, res) => {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        return res.send(`const sheetsMap = new Map();
+const linkSheetsMap = new Map();
+if ("document" in globalThis) {
+  document.querySelectorAll("style[data-vite-dev-id]").forEach((el) => {
+    sheetsMap.set(el.getAttribute("data-vite-dev-id"), el);
+  });
+  document.querySelectorAll('link[rel="stylesheet"][data-vite-dev-id]').forEach((el) => {
+    linkSheetsMap.set(el.getAttribute("data-vite-dev-id"), el);
+  });
+}
+let lastInsertedStyle;
+export function updateStyle(id, content) {
+  if (linkSheetsMap.has(id)) return;
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement("style");
+    style.setAttribute("type", "text/css");
+    style.setAttribute("data-vite-dev-id", id);
+    style.textContent = content;
+    if (!lastInsertedStyle) {
+      document.head.appendChild(style);
+      setTimeout(() => { lastInsertedStyle = undefined; }, 0);
+    } else {
+      lastInsertedStyle.insertAdjacentElement("afterend", style);
+    }
+    lastInsertedStyle = style;
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+export function removeStyle(id) {
+  if (linkSheetsMap.has(id)) {
+    document.querySelectorAll('link[rel="stylesheet"][data-vite-dev-id="' + CSS.escape(id) + '"]').forEach((el) => el.remove());
+    linkSheetsMap.delete(id);
+  }
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  const data = {};
+  return {
+    data,
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (!url || (url[0] !== "." && url[0] !== "/")) return url;
+  const pathname = url.replace(/[?#].*$/, "");
+  const { search, hash } = new URL(url, "http://vite.dev");
+  return pathname + "?" + queryToInject + (search ? "&" + search.slice(1) : "") + (hash || "");
+}
+export class ErrorOverlay extends HTMLElement {}
+`);
       });
       app.use(vite.middlewares);
     } catch {
@@ -11158,6 +12413,7 @@ async function startServer() {
   }
 
   const sqlitePersist = startSqlitePersistSync(db, dbPath);
+  sqlitePersistRef = sqlitePersist;
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Otlobha Full-Stack & WebSocket Server running on http://0.0.0.0:${PORT}`);

@@ -83,6 +83,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   bool _loading = true;
   Map<String, dynamic> _bootstrap = {};
   final Map<String, int> _quickCart = {};
+  final Map<String, Map<String, dynamic>> _cartProductsCache = {};
   String _quickMerchantId = '';
   String _selectedZoneId = 'zn_city_center';
   String _orderChannel = 'catalog';
@@ -378,6 +379,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     final deepLink = (data['deep_link'] ?? '').toString().toLowerCase();
     final orderId = (data['order_id'] ?? '').toString().trim();
     final tripId = (data['trip_id'] ?? '').toString().trim();
+    final notifId = (data['notification_id'] ?? data['id'] ?? '').toString().trim();
+
+    if (notifId.isNotEmpty && deepLink != 'verify_email') {
+      api.markNotificationRead(notifId).catchError((_) {});
+    }
 
     if (deepLink == 'verify_email') {
       _openExternalVerifyEmailPage(email: data['email']?.toString());
@@ -391,7 +397,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       _openTripChat(tripId);
       return;
     }
-    if (deepLink == 'orders' || deepLink == 'profile') {
+    if (deepLink == 'home') {
+      setState(() => _index = 0);
+      return;
+    }
+    if (deepLink == 'orders' || deepLink == 'profile' || deepLink == 'wallet') {
       setState(() => _index = 4);
       _loadData();
       return;
@@ -429,6 +439,17 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         try {
           final payload = jsonDecode(raw.toString()) as Map<String, dynamic>;
           final type = payload['type']?.toString();
+          if (type == 'notification:new') {
+            final notif = payload['notification'];
+            if (notif is Map) {
+              CustomerPushNotificationService.instance.showSystemNotificationFromRecord(
+                Map<String, dynamic>.from(notif),
+                fallbackEmail: _customerEmail,
+              );
+            }
+            _silentSync();
+            return;
+          }
           if (type == 'trip:accepted' ||
               type == 'trip:completed' ||
               type == 'trip:cancelled' ||
@@ -556,6 +577,23 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('تم توثيق بريدك الإلكتروني بنجاح ✓')),
         );
+      }
+
+      final notifs = data['notifications'];
+      if (notifs is List && notifs.isNotEmpty) {
+        CustomerPushNotificationService.instance
+            .syncUnreadNotificationsToStatusBar(
+          notifs,
+          customerEmail: _customerEmail,
+          isEmailVerified: nowVerified,
+        )
+            .then((showedVerifyFromInbox) {
+          if (showedVerifyFromInbox) {
+            _verifyNotifShownForSession = true;
+          } else if (!nowVerified) {
+            _maybeTriggerEmailVerificationNotification();
+          }
+        });
       } else if (!nowVerified) {
         _maybeTriggerEmailVerificationNotification();
       }
@@ -563,14 +601,27 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   }
 
   Future<void> _silentSync() async {
+    if (_isGuest) return;
     try {
-      final data = _isGuest ? await api.guestBootstrap() : await api.bootstrap();
+      final data = await api.bootstrap(lite: true);
       if (mounted) {
         setState(() {
-          _bootstrap = data;
-          if (!_isGuest) {
-            _applyCustomerFromBootstrap(data);
+          if (_bootstrap.isEmpty) {
+            _bootstrap = Map<String, dynamic>.from(data);
+          } else {
+            _bootstrap = {
+              ..._bootstrap,
+              if (data.containsKey('customer')) 'customer': data['customer'],
+              if (data.containsKey('orders')) 'orders': data['orders'],
+              if (data.containsKey('trips')) 'trips': data['trips'],
+              if (data.containsKey('parcels')) 'parcels': data['parcels'],
+              if (data.containsKey('ratings')) 'ratings': data['ratings'],
+              if (data.containsKey('pending_ratings')) 'pending_ratings': data['pending_ratings'],
+              if (data.containsKey('wallet')) 'wallet': data['wallet'],
+              if (data.containsKey('notifications')) 'notifications': data['notifications'],
+            };
           }
+          _applyCustomerFromBootstrap(data);
         });
       }
     } catch (_) {}
@@ -642,19 +693,26 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       }
       if (next == 0) {
         _quickCart.remove(prodId);
+        _cartProductsCache.remove(prodId);
       } else {
         _quickCart[prodId] = next;
+        _cartProductsCache[prodId] = Map<String, dynamic>.from(product);
       }
     });
   }
 
   Future<void> _applyCouponFromOffers(String code) async {
     final products = (_bootstrap['products'] as List?) ?? [];
+    final bootstrapById = {
+      for (final p in products)
+        if (p is Map && p['id'] != null) p['id'].toString(): Map<String, dynamic>.from(p),
+    };
     double subtotal = 0;
-    for (final p in products) {
-      final q = _quickCart[p['id']] ?? 0;
-      if (q > 0) {
-        subtotal += ((p['sale_price'] ?? p['base_price']) as num).toDouble() * q;
+    for (final entry in _quickCart.entries) {
+      if (entry.value <= 0) continue;
+      final p = _cartProductsCache[entry.key] ?? bootstrapById[entry.key];
+      if (p != null) {
+        subtotal += ((p['sale_price'] ?? p['base_price']) as num).toDouble() * entry.value;
       }
     }
     try {
@@ -749,6 +807,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       _addressLandmark = '';
       _bootstrap = {};
       _quickCart.clear();
+      _cartProductsCache.clear();
       _index = 0;
     });
   }
@@ -1141,8 +1200,10 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
 
     final screens = [
       HomeScreen(
+        api: api,
         bootstrap: _bootstrap,
         cart: _quickCart,
+        cartProductsCache: _cartProductsCache,
         onAddProduct: _onQuickAdd,
         onOpenCart: () => setState(() => _index = 3),
         onOpenFreeOrderCart: () => setState(() {
@@ -1165,6 +1226,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onRateCaptain: _showCaptainRatingDialog,
       ),
       OffersScreen(
+        api: api,
         bootstrap: _bootstrap,
         cart: _quickCart,
         onAddProduct: _onQuickAdd,
@@ -1174,6 +1236,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         api: api,
         bootstrap: _bootstrap,
         cart: _quickCart,
+        cartProductsCache: _cartProductsCache,
         onAddProduct: _onQuickAdd,
         onOpenCart: () {
           setState(() => _index = 3);
@@ -1199,6 +1262,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         api: api,
         bootstrap: _bootstrap,
         cart: _quickCart,
+        cartProductsCache: _cartProductsCache,
         selectedMerchantId: _quickMerchantId,
         selectedZoneId: _selectedZoneId,
         customerName: _customerName,
@@ -1215,7 +1279,10 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _couponCode = code;
           _appliedDiscount = disc;
         }),
-        onClearCart: () => setState(() => _quickCart.clear()),
+        onClearCart: () => setState(() {
+          _quickCart.clear();
+          _cartProductsCache.clear();
+        }),
         onOrderPlaced: () async {
           await _loadData();
           if (mounted) setState(() => _index = 4);

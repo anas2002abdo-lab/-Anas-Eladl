@@ -17,9 +17,37 @@ const requestedJournalMode = String(process.env.OTLOBHA_SQLITE_JOURNAL_MODE || '
 const allowedJournalModes = new Set(['WAL', 'DELETE', 'TRUNCATE', 'PERSIST', 'MEMORY']);
 const safeJournalMode = allowedJournalModes.has(requestedJournalMode) ? requestedJournalMode : 'WAL';
 db.pragma(`journal_mode = ${safeJournalMode}`);
-db.pragma('synchronous = FULL');
-db.pragma('busy_timeout = 10000');
+db.pragma(safeJournalMode === 'WAL' ? 'synchronous = NORMAL' : 'synchronous = FULL');
+db.pragma('busy_timeout = 15000');
 db.pragma('foreign_keys = ON');
+db.pragma('cache_size = -65536'); // 64 MB page cache for 500K+ rows
+db.pragma('temp_store = MEMORY');
+db.pragma('mmap_size = 268435456'); // 256 MB memory-mapped I/O
+if (safeJournalMode === 'WAL') {
+  db.pragma('wal_autocheckpoint = 1000');
+}
+
+let productsFtsEnabled = false;
+
+export function isProductsFtsReady(): boolean {
+  return productsFtsEnabled;
+}
+
+export function buildFtsMatchQuery(rawQuery: string): string | null {
+  const cleaned = rawQuery
+    .trim()
+    .replace(/["'`*():^~+-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  const tokens = cleaned
+    .split(' ')
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 1)
+    .slice(0, 8);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"*`).join(' AND ');
+}
 
 export function uid(prefix = 'id'): string {
   return `${prefix}_${crypto.randomUUID().slice(0, 12)}`;
@@ -978,7 +1006,387 @@ export function initDatabase(): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_email_action_tokens_email_type ON email_action_tokens(email, action_type);
+
+    -- High-scale composite indexes designed for 500,000+ products, customers, orders & rides
+    CREATE INDEX IF NOT EXISTS idx_products_merchant_avail_updated ON products(merchant_id, is_available, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_products_merchant_cat_avail ON products(merchant_id, category_id, is_available, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_products_avail_offer_updated ON products(is_available, is_offer, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_products_cat_avail ON products(category_id, is_available);
+    CREATE INDEX IF NOT EXISTS idx_products_updated_desc ON products(updated_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_categories_merchant_active_sort ON categories(merchant_id, is_active, is_offers_section DESC, sort_order ASC);
+    CREATE INDEX IF NOT EXISTS idx_categories_scope_active ON categories(scope, is_active);
+
+    CREATE INDEX IF NOT EXISTS idx_merchants_verification ON merchants(verification_status, merchant_type);
+    CREATE INDEX IF NOT EXISTS idx_merchants_email_lower ON merchants(LOWER(email));
+
+    CREATE INDEX IF NOT EXISTS idx_customers_created_desc ON customers(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+    CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(full_name);
+    CREATE INDEX IF NOT EXISTS idx_customers_verified_status ON customers(is_email_verified, status);
+
+    CREATE INDEX IF NOT EXISTS idx_orders_created_desc ON orders(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_merchant_created ON orders(merchant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_captain_created ON orders(captain_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_customer_created ON orders(customer_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_customer_phone ON orders(customer_phone);
+    CREATE INDEX IF NOT EXISTS idx_orders_group_id ON orders(order_group_id);
+    CREATE INDEX IF NOT EXISTS idx_order_stores_order_id ON order_stores(order_id);
+    CREATE INDEX IF NOT EXISTS idx_order_stores_merchant_id ON order_stores(merchant_id);
+
+    CREATE INDEX IF NOT EXISTS idx_trips_created_desc ON trips(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trips_status_created ON trips(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trips_captain_status ON trips(captain_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trips_customer_created ON trips(customer_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trips_customer_phone ON trips(customer_phone);
+
+    CREATE INDEX IF NOT EXISTS idx_deliveries_created_desc ON deliveries(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_deliveries_customer_created ON deliveries(customer_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_deliveries_sender_phone ON deliveries(sender_phone);
+    CREATE INDEX IF NOT EXISTS idx_deliveries_captain_status ON deliveries(captain_id, status);
+
+    CREATE INDEX IF NOT EXISTS idx_notifications_app_rec_created ON notifications(target_app, recipient_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notifications_created_desc ON notifications(created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_order_chat_order_created ON order_chat_messages(order_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_trip_chat_trip_created ON trip_chat_messages(trip_id, created_at ASC);
+
+    CREATE INDEX IF NOT EXISTS idx_captains_verif_avail ON captains(verification_status, availability_status);
+    CREATE INDEX IF NOT EXISTS idx_captain_ratings_captain ON captain_ratings(captain_id, status);
+    CREATE INDEX IF NOT EXISTS idx_captain_ratings_phone ON captain_ratings(customer_phone);
+
+    CREATE INDEX IF NOT EXISTS idx_market_mod_created ON market_listings(moderation_status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_market_seller ON market_listings(seller_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_wallets_owner_type ON wallets(owner_type, available_balance DESC);
+    CREATE INDEX IF NOT EXISTS idx_ledger_created_desc ON ledger_entries(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_entries(reference_type, reference_id);
+    CREATE INDEX IF NOT EXISTS idx_settlements_created_desc ON settlements(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_created_desc ON audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id, role);
+    CREATE INDEX IF NOT EXISTS idx_push_tokens_role_active ON push_device_tokens(user_role, is_active, user_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_invoices_captain_created ON pos_invoices(captain_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_support_tickets_cust_created ON support_tickets(customer_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_support_messages_ticket_created ON support_messages(ticket_id, created_at ASC);
   `);
+
+  // Full-Text Search (FTS5) virtual table & sync triggers for instant <5ms search across 500,000+ products
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(
+        product_id UNINDEXED,
+        name_ar,
+        name_en,
+        product_code,
+        description,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS trg_products_fts_ai AFTER INSERT ON products BEGIN
+        INSERT INTO products_fts(product_id, name_ar, name_en, product_code, description)
+        VALUES (NEW.id, COALESCE(NEW.name_ar, ''), COALESCE(NEW.name_en, ''), COALESCE(NEW.product_code, ''), COALESCE(NEW.description, ''));
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_products_fts_ad AFTER DELETE ON products BEGIN
+        DELETE FROM products_fts WHERE product_id = OLD.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_products_fts_au AFTER UPDATE OF name_ar, name_en, product_code, description ON products BEGIN
+        DELETE FROM products_fts WHERE product_id = OLD.id;
+        INSERT INTO products_fts(product_id, name_ar, name_en, product_code, description)
+        VALUES (NEW.id, COALESCE(NEW.name_ar, ''), COALESCE(NEW.name_en, ''), COALESCE(NEW.product_code, ''), COALESCE(NEW.description, ''));
+      END;
+    `);
+
+    const prodCount = (db.prepare('SELECT COUNT(*) as c FROM products').get() as { c: number }).c;
+    const ftsCount = (db.prepare('SELECT COUNT(*) as c FROM products_fts').get() as { c: number }).c;
+    if (prodCount > 0 && ftsCount !== prodCount) {
+      const rebuildTx = db.transaction(() => {
+        db.exec('DELETE FROM products_fts');
+        db.exec(`
+          INSERT INTO products_fts(product_id, name_ar, name_en, product_code, description)
+          SELECT id, COALESCE(name_ar, ''), COALESCE(name_en, ''), COALESCE(product_code, ''), COALESCE(description, '')
+          FROM products
+        `);
+      });
+      rebuildTx();
+    }
+    productsFtsEnabled = true;
+  } catch (ftsErr) {
+    productsFtsEnabled = false;
+    console.warn('[DB] FTS5 not available; falling back to indexed LIKE search:', (ftsErr as Error).message);
+  }
+
+  // =========================================================================
+  // Master Product Catalog, Multi-Store Matching, Deals & Storefront Banners
+  // =========================================================================
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS master_products (
+      id TEXT PRIMARY KEY,
+      canonical_name_ar TEXT NOT NULL,
+      canonical_name_en TEXT NOT NULL DEFAULT '',
+      trade_name TEXT NOT NULL DEFAULT '',
+      brand TEXT NOT NULL DEFAULT '',
+      category_id TEXT REFERENCES categories(id),
+      barcode TEXT,
+      size_value REAL,
+      size_unit TEXT NOT NULL DEFAULT '',
+      size_label TEXT NOT NULL DEFAULT '',
+      image_url TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      usage_notes TEXT NOT NULL DEFAULT '',
+      ingredients TEXT NOT NULL DEFAULT '',
+      approval_status TEXT NOT NULL DEFAULT 'approved',
+      merged_into_id TEXT,
+      normalized_key TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT 'system',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS product_attributes (
+      id TEXT PRIMARY KEY,
+      master_product_id TEXT NOT NULL REFERENCES master_products(id) ON DELETE CASCADE,
+      attr_key TEXT NOT NULL,
+      attr_value TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS product_images (
+      id TEXT PRIMARY KEY,
+      master_product_id TEXT NOT NULL REFERENCES master_products(id) ON DELETE CASCADE,
+      image_url TEXT NOT NULL,
+      is_primary INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS product_matching_requests (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+      requested_by TEXT NOT NULL DEFAULT '',
+      product_name_ar TEXT NOT NULL,
+      product_name_en TEXT NOT NULL DEFAULT '',
+      brand TEXT NOT NULL DEFAULT '',
+      category_id TEXT REFERENCES categories(id),
+      barcode TEXT,
+      size_value REAL,
+      size_unit TEXT NOT NULL DEFAULT '',
+      size_label TEXT NOT NULL DEFAULT '',
+      image_url TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      proposed_price REAL NOT NULL DEFAULT 0,
+      proposed_sale_price REAL,
+      proposed_stock INTEGER NOT NULL DEFAULT 10,
+      merchant_sku TEXT NOT NULL DEFAULT '',
+      suggested_master_id TEXT,
+      match_confidence TEXT NOT NULL DEFAULT 'none',
+      status TEXT NOT NULL DEFAULT 'pending',
+      admin_note TEXT NOT NULL DEFAULT '',
+      reviewed_by TEXT,
+      reviewed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS product_deals (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT REFERENCES merchants(id) ON DELETE CASCADE,
+      product_id TEXT REFERENCES products(id) ON DELETE CASCADE,
+      master_product_id TEXT REFERENCES master_products(id) ON DELETE SET NULL,
+      deal_type TEXT NOT NULL DEFAULT 'bundle_discount',
+      title_ar TEXT NOT NULL,
+      subtitle_ar TEXT NOT NULL DEFAULT '',
+      required_qty INTEGER NOT NULL DEFAULT 1,
+      free_qty INTEGER NOT NULL DEFAULT 0,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      discount_percent REAL NOT NULL DEFAULT 0,
+      gift_product_ids_json TEXT NOT NULL DEFAULT '[]',
+      bundle_product_ids_json TEXT NOT NULL DEFAULT '[]',
+      min_amount REAL NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      starts_at TEXT,
+      ends_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_merge_audit (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      source_master_id TEXT,
+      target_master_id TEXT,
+      listing_id TEXT,
+      actor_name TEXT NOT NULL DEFAULT 'المدير العام',
+      reason TEXT NOT NULL DEFAULT '',
+      details_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS storefront_banners (
+      id TEXT PRIMARY KEY,
+      title_ar TEXT NOT NULL,
+      subtitle_ar TEXT NOT NULL DEFAULT '',
+      badge_ar TEXT NOT NULL DEFAULT '',
+      banner_type TEXT NOT NULL DEFAULT 'hero',
+      image_url TEXT NOT NULL DEFAULT '',
+      cta_label TEXT NOT NULL DEFAULT 'تسوّق الآن',
+      target_filter TEXT NOT NULL DEFAULT 'offers',
+      target_category_id TEXT,
+      target_merchant_id TEXT,
+      accent_color TEXT NOT NULL DEFAULT '#A92224',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Non-destructive columns on products for Master Catalog linking & store listing independence
+  const prodMasterCols = db.prepare("PRAGMA table_info('products')").all() as Array<{ name: string }>;
+  const prodAlterDefs: Array<[string, string]> = [
+    ['master_product_id', 'ALTER TABLE products ADD COLUMN master_product_id TEXT'],
+    ['brand', "ALTER TABLE products ADD COLUMN brand TEXT NOT NULL DEFAULT ''"],
+    ['size_label', "ALTER TABLE products ADD COLUMN size_label TEXT NOT NULL DEFAULT ''"],
+    ['size_value', 'ALTER TABLE products ADD COLUMN size_value REAL'],
+    ['size_unit', "ALTER TABLE products ADD COLUMN size_unit TEXT NOT NULL DEFAULT ''"],
+    ['barcode', 'ALTER TABLE products ADD COLUMN barcode TEXT'],
+    ['merchant_sku', "ALTER TABLE products ADD COLUMN merchant_sku TEXT NOT NULL DEFAULT ''"],
+    ['min_order_qty', 'ALTER TABLE products ADD COLUMN min_order_qty INTEGER NOT NULL DEFAULT 1'],
+    ['purchase_count', 'ALTER TABLE products ADD COLUMN purchase_count INTEGER NOT NULL DEFAULT 0'],
+  ];
+  for (const [col, sql] of prodAlterDefs) {
+    if (!prodMasterCols.some((c) => c.name === col)) {
+      db.exec(sql);
+    }
+  }
+
+  // Non-destructive category grouping & hierarchy columns (main + multi-level subcategories)
+  const catGroupCols = db.prepare("PRAGMA table_info('categories')").all() as Array<{ name: string }>;
+  if (!catGroupCols.some((c) => c.name === 'group_key')) {
+    db.exec("ALTER TABLE categories ADD COLUMN group_key TEXT NOT NULL DEFAULT 'groceries'");
+  }
+  if (!catGroupCols.some((c) => c.name === 'group_name_ar')) {
+    db.exec("ALTER TABLE categories ADD COLUMN group_name_ar TEXT NOT NULL DEFAULT 'المقاضي'");
+  }
+  if (!catGroupCols.some((c) => c.name === 'parent_id')) {
+    db.exec('ALTER TABLE categories ADD COLUMN parent_id TEXT');
+  }
+  if (!catGroupCols.some((c) => c.name === 'level')) {
+    db.exec('ALTER TABLE categories ADD COLUMN level INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!catGroupCols.some((c) => c.name === 'full_path_ar')) {
+    db.exec("ALTER TABLE categories ADD COLUMN full_path_ar TEXT NOT NULL DEFAULT ''");
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id, sort_order);
+    UPDATE categories SET full_path_ar = name_ar || ';' WHERE TRIM(COALESCE(full_path_ar, '')) = '' AND parent_id IS NULL;
+  `);
+
+  // Indexes & unique constraints for Master Product Catalog & Multi-Store Price Comparison
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_master_products_barcode_active
+      ON master_products(LOWER(TRIM(barcode)))
+      WHERE TRIM(COALESCE(barcode, '')) != '' AND approval_status != 'merged';
+    CREATE INDEX IF NOT EXISTS idx_master_products_status_brand
+      ON master_products(approval_status, LOWER(brand));
+    CREATE INDEX IF NOT EXISTS idx_master_products_norm_key
+      ON master_products(normalized_key);
+    CREATE INDEX IF NOT EXISTS idx_master_products_cat_status
+      ON master_products(category_id, approval_status);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_products_merchant_master_active
+      ON products(merchant_id, master_product_id)
+      WHERE master_product_id IS NOT NULL AND is_available = 1;
+    CREATE INDEX IF NOT EXISTS idx_products_master_avail
+      ON products(master_product_id, is_available, base_price);
+    CREATE INDEX IF NOT EXISTS idx_products_brand_avail
+      ON products(LOWER(brand), is_available);
+    CREATE INDEX IF NOT EXISTS idx_products_barcode
+      ON products(LOWER(barcode));
+
+    CREATE INDEX IF NOT EXISTS idx_product_attrs_master ON product_attributes(master_product_id);
+    CREATE INDEX IF NOT EXISTS idx_product_imgs_master ON product_images(master_product_id, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_matching_req_status ON product_matching_requests(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_matching_req_merchant ON product_matching_requests(merchant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_product_deals_active ON product_deals(is_active, product_id, master_product_id);
+    CREATE INDEX IF NOT EXISTS idx_product_deals_merchant ON product_deals(merchant_id, is_active);
+    CREATE INDEX IF NOT EXISTS idx_catalog_merge_audit_created ON catalog_merge_audit(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_storefront_banners_active ON storefront_banners(is_active, sort_order);
+  `);
+
+  // Seed comprehensive Arabic storefront categories (INSERT OR IGNORE — preserves all existing categories)
+  const storefrontCategories: Array<[string, string, string, string, string, string, number]> = [
+    // المقاضي (Groceries)
+    ['cat_frozen', 'merchant', 'الأطعمة المجمدة', 'Frozen Foods', 'groceries', 'المقاضي', 5],
+    ['cat_rice_grains', 'merchant', 'الأرز والحبوب', 'Rice & Grains', 'groceries', 'المقاضي', 6],
+    ['cat_pasta_canned', 'merchant', 'المعكرونة والمعلبات', 'Pasta & Canned Food', 'groceries', 'المقاضي', 7],
+    ['cat_sauces', 'merchant', 'الصلصات والتتبيلات', 'Sauces & Condiments', 'groceries', 'المقاضي', 8],
+    ['cat_snacks_sweets', 'merchant', 'الحلويات والسناكات', 'Snacks & Sweets', 'groceries', 'المقاضي', 9],
+    // المنتجات الطازجة (Fresh)
+    ['cat_fruits_veg', 'merchant', 'الخضروات والفواكه', 'Fruits & Vegetables', 'fresh', 'المنتجات الطازجة', 10],
+    ['cat_meat_poultry', 'merchant', 'اللحوم والدواجن', 'Meat & Poultry', 'fresh', 'المنتجات الطازجة', 11],
+    ['cat_seafood_fresh', 'merchant', 'الأسماك والمأكولات البحرية', 'Fish & Seafood', 'fresh', 'المنتجات الطازجة', 12],
+    ['cat_dairy_eggs', 'merchant', 'الألبان والبيض', 'Dairy & Eggs', 'fresh', 'المنتجات الطازجة', 13],
+    // المشروبات والمرطبات (Drinks)
+    ['cat_juices_drinks', 'merchant', 'العصائر والمشروبات', 'Juices & Beverages', 'drinks', 'المشروبات والمرطبات', 14],
+    ['cat_coffee_tea', 'merchant', 'القهوة والشاي', 'Coffee & Tea', 'drinks', 'المشروبات والمرطبات', 15],
+    // العناية بالمنزل والمطبخ (Home & Kitchen)
+    ['cat_detergents', 'merchant', 'المنظفات والمطهرات', 'Detergents & Disinfectants', 'home_care', 'العناية بالمنزل', 16],
+    ['cat_home_care', 'merchant', 'العناية بالمنزل', 'Home Care', 'home_care', 'العناية بالمنزل', 17],
+    ['cat_kitchen_supplies', 'merchant', 'مستلزمات المطبخ', 'Kitchen Supplies', 'kitchen', 'مستلزمات المطبخ', 18],
+  ];
+  const insStorefrontCat = db.prepare(`
+    INSERT OR IGNORE INTO categories (id, scope, name_ar, name_en, group_key, group_name_ar, sort_order, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+  `);
+  for (const row of storefrontCategories) {
+    insStorefrontCat.run(...row);
+  }
+  // Ensure earlier base categories also have clear group keys
+  db.prepare("UPDATE categories SET group_key = 'fresh', group_name_ar = 'المنتجات الطازجة' WHERE id IN ('cat_dairy', 'cat_seafood', 'cat_bakery') AND (group_key = 'groceries' OR group_key = '')").run();
+
+  // Seed default Otlobha-branded storefront banners if none exist yet
+  const bannersCount = (db.prepare('SELECT COUNT(*) as c FROM storefront_banners').get() as { c: number }).c;
+  if (bannersCount === 0) {
+    const insBanner = db.prepare(`
+      INSERT INTO storefront_banners (id, title_ar, subtitle_ar, badge_ar, banner_type, cta_label, target_filter, accent_color, sort_order, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+    insBanner.run(
+      'bnr_otlobha_hero_1',
+      'أقل سعر بين كل متاجر المنزلة',
+      'قارن أسعار نفس المنتج بين المتاجر واختر الأوفر فورًا عبر اطلبها',
+      'مقارنة فورية',
+      'hero',
+      'تصفّح العروض',
+      'offers',
+      '#A92224',
+      1
+    );
+    insBanner.run(
+      'bnr_otlobha_hero_2',
+      'مقاضي بيتك ومنتجاتك الطازجة في دقائق',
+      'خضروات طازجة، ألبان، لحوم ومقاضي يومية توصلك لحد باب البيت',
+      'توصيل سريع',
+      'hero',
+      'المنتجات الطازجة',
+      'fresh',
+      '#86191B',
+      2
+    );
+    insBanner.run(
+      'bnr_otlobha_strip_free',
+      'عروض التوصيل المجاني والخصومات اليومية',
+      'استفد من عروض المتاجر والهدايا المجانية على السلة',
+      'توفير اطلبها',
+      'strip',
+      'شاهد العروض',
+      'free_delivery',
+      '#F5A623',
+      3
+    );
+  }
 }
 
 export function ensureBootstrapSuperAdmin(): { created: boolean; reason?: string } {

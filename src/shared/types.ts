@@ -200,6 +200,11 @@ export interface CategoryRecord {
   id: string;
   scope: 'merchant' | 'pharmacy' | 'market';
   merchant_id?: string | null;
+  parent_id?: string | null;
+  level?: number;
+  full_path_ar?: string;
+  excel_path?: string;
+  children_count?: number;
   name_ar: string;
   name_en: string;
   image_url?: string;
@@ -211,12 +216,20 @@ export interface CategoryRecord {
 export interface ProductRecord {
   id: string;
   product_code?: string;
+  master_product_id?: string | null;
   merchant_id: string;
   merchant_name?: string;
   category_id: string;
   category_name?: string;
+  category_path?: string;
   name_ar: string;
   name_en: string;
+  brand?: string;
+  size_label?: string;
+  barcode?: string | null;
+  merchant_sku?: string;
+  min_order_qty?: number;
+  purchase_count?: number;
   description: string;
   image_url: string;
   base_price: number;
@@ -229,6 +242,208 @@ export interface ProductRecord {
   is_available: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface MasterProductRecord {
+  id: string;
+  canonical_name_ar: string;
+  canonical_name_en: string;
+  trade_name: string;
+  brand: string;
+  category_id: string | null;
+  category_name?: string;
+  category_path?: string;
+  barcode: string | null;
+  size_value: number | null;
+  size_unit: string;
+  size_label: string;
+  image_url: string;
+  description: string;
+  usage_notes: string;
+  ingredients: string;
+  approval_status: 'approved' | 'pending' | 'rejected' | 'merged' | 'disabled';
+  merged_into_id?: string | null;
+  total_listings?: number;
+  active_stores_count?: number;
+  lowest_price?: number | null;
+  highest_price?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MasterProductMatchCandidate {
+  id: string;
+  canonical_name_ar: string;
+  canonical_name_en: string;
+  trade_name: string;
+  brand: string;
+  category_id: string | null;
+  category_name?: string;
+  barcode: string | null;
+  size_label: string;
+  image_url: string;
+  description: string;
+  stores_count: number;
+  lowest_price: number | null;
+  match_tier: 'exact' | 'possible';
+  confidence_score: number;
+  match_reasons: string[];
+}
+
+export interface ProductMatchingRequestRecord {
+  id: string;
+  merchant_id: string;
+  merchant_name?: string;
+  requested_by: string;
+  product_name_ar: string;
+  product_name_en: string;
+  brand: string;
+  category_id: string | null;
+  category_name?: string;
+  barcode: string | null;
+  size_label: string;
+  image_url: string;
+  description: string;
+  proposed_price: number;
+  proposed_sale_price: number | null;
+  proposed_stock: number;
+  merchant_sku: string;
+  suggested_master_id: string | null;
+  suggested_master_name?: string;
+  suggested_master_size?: string;
+  match_confidence: 'exact' | 'possible' | 'none';
+  status: 'pending' | 'approved_new' | 'linked_existing' | 'rejected';
+  admin_note: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface StorefrontBannerRecord {
+  id: string;
+  title_ar: string;
+  subtitle_ar: string;
+  badge_ar: string;
+  banner_type: 'hero' | 'strip';
+  image_url: string;
+  cta_label: string;
+  target_filter: string;
+  target_category_id?: string | null;
+  target_merchant_id?: string | null;
+  accent_color: string;
+  sort_order: number;
+  is_active: boolean | number;
+}
+
+export interface StorefrontCategoryRecord {
+  id: string;
+  scope: string;
+  parent_id?: string | null;
+  level?: number;
+  full_path_ar?: string;
+  excel_path?: string;
+  children_count?: number;
+  name_ar: string;
+  name_en: string;
+  image_url: string;
+  sort_order: number;
+  group_key: string;
+  group_name_ar: string;
+  products_count: number;
+}
+
+export interface StorefrontProductCard {
+  id: string;
+  product_code?: string;
+  master_product_id?: string | null;
+  merchant_id: string;
+  merchant_name: string;
+  merchant_type?: string;
+  category_id: string;
+  category_name?: string;
+  category_group_key?: string;
+  name_ar: string;
+  name_en?: string;
+  brand?: string;
+  size_label?: string;
+  image_url: string;
+  description?: string;
+  base_price: number;
+  sale_price: number | null;
+  effective_price: number;
+  discount_percent: number;
+  is_offer: boolean;
+  stock_quantity: number;
+  min_order_qty: number;
+  is_available: boolean;
+  requires_prescription?: boolean;
+  purchase_count?: number;
+  stores_count: number;
+  lowest_store_price: number;
+  max_store_savings: number;
+  active_deal?: { id: string; deal_type: string; title_ar: string } | null;
+}
+
+export interface StoreComparisonOption {
+  product_id: string;
+  merchant_id: string;
+  merchant_name: string;
+  merchant_zone: string;
+  merchant_is_open: boolean;
+  merchant_image_url: string;
+  image_url: string;
+  size_label: string;
+  base_price: number;
+  sale_price: number | null;
+  effective_price: number;
+  stock_quantity: number;
+  min_order_qty: number;
+  is_available: boolean;
+  is_current_listing: boolean;
+  rank?: number;
+  is_lowest?: boolean;
+  price_diff_from_lowest?: number;
+  savings_vs_highest?: number;
+}
+
+export interface StorefrontProductDeal {
+  id: string;
+  deal_type: 'buy_x_get_y' | 'bundle_discount' | 'free_gift' | 'tier_qty' | 'free_delivery';
+  title_ar: string;
+  subtitle_ar: string;
+  required_qty: number;
+  free_qty: number;
+  discount_amount: number;
+  discount_percent: number;
+  min_amount: number;
+  gift_products: Array<Record<string, any>>;
+  bundle_products: Array<Record<string, any>>;
+}
+
+export interface StorefrontProductDetailsResponse {
+  product: StorefrontProductCard & {
+    merchant_zone: string;
+    merchant_is_open: boolean;
+    merchant_working_hours: string;
+    barcode?: string | null;
+    images: string[];
+    usage_notes: string;
+    ingredients: string;
+  };
+  comparison: {
+    has_multi_store: boolean;
+    stores_count: number;
+    lowest_price: number;
+    highest_price: number;
+    max_savings: number;
+    available_stores: StoreComparisonOption[];
+    unavailable_stores: StoreComparisonOption[];
+  };
+  deals: StorefrontProductDeal[];
+  attributes: Array<{ id: string; attr_key: string; attr_value: string }>;
+  same_brand_products: Array<Record<string, any>>;
+  cheaper_alternatives: Array<Record<string, any>>;
+  complementary_products: Array<Record<string, any>>;
 }
 
 export interface OrderItemRecord {

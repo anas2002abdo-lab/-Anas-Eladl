@@ -109,7 +109,30 @@ export function hydrateSqliteFromPersistDirIfNeeded(localDbPath: string): void {
 
 export interface SqlitePersistController {
   flushNow: (reason: string, options?: { force?: boolean; createRollingBackup?: boolean }) => Promise<boolean>;
+  scheduleFlush: (reason: string, delayMs?: number) => void;
   stop: () => void;
+}
+
+function isMountPointOnLinux(targetDir: string): boolean | null {
+  try {
+    if (!fs.existsSync('/proc/mounts')) return null;
+    const resolved = path.resolve(targetDir);
+    const mounts = fs.readFileSync('/proc/mounts', 'utf8').split('\n');
+    for (const line of mounts) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const mountPath = parts[1];
+      const fsType = parts[2];
+      if (!mountPath || mountPath === '/' || mountPath === '/tmp') continue;
+      if (resolved === mountPath || resolved.startsWith(`${mountPath}/`)) {
+        // Real external mounts (gcsfuse, fuse, nfs, ext4 persistent disk, etc.)
+        return fsType !== 'tmpfs' && fsType !== 'overlay';
+      }
+    }
+    return false;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -122,10 +145,25 @@ export function startSqlitePersistSync(
 ): SqlitePersistController {
   const persistDir = getPersistDir();
   if (!persistDir) {
+    if (process.env.K_SERVICE) {
+      console.warn(
+        '[SQLite Persist] WARNING: Running on Cloud Run without OTLOBHA_GCS_PERSIST_DIR — local SQLite data is ephemeral and will be lost on container restart or scale-to-zero.'
+      );
+    }
     return {
       flushNow: async () => false,
+      scheduleFlush: () => {},
       stop: () => {},
     };
+  }
+
+  if (process.env.K_SERVICE) {
+    const mounted = isMountPointOnLinux(persistDir);
+    if (mounted === false) {
+      console.warn(
+        `[SQLite Persist] WARNING: ${persistDir} is NOT mounted to a Cloud Storage bucket or persistent volume. Data saved to SQLite will be lost whenever Cloud Run restarts, scales to zero, or routes to another instance.`
+      );
+    }
   }
 
   const syncIntervalMs = Math.max(5000, Number(process.env.OTLOBHA_SQLITE_SYNC_INTERVAL_MS || 15000));
@@ -267,6 +305,16 @@ export function startSqlitePersistSync(
     return inFlight;
   };
 
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleFlush = (reason: string, delayMs = 1200) => {
+    if (debounceTimer) return;
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      flushNow(reason).catch(() => {});
+    }, Math.max(250, delayMs));
+    debounceTimer.unref?.();
+  };
+
   const timer = setInterval(() => {
     flushNow('periodic').catch(() => {});
   }, syncIntervalMs);
@@ -279,6 +327,13 @@ export function startSqlitePersistSync(
 
   return {
     flushNow,
-    stop: () => clearInterval(timer),
+    scheduleFlush,
+    stop: () => {
+      clearInterval(timer);
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+    },
   };
 }

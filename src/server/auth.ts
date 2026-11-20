@@ -738,6 +738,19 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   return res.status(401).json({ error: 'يجب تسجيل الدخول للوصول إلى هذا المورد' });
 }
 
+export function requireStrictAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const token = extractAccessToken(req);
+  const resolved = resolveAuthFromToken(token);
+  if (!resolved) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب الإدارة للوصول إلى الخزنة السحابية' });
+  }
+  if (resolved.auth.actorType !== 'admin' || !(ALL_ADMIN_ROLES as readonly string[]).includes(resolved.auth.role)) {
+    return res.status(403).json({ error: 'ليس لديك صلاحية الإدارة للوصول إلى الخزنة السحابية' });
+  }
+  req.auth = resolved.auth;
+  next();
+}
+
 export function requireRole(...allowedRoles: string[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.auth || !allowedRoles.includes(req.auth.role)) {

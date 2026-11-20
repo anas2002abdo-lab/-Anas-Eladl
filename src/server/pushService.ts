@@ -208,11 +208,18 @@ export function resolveChannelId(category?: string, deepLink?: string, targetApp
   const dl = String(deepLink || '').toLowerCase();
   const cat = String(category || '').toLowerCase();
   if (dl.includes('chat')) return 'otlobha_chat_channel';
-  if (cat === 'promo' || dl === 'offers' || dl === 'promo') return 'otlobha_promos_channel';
+  if (cat === 'promo' || dl === 'offers' || dl === 'promo') return 'otlobha_admin_channel';
   if (targetApp === 'captain' && (dl === 'orders' || dl === 'order' || dl === 'trip' || dl === 'rides' || dl === 'parcels')) {
     return 'otlobha_dispatch_channel';
   }
-  if (cat === 'compliance' || cat === 'alert' || dl === 'notifications' || dl === 'profile' || dl === 'kyc_upload') {
+  if (
+    cat === 'compliance' ||
+    cat === 'alert' ||
+    dl === 'notifications' ||
+    dl === 'profile' ||
+    dl === 'kyc_upload' ||
+    dl === 'verify_email'
+  ) {
     return 'otlobha_admin_channel';
   }
   return 'otlobha_orders_channel';
@@ -562,6 +569,31 @@ export async function sendPushToTokens(
  * Persists a notification into the existing `notifications` table AND dispatches real FCM Push Notifications
  * to all active devices matching the target audience. Preserves 100% of existing in-app notifications behavior.
  */
+export interface NotificationCreatedEvent {
+  id: string;
+  targetApp: string;
+  targetZone: string;
+  recipientId: string | null;
+  category: string;
+  titleAr: string;
+  bodyAr: string;
+  deepLink: string;
+  channelId: PushChannelId;
+  orderId?: string | null;
+  tripId?: string | null;
+  parcelId?: string | null;
+  status?: string | null;
+  extraData?: Record<string, string>;
+  createdAt: string;
+}
+
+type NotificationCreatedListener = (event: NotificationCreatedEvent) => void;
+let notificationCreatedListener: NotificationCreatedListener | null = null;
+
+export function setNotificationCreatedListener(listener: NotificationCreatedListener | null): void {
+  notificationCreatedListener = listener;
+}
+
 export async function createAndSendNotification(params: {
   targetApp: 'customer' | 'captain' | 'merchant' | 'all';
   targetZone?: string | null;
@@ -592,6 +624,7 @@ export async function createAndSendNotification(params: {
   const fcmTopic = `otlobha_${appTarget}_${zoneTarget === 'all' ? 'all' : 'zone'}`;
   const titleClean = String(params.titleAr || '').trim();
   const bodyClean = String(params.bodyAr || '').trim();
+  const resolvedChannel = params.channelId || resolveChannelId(category, deepLink, appTarget);
 
   const tokens =
     appTarget === 'merchant'
@@ -626,10 +659,32 @@ export async function createAndSendNotification(params: {
     params.sentBy || 'النظام'
   );
 
+  try {
+    notificationCreatedListener?.({
+      id,
+      targetApp: appTarget,
+      targetZone: zoneTarget,
+      recipientId: params.recipientId || null,
+      category,
+      titleAr: titleClean,
+      bodyAr: bodyClean,
+      deepLink,
+      channelId: resolvedChannel,
+      orderId: params.orderId,
+      tripId: params.tripId,
+      parcelId: params.parcelId,
+      status: params.status,
+      extraData: params.extraData,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn('[PushService] NotificationCreatedListener error:', err instanceof Error ? err.message : err);
+  }
+
   const fcmDelivery = await sendPushToTokens(tokens, {
     title: titleClean,
     body: bodyClean,
-    channelId: params.channelId || resolveChannelId(category, deepLink, appTarget),
+    channelId: resolvedChannel,
     category,
     deepLink,
     notificationId: id,

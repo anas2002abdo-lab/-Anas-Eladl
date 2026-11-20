@@ -9,6 +9,7 @@ class ServicesHubScreen extends StatelessWidget {
   final OtlobhaCustomerApi api;
   final Map<String, dynamic> bootstrap;
   final Map<String, int> cart;
+  final Map<String, Map<String, dynamic>> cartProductsCache;
   final void Function(Map<String, dynamic> product, int delta) onAddProduct;
   final VoidCallback onOpenCart;
   final Future<void> Function() onRefresh;
@@ -26,6 +27,7 @@ class ServicesHubScreen extends StatelessWidget {
     required this.api,
     required this.bootstrap,
     required this.cart,
+    this.cartProductsCache = const {},
     required this.onAddProduct,
     required this.onOpenCart,
     required this.onRefresh,
@@ -52,6 +54,7 @@ class ServicesHubScreen extends StatelessWidget {
             api: api,
             bootstrap: bootstrap,
             cart: cart,
+            cartProductsCache: cartProductsCache,
             selectedZoneId: selectedZoneId,
             addressLandmark: addressLandmark,
             onAddProduct: onAddProduct,

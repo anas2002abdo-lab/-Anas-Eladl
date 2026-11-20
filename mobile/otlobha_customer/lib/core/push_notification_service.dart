@@ -49,8 +49,8 @@ class OtlobhaPushChannels {
         AndroidNotificationChannel(
           admin,
           'تنبيهات الإدارة والحساب',
-          description: 'الرسائل الإدارية المهمة والردود على تذاكر الدعم',
-          importance: Importance.high,
+          description: 'إشعارات التوثيق والحملات والرسائل الإدارية المهمة',
+          importance: Importance.max,
           playSound: true,
           enableVibration: true,
           vibrationPattern: Int64List.fromList([0, 250, 150, 250]),
@@ -59,10 +59,10 @@ class OtlobhaPushChannels {
           promos,
           'العروض والتخفيضات',
           description: 'أحدث عروض وخصومات المتاجر والمطاعم في المنزلة',
-          importance: Importance.defaultImportance,
+          importance: Importance.max,
           playSound: true,
           enableVibration: true,
-          vibrationPattern: Int64List.fromList([0, 150]),
+          vibrationPattern: Int64List.fromList([0, 200, 120, 200]),
         ),
         const AndroidNotificationChannel(
           silent,
@@ -126,8 +126,11 @@ class CustomerPushNotificationService {
   static const String _prefDeviceIdKey = 'otlobha_customer_push_device_id_v1';
   static const String _prefSoundKey = 'otlobha_customer_push_sound_v1';
   static const String _prefVibrationKey = 'otlobha_customer_push_vibration_v1';
+  static const String _prefShownIdsKey = 'otlobha_customer_shown_local_notif_ids_v1';
 
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+  final List<String> _shownNotificationIdsOrder = <String>[];
+  final Set<String> _shownNotificationIds = <String>{};
   bool _initialized = false;
   bool _firebaseReady = false;
   bool _permissionGranted = false;
@@ -191,9 +194,58 @@ class CustomerPushNotificationService {
         await prefs.setString(_prefDeviceIdKey, savedId);
       }
       _deviceId = savedId;
+      final savedShown = prefs.getStringList(_prefShownIdsKey) ?? const <String>[];
+      _shownNotificationIdsOrder
+        ..clear()
+        ..addAll(savedShown);
+      _shownNotificationIds
+        ..clear()
+        ..addAll(savedShown);
     } catch (e) {
       debugPrint('[CustomerPush] Preferences unavailable: $e');
     }
+  }
+
+  Future<void> _markNotificationIdShown(String notifId) async {
+    final cleanId = notifId.trim();
+    if (cleanId.isEmpty) return;
+    if (_shownNotificationIds.add(cleanId)) {
+      _shownNotificationIdsOrder.add(cleanId);
+      while (_shownNotificationIdsOrder.length > 150) {
+        final removed = _shownNotificationIdsOrder.removeAt(0);
+        _shownNotificationIds.remove(removed);
+      }
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setStringList(_prefShownIdsKey, _shownNotificationIdsOrder);
+      } catch (_) {}
+    }
+  }
+
+  int _stableNotificationIntId(String key) {
+    var hash = 0;
+    for (final codeUnit in key.codeUnits) {
+      hash = ((hash * 31) + codeUnit) & 0x7fffffff;
+    }
+    if (hash == 0 || hash == 904201) {
+      return 100000 + (hash % 800000);
+    }
+    return hash;
+  }
+
+  String _resolveTopBarChannel(String? requestedChannel, String? category, String? deepLink) {
+    final useSilent = !_soundEnabled && !_vibrationEnabled;
+    if (useSilent) return OtlobhaPushChannels.silent;
+    final dl = (deepLink ?? '').toLowerCase();
+    if (dl.contains('chat') || requestedChannel == OtlobhaPushChannels.chat) {
+      return OtlobhaPushChannels.chat;
+    }
+    if (dl == 'order' || dl == 'orders' || dl == 'trip' || requestedChannel == OtlobhaPushChannels.orders) {
+      return OtlobhaPushChannels.orders;
+    }
+    // Route admin broadcasts, promos, and verify_email through the high-priority verification/admin channel
+    // so they always pop up in the phone's top notification bar even on existing Android installs.
+    return OtlobhaPushChannels.admin;
   }
 
   Future<void> setSoundEnabled(bool enabled) async {
@@ -392,13 +444,22 @@ class CustomerPushNotificationService {
     final body = message.notification?.body ?? data['body_ar']?.toString() ?? '';
     if (title.isEmpty && body.isEmpty) return;
 
-    final requestedChannel = data['channel_id']?.toString() ?? OtlobhaPushChannels.orders;
-    final useSilent = !_soundEnabled && !_vibrationEnabled;
-    final effectiveChannel = useSilent ? OtlobhaPushChannels.silent : requestedChannel;
+    final notifId = (data['notification_id'] ?? data['id'] ?? '').toString().trim();
+    if (notifId.isNotEmpty) {
+      await _markNotificationIdShown(notifId);
+    }
+
+    final effectiveChannel = _resolveTopBarChannel(
+      data['channel_id']?.toString(),
+      data['category']?.toString(),
+      data['deep_link']?.toString(),
+    );
 
     try {
       await _localNotifications.show(
-        DateTime.now().millisecondsSinceEpoch.remainder(1000000),
+        notifId.isNotEmpty
+            ? _stableNotificationIntId(notifId)
+            : DateTime.now().millisecondsSinceEpoch.remainder(1000000),
         title,
         body,
         NotificationDetails(
@@ -424,6 +485,120 @@ class CustomerPushNotificationService {
     } catch (e) {
       debugPrint('[CustomerPush] Foreground local show failed: $e');
     }
+  }
+
+  /// Displays ANY backend notification record (admin campaign, verify_email, promo, order update, etc.)
+  /// in the phone's top status bar — identical to the email verification notification — with deduplication.
+  Future<bool> showSystemNotificationFromRecord(
+    Map<String, dynamic> record, {
+    String? fallbackEmail,
+  }) async {
+    final notifId = (record['id'] ?? record['notification_id'] ?? '').toString().trim();
+    if (notifId.isNotEmpty && _shownNotificationIds.contains(notifId)) {
+      return false;
+    }
+
+    final title = (record['title_ar'] ?? record['title'] ?? '').toString().trim();
+    final body = (record['body_ar'] ?? record['body'] ?? '').toString().trim();
+    if (title.isEmpty && body.isEmpty) return false;
+
+    final deepLink = (record['deep_link'] ?? 'notifications').toString().trim();
+    final category = (record['category'] ?? '').toString().trim();
+    final effectiveChannel = _resolveTopBarChannel(
+      record['channel_id']?.toString(),
+      category,
+      deepLink,
+    );
+
+    final email = (record['email']?.toString().trim().isNotEmpty == true)
+        ? record['email'].toString().trim()
+        : (fallbackEmail?.trim() ?? '');
+
+    final data = <String, dynamic>{
+      'notification_id': notifId,
+      'deep_link': deepLink,
+      'category': category,
+      'title_ar': title.isNotEmpty ? title : 'اطلبها',
+      'body_ar': body,
+      'channel_id': effectiveChannel,
+      if (email.isNotEmpty) 'email': email,
+      if ((record['order_id'] ?? '').toString().trim().isNotEmpty) 'order_id': record['order_id'].toString().trim(),
+      if ((record['trip_id'] ?? '').toString().trim().isNotEmpty) 'trip_id': record['trip_id'].toString().trim(),
+      if ((record['parcel_id'] ?? '').toString().trim().isNotEmpty) 'parcel_id': record['parcel_id'].toString().trim(),
+    };
+
+    try {
+      final intId = notifId.isNotEmpty
+          ? _stableNotificationIntId(notifId)
+          : DateTime.now().millisecondsSinceEpoch.remainder(1000000);
+      await _localNotifications.show(
+        intId,
+        title.isNotEmpty ? title : 'اطلبها',
+        body,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            effectiveChannel,
+            _channelDisplayName(effectiveChannel),
+            importance: Importance.max,
+            priority: Priority.high,
+            playSound: _soundEnabled,
+            enableVibration: _vibrationEnabled,
+            vibrationPattern: _vibrationEnabled ? Int64List.fromList([0, 250, 150, 250]) : null,
+            icon: '@mipmap/ic_launcher',
+            styleInformation: BigTextStyleInformation(body),
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: _soundEnabled,
+          ),
+        ),
+        payload: jsonEncode(data),
+      );
+      if (notifId.isNotEmpty) {
+        await _markNotificationIdShown(notifId);
+      }
+      return true;
+    } catch (e) {
+      debugPrint('[CustomerPush] Local notification from record failed: $e');
+      return false;
+    }
+  }
+
+  /// Syncs unread notifications fetched from bootstrap/inbox into the phone's top notification bar
+  /// so ALL notifications appear in the status bar even when FCM server credentials are not configured.
+  Future<bool> syncUnreadNotificationsToStatusBar(
+    List<dynamic> records, {
+    String? customerEmail,
+    bool isEmailVerified = false,
+  }) async {
+    var showedVerifyEmail = false;
+    final unread = <Map<String, dynamic>>[];
+    for (final item in records) {
+      if (item is! Map) continue;
+      final map = Map<String, dynamic>.from(item);
+      final isRead = map['is_read'] == true || map['is_read'] == 1;
+      if (isRead) continue;
+      final dl = (map['deep_link'] ?? '').toString().toLowerCase().trim();
+      if (dl == 'verify_email' && isEmailVerified) continue;
+      final id = (map['id'] ?? '').toString().trim();
+      if (id.isNotEmpty && _shownNotificationIds.contains(id)) {
+        if (dl == 'verify_email') showedVerifyEmail = true;
+        continue;
+      }
+      unread.add(map);
+    }
+
+    // Show newest unread notifications (oldest-first among the latest 8 so top of tray has newest)
+    final batch = unread.take(8).toList().reversed;
+    for (final rec in batch) {
+      final shown = await showSystemNotificationFromRecord(rec, fallbackEmail: customerEmail);
+      final dl = (rec['deep_link'] ?? '').toString().toLowerCase().trim();
+      if (shown && dl == 'verify_email') {
+        showedVerifyEmail = true;
+      }
+    }
+    return showedVerifyEmail;
   }
 
   /// Displays a tappable native notification prompting the customer to verify their email on the external code page.

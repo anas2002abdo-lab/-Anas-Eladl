@@ -290,10 +290,12 @@ class OtlobhaCustomerApi {
     return res;
   }
 
-  Future<Map<String, dynamic>> bootstrap() async {
-    final res = await _sendWithAuth(
-      (h) => http.get(_apiUri('/api/mobile/customer/bootstrap'), headers: h),
+  Future<Map<String, dynamic>> bootstrap({bool lite = false}) async {
+    final uri = _apiUri(
+      '/api/mobile/customer/bootstrap',
+      queryParameters: lite ? const {'lite': '1'} : null,
     );
+    final res = await _sendWithAuth((h) => http.get(uri, headers: h));
     return _decode(res, endpointHint: '/api/mobile/customer/bootstrap');
   }
 
@@ -305,6 +307,32 @@ class OtlobhaCustomerApi {
       ),
     );
     return _decode(res, endpointHint: '/api/mobile/customer/guest-bootstrap');
+  }
+
+  Future<Map<String, dynamic>> getProductsPaginated({
+    String? merchantId,
+    String? categoryId,
+    bool offersOnly = false,
+    String? query,
+    int page = 1,
+    int limit = 40,
+  }) async {
+    final params = <String, String>{
+      'paginated': '1',
+      'approved_only': '1',
+      'page': page.toString(),
+      'limit': limit.toString(),
+      if (merchantId != null && merchantId.isNotEmpty && merchantId != 'all') 'merchant_id': merchantId,
+      if (categoryId != null && categoryId.isNotEmpty && categoryId != 'all' && categoryId != 'offers')
+        'category_id': categoryId,
+      if (offersOnly || categoryId == 'offers') 'offers_only': '1',
+      if (query != null && query.trim().isNotEmpty) 'q': query.trim(),
+    };
+    final uri = _apiUri('/api/products', queryParameters: params);
+    final res = hasTokens
+        ? await _sendWithAuth((h) => http.get(uri, headers: h))
+        : await _execute(() => http.get(uri, headers: _headers(includeAuth: false)));
+    return _decode(res, endpointHint: '/api/products');
   }
 
   Future<Map<String, dynamic>> updateProfile({
@@ -1329,5 +1357,74 @@ class OtlobhaCustomerApi {
 
   void _ensureSuccess(http.Response res, {String? endpointHint, String? fallbackError}) {
     parseJsonResponse(res, endpointHint: endpointHint, fallbackError: fallbackError);
+  }
+
+  Future<Map<String, dynamic>> getStorefrontHome({
+    String? filter,
+    String? categoryId,
+    String? brand,
+    String? merchantId,
+    int page = 1,
+    int limit = 24,
+  }) async {
+    final qp = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+      if (filter != null && filter.isNotEmpty) 'filter': filter,
+      if (categoryId != null && categoryId.isNotEmpty) 'category_id': categoryId,
+      if (brand != null && brand.isNotEmpty) 'brand': brand,
+      if (merchantId != null && merchantId.isNotEmpty) 'merchant_id': merchantId,
+    };
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/storefront/home', queryParameters: qp),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/storefront/home');
+  }
+
+  Future<Map<String, dynamic>> searchStorefront({
+    String? q,
+    String? categoryId,
+    String? brand,
+    String? merchantId,
+    int limit = 30,
+  }) async {
+    final qp = <String, String>{
+      'limit': '$limit',
+      if (q != null && q.trim().isNotEmpty) 'q': q.trim(),
+      if (categoryId != null && categoryId.isNotEmpty) 'category_id': categoryId,
+      if (brand != null && brand.isNotEmpty) 'brand': brand,
+      if (merchantId != null && merchantId.isNotEmpty) 'merchant_id': merchantId,
+    };
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/storefront/search', queryParameters: qp),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/storefront/search');
+  }
+
+  Future<Map<String, dynamic>> getStorefrontProductDetails(String productId) async {
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/storefront/products/${Uri.encodeComponent(productId)}'),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/storefront/products/$productId');
+  }
+
+  Future<Map<String, dynamic>> askStorefrontAssistant(String prompt) async {
+    final res = await _execute(
+      () => http.post(
+        _apiUri('/api/storefront/assistant'),
+        headers: _headers(json: true, includeAuth: false),
+        body: jsonEncode({'prompt': prompt}),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/storefront/assistant');
   }
 }

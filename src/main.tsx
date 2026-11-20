@@ -1,5 +1,6 @@
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
+import { FirebaseErrorBoundary } from './components/FirebaseErrorBoundary.tsx';
 import './index.css';
 
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
@@ -27,4 +28,8 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   });
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <FirebaseErrorBoundary>
+    <App />
+  </FirebaseErrorBoundary>
+);

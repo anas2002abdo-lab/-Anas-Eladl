@@ -33,6 +33,7 @@ import {
   ShoppingBag,
   ShoppingCart,
   Smartphone,
+  Sparkles,
   Star,
   Store,
   Tag,
@@ -54,6 +55,14 @@ import { OrderChatPage } from './OrderChatPage.tsx';
 import { TripChatPage } from './TripChatPage.tsx';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
 import { CustomerAuthPortal } from './CustomerAuthPortal.tsx';
+import { OtlobhaStorefrontHome } from './storefront/OtlobhaStorefrontHome.tsx';
+import { OtlobhaCategoriesView } from './storefront/OtlobhaCategoriesView.tsx';
+import { OtlobhaSmartSearchOverlay } from './storefront/OtlobhaSmartSearchOverlay.tsx';
+import {
+  OtlobhaProductDetailSheet,
+  type SwipeProductPreview,
+} from './storefront/OtlobhaProductDetailSheet.tsx';
+import { OtlobhaSmartAssistantModal } from './storefront/OtlobhaSmartAssistantModal.tsx';
 import type {
   CaptainRatingRecord,
   CategoryRecord,
@@ -68,6 +77,9 @@ import type {
   ProductRecord,
   ServiceConfig,
   ServiceZone,
+  StorefrontBannerRecord,
+  StorefrontCategoryRecord,
+  StorefrontProductCard,
   SupportMessageRecord,
   SupportTicketRecord,
   TripRecord,
@@ -79,7 +91,7 @@ interface Props {
   onRefreshCore: () => Promise<void>;
 }
 
-type BottomTab = 'home' | 'services' | 'offers' | 'cart' | 'profile';
+type BottomTab = 'home' | 'categories' | 'services' | 'offers' | 'cart' | 'profile';
 type ServiceSubView = 'hub' | 'stores' | 'pharmacy' | 'rides_parcels' | 'market';
 
 const CUSTOMER_SESSION_KEY = 'otlobha_customer_email_session';
@@ -234,6 +246,26 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   const [walletBalance, setWalletBalance] = useState(45);
   const [homeSearch, setHomeSearch] = useState('');
   const [homeCategoryId, setHomeCategoryId] = useState<string>('all');
+
+  // Flagship Storefront State (Home, Categories, Smart Search, Product Details Sheet, Smart Assistant)
+  const [storefrontBanners, setStorefrontBanners] = useState<StorefrontBannerRecord[]>([]);
+  const [storefrontCategories, setStorefrontCategories] = useState<StorefrontCategoryRecord[]>([]);
+  const [storefrontProducts, setStorefrontProducts] = useState<StorefrontProductCard[]>([]);
+  const [storefrontBrands, setStorefrontBrands] = useState<string[]>([]);
+  const [storefrontLoading, setStorefrontLoading] = useState(false);
+  const [storefrontPage, setStorefrontPage] = useState(1);
+  const [storefrontHasMore, setStorefrontHasMore] = useState(false);
+  const [storefrontFilter, setStorefrontFilter] = useState<
+    'for_you' | 'fresh' | 'groceries' | 'offers' | 'free_delivery'
+  >('for_you');
+  const [storefrontCategoryId, setStorefrontCategoryId] = useState('');
+  const [storefrontBrand, setStorefrontBrand] = useState('');
+  const [storefrontMerchantId, setStorefrontMerchantId] = useState('');
+  const [searchOverlayOpen, setSearchOverlayOpen] = useState(false);
+  const [detailProductId, setDetailProductId] = useState<string | null>(null);
+  const [detailProductList, setDetailProductList] = useState<SwipeProductPreview[]>([]);
+  const [detailFromStorefrontHome, setDetailFromStorefrontHome] = useState<boolean>(false);
+  const [assistantModalOpen, setAssistantModalOpen] = useState(false);
 
   // Pharmacy Rx State
   const [pharmacyId, setPharmacyId] = useState<string>('');
@@ -722,6 +754,152 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     setTab('services');
   };
 
+  const loadStorefrontData = async (opts?: {
+    page?: number;
+    append?: boolean;
+    filter?: 'for_you' | 'fresh' | 'groceries' | 'offers' | 'free_delivery';
+    categoryId?: string;
+    brand?: string;
+    merchantId?: string;
+  }) => {
+    const nextPage = opts?.page ?? 1;
+    const nextFilter = opts?.filter ?? storefrontFilter;
+    const nextCat = opts?.categoryId !== undefined ? opts.categoryId : storefrontCategoryId;
+    const nextBrand = opts?.brand !== undefined ? opts.brand : storefrontBrand;
+    const nextMerchant = opts?.merchantId !== undefined ? opts.merchantId : storefrontMerchantId;
+    setStorefrontLoading(true);
+    try {
+      const res = await api.getStorefrontHome({
+        filter: nextFilter,
+        category_id: nextCat || undefined,
+        brand: nextBrand || undefined,
+        merchant_id: nextMerchant || undefined,
+        page: nextPage,
+        limit: 24,
+      });
+      setStorefrontBanners(res.banners || []);
+      setStorefrontCategories(res.categories || []);
+      setStorefrontBrands(res.brands || []);
+      setStorefrontProducts((prev) =>
+        opts?.append ? [...prev, ...(res.products || [])] : res.products || []
+      );
+      setStorefrontPage(nextPage);
+      setStorefrontHasMore(Boolean(res.pagination?.has_more));
+    } catch {
+      // ignore transient storefront fetch errors
+    } finally {
+      setStorefrontLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadStorefrontData({
+      page: 1,
+      append: false,
+      filter: storefrontFilter,
+      categoryId: storefrontCategoryId,
+      brand: storefrontBrand,
+      merchantId: storefrontMerchantId,
+    });
+  }, [storefrontFilter, storefrontCategoryId, storefrontBrand, storefrontMerchantId]);
+
+  const ensureProductInCatalogState = (p: {
+    id: string;
+    merchant_id: string;
+    merchant_name?: string;
+    category_id?: string;
+    name_ar: string;
+    name_en?: string;
+    image_url?: string;
+    base_price: number;
+    sale_price?: number | null;
+  }) => {
+    setProducts((prev) => {
+      if (prev.some((x) => x.id === p.id)) return prev;
+      const stub: ProductRecord = {
+        id: p.id,
+        merchant_id: p.merchant_id,
+        merchant_name: p.merchant_name || '',
+        category_id: p.category_id || 'cat_grocery',
+        name_ar: p.name_ar,
+        name_en: p.name_en || p.name_ar,
+        description: '',
+        image_url: p.image_url || '',
+        base_price: Number(p.base_price || 0),
+        sale_price: p.sale_price !== undefined ? p.sale_price : null,
+        is_offer: Boolean(p.sale_price !== null && p.sale_price !== undefined && p.sale_price < p.base_price),
+        stock_quantity: 50,
+        low_stock_threshold: 5,
+        requires_prescription: false,
+        addons_text: '',
+        is_available: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      return [stub, ...prev];
+    });
+  };
+
+  const handleAddStorefrontCard = (card: StorefrontProductCard) => {
+    ensureProductInCatalogState({
+      id: card.id,
+      merchant_id: card.merchant_id,
+      merchant_name: card.merchant_name,
+      category_id: card.category_id,
+      name_ar: card.name_ar,
+      name_en: card.name_en,
+      image_url: card.image_url,
+      base_price: card.base_price,
+      sale_price: card.sale_price,
+    });
+    handleAddToCart(
+      {
+        id: card.id,
+        merchant_id: card.merchant_id,
+        merchant_name: card.merchant_name,
+        category_id: card.category_id,
+        name_ar: card.name_ar,
+        name_en: card.name_en || card.name_ar,
+        description: card.description || '',
+        image_url: card.image_url || '',
+        base_price: card.base_price,
+        sale_price: card.sale_price,
+        is_offer: card.is_offer,
+        stock_quantity: card.stock_quantity,
+        low_stock_threshold: 5,
+        requires_prescription: Boolean(card.requires_prescription),
+        addons_text: '',
+        is_available: card.is_available,
+        created_at: '',
+        updated_at: '',
+      },
+      1
+    );
+  };
+
+  const handleDecrementStorefrontProduct = (prodId: string) => {
+    setCart((prev) => {
+      const next = { ...prev };
+      const cur = next[prodId] || 0;
+      if (cur <= 1) delete next[prodId];
+      else next[prodId] = cur - 1;
+      return next;
+    });
+  };
+
+  const handleOpenOtlobhaService = (srv: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order') => {
+    if (srv === 'free_order') {
+      setOrderChannel('free_text');
+      setTab('cart');
+      return;
+    }
+    if (srv === 'rides' || srv === 'parcels') {
+      openServiceView('rides_parcels');
+      return;
+    }
+    openServiceView(srv);
+  };
+
   const handleAddToCart = (prod: ProductRecord, delta: number) => {
     const currentQty = cart[prod.id] || 0;
     const nextQty = Math.max(0, currentQty + delta);
@@ -1205,17 +1383,17 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   ];
 
   const bottomNavItems: Array<{
-    id: BottomTab;
+    id: BottomTab | 'assistant';
     label: string;
     icon: React.FC<{ className?: string }>;
     badge?: number;
     isCenterFeatured?: boolean;
   }> = [
     { id: 'home', label: isAr ? 'الرئيسية' : 'Home', icon: Home },
-    { id: 'offers', label: isAr ? 'العروض' : 'Offers', icon: Percent },
-    { id: 'services', label: isAr ? 'الخدمات' : 'Services', icon: LayoutGrid, isCenterFeatured: true },
+    { id: 'categories', label: isAr ? 'الأقسام' : 'Categories', icon: LayoutGrid },
+    { id: 'assistant', label: isAr ? 'المساعد الذكي' : 'Assistant', icon: Sparkles, isCenterFeatured: true },
     { id: 'cart', label: isAr ? 'السلة' : 'Cart', icon: ShoppingCart, badge: cartTotalQty },
-    { id: 'profile', label: isAr ? 'الملف الشخصي' : 'Profile', icon: User },
+    { id: 'profile', label: isAr ? 'حسابي' : 'Account', icon: User },
   ];
 
   const selectedZone = zones.find((z) => z.id === selectedZoneId);
@@ -1300,11 +1478,12 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                 {isAr ? 'اطلبها – المنزلة' : 'Otlobha Customer'}
               </p>
               <h2 className="text-sm sm:text-base font-bold truncate leading-tight">
-                {tab === 'home' && (isAr ? 'اطلب كل احتياجاتك في المنزلة' : 'Home')}
+                {tab === 'home' && (isAr ? 'متجر اطلبها – مقارنة وأقل سعر' : 'Otlobha Store')}
+                {tab === 'categories' && (isAr ? 'الأقسام والتصنيفات' : 'Categories')}
                 {tab === 'services' && (isAr ? 'جميع خدمات اطلبها' : 'Services')}
                 {tab === 'offers' && (isAr ? 'العروض وكوبونات الخصم' : 'Offers & Coupons')}
                 {tab === 'cart' && (isAr ? 'سلة المشتريات وإتمام الطلب' : 'Cart & Checkout')}
-                {tab === 'profile' && (isAr ? 'الملف الشخصي وطلباتي' : 'Profile & Orders')}
+                {tab === 'profile' && (isAr ? 'حسابي وطلباتي' : 'My Account & Orders')}
               </h2>
             </div>
           </div>
@@ -2119,37 +2298,10 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
           </div>
         )}
 
-        {/* 1. HOME TAB */}
+        {/* 1. HOME TAB — Flagship Otlobha Storefront */}
         {tab === 'home' && (
-          <div className="space-y-6">
-            {/* Compact Search Bar (+ Cart shortcut if items > 0) */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-3 flex flex-wrap items-center gap-2.5">
-              <div className="relative flex-1 min-w-[200px]">
-                <Search className="w-4 h-4 text-slate-400 absolute start-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  value={homeSearch}
-                  onChange={(e) => setHomeSearch(e.target.value)}
-                  placeholder={isAr ? 'ابحث عن منتج، وجبة، دواء، أو متجر في المنزلة...' : 'Search products, food, pharmacy...'}
-                  className="w-full ps-10 pe-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-orange-500"
-                />
-              </div>
-
-              {cartTotalQty > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setTab('cart')}
-                  className="flex items-center gap-2 px-3.5 py-2.5 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-bold whitespace-nowrap"
-                >
-                  <ShoppingCart className="w-4 h-4" />
-                  <span className="tabular-nums">
-                    {cartTotalQty} {isAr ? 'منتجات' : 'items'} · {cartSubtotal} ج.م
-                  </span>
-                </button>
-              )}
-            </div>
-
-            {/* Pending Ratings Prompt + Inline Rating Box */}
+          <div className="space-y-4">
+            {/* Pending Ratings Prompt + Inline Rating Box (Preserved) */}
             {(ratingTarget || pendingRatings.length > 0) && (
               <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -2198,7 +2350,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                     <button
                       type="submit"
                       disabled={submittingRating}
-                      className="px-4 py-2 bg-orange-600 hover:bg-orange-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold"
+                      className="px-4 py-2 bg-[#A92224] hover:bg-[#86191B] disabled:opacity-60 text-white rounded-xl text-xs font-bold"
                     >
                       {submittingRating ? 'جاري الإرسال...' : 'إرسال التقييم الآن'}
                     </button>
@@ -2231,7 +2383,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                             setRatingStars(5);
                             setRatingComment('');
                           }}
-                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold"
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#F5A623] hover:bg-[#D97706] text-white rounded-xl text-xs font-bold"
                         >
                           <Star className="w-3.5 h-3.5 fill-white" />
                           <span>قيّم الطيار الآن</span>
@@ -2243,230 +2395,80 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
               </div>
             )}
 
-            {/* Horizontal Draggable Circular Services Strip with Flash Animation */}
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-slate-900">{isAr ? 'الخدمات السريعة' : 'Quick Services'}</h3>
-                <button
-                  type="button"
-                  onClick={() => openServiceView('hub')}
-                  className="text-xs font-bold text-orange-600 hover:underline whitespace-nowrap"
-                >
-                  {isAr ? 'عرض كل الخدمات' : 'All Services'}
-                </button>
-              </div>
-              <div
-                ref={servicesStripRef}
-                onPointerDown={(e) => {
-                  const el = servicesStripRef.current;
-                  if (!el) return;
-                  stripDragRef.current = {
-                    isDown: true,
-                    startX: e.clientX,
-                    scrollLeft: el.scrollLeft,
-                    moved: false,
-                  };
-                }}
-                onPointerMove={(e) => {
-                  const el = servicesStripRef.current;
-                  if (!el || !stripDragRef.current.isDown) return;
-                  const dx = e.clientX - stripDragRef.current.startX;
-                  if (Math.abs(dx) > 6) stripDragRef.current.moved = true;
-                  el.scrollLeft = stripDragRef.current.scrollLeft - dx;
-                }}
-                onPointerUp={() => {
-                  window.setTimeout(() => {
-                    stripDragRef.current.isDown = false;
-                    stripDragRef.current.moved = false;
-                  }, 40);
-                }}
-                onPointerLeave={() => {
-                  stripDragRef.current.isDown = false;
-                }}
-                className="flex items-start gap-4 overflow-x-auto no-scrollbar cursor-grab active:cursor-grabbing select-none py-2 px-1"
-              >
-                {quickServiceTiles.map((tile) => {
-                  const Icon = tile.icon;
-                  const cfg = serviceMap[tile.key];
-                  const enabled = cfg ? cfg.is_enabled : true;
-                  const isFlashing = flashingServiceKey === tile.key;
-                  return (
-                    <button
-                      key={tile.key}
-                      type="button"
-                      onClick={() => handleServiceCircleClick(tile.key, tile.onClick)}
-                      className={`group shrink-0 w-[84px] sm:w-[92px] flex flex-col items-center gap-2 snap-start focus:outline-none ${
-                        !enabled ? 'opacity-65' : ''
-                      }`}
-                    >
-                      <div
-                        className={`relative w-16 h-16 sm:w-[68px] sm:h-[68px] rounded-full flex items-center justify-center shadow-md ring-2 ring-white transition-transform duration-200 overflow-hidden group-hover:scale-105 ${
-                          enabled ? tile.boxClass : 'bg-slate-400 text-white'
-                        } ${isFlashing ? 'animate-otlobha-flash-pulse ring-[#F5A623]' : ''}`}
-                      >
-                        <Icon className="w-7 h-7 relative z-10 drop-shadow-sm" />
-                        {/* Subtle ambient gloss + bright flash gleam on press */}
-                        <span className="pointer-events-none absolute inset-0 rounded-full bg-gradient-to-tr from-black/10 via-transparent to-white/25" />
-                        {isFlashing && (
-                          <span
-                            aria-hidden="true"
-                            className="pointer-events-none absolute -inset-y-4 w-8 bg-gradient-to-r from-transparent via-white/95 to-transparent blur-[1px] animate-otlobha-flash-sweep z-20"
-                          />
-                        )}
-                      </div>
-                      <span className="text-[11px] sm:text-xs font-bold text-slate-900 text-center leading-tight line-clamp-2 group-hover:text-orange-600 transition-colors">
-                        {tile.title}
-                      </span>
-                      {!enabled && <span className="text-[10px] font-bold text-rose-700 -mt-1">{isAr ? 'موقوفة' : 'Off'}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Front-Page Products with Category Filters */}
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h3 className="text-base font-bold text-slate-900">
-                  {isAr ? 'المنتجات المتوفرة للطلب الفوري' : 'Available Products'}
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setTab('offers')}
-                  className="text-xs font-bold text-rose-600 hover:underline whitespace-nowrap"
-                >
-                  {isAr ? `عروض وتخفيضات (${discountedProducts.length})` : `Offers (${discountedProducts.length})`}
-                </button>
-              </div>
-
-              <div className="flex gap-2 overflow-x-auto pb-1">
-                <button
-                  type="button"
-                  onClick={() => setHomeCategoryId('all')}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap min-h-[40px] ${
-                    homeCategoryId === 'all' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-200'
-                  }`}
-                >
-                  {isAr ? 'جميع المنتجات' : 'All Products'}
-                </button>
-                {categories
-                  .filter((c) => c.scope !== 'market')
-                  .map((cat) => (
-                    <button
-                      type="button"
-                      key={cat.id}
-                      onClick={() => setHomeCategoryId(cat.id)}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-semibold border whitespace-nowrap min-h-[40px] ${
-                        homeCategoryId === cat.id ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-200'
-                      }`}
-                    >
-                      {isAr ? cat.name_ar : cat.name_en}
-                    </button>
-                  ))}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {products
-                  .filter((p) => (homeCategoryId === 'all' ? true : p.category_id === homeCategoryId))
-                  .filter((p) => {
-                    if (!homeSearch.trim()) return true;
-                    const q = homeSearch.trim().toLowerCase();
-                    return (
-                      p.name_ar.toLowerCase().includes(q) ||
-                      p.name_en.toLowerCase().includes(q) ||
-                      (p.merchant_name || '').toLowerCase().includes(q) ||
-                      (p.category_name || '').toLowerCase().includes(q)
-                    );
-                  })
-                  .map((p) => {
-                    const qty = cart[p.id] || 0;
-                    const finalPrice = p.sale_price ?? p.base_price;
-                    const hasDiscount = p.sale_price !== null && p.sale_price < p.base_price;
-                    return (
-                      <div
-                        key={p.id}
-                        className="bg-white border border-slate-200 rounded-2xl overflow-hidden flex flex-col justify-between hover:border-orange-400 transition-colors"
-                      >
-                        <div className="h-32 bg-slate-100 relative flex items-center justify-center overflow-hidden">
-                          {p.image_url ? (
-                            <img
-                              src={p.image_url}
-                              alt={p.name_ar}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="flex flex-col items-center gap-1 text-slate-400">
-                              {p.requires_prescription ? <Pill className="w-8 h-8 text-teal-600" /> : <Store className="w-8 h-8 text-orange-500" />}
-                              <span className="text-[11px] font-medium text-slate-500">{p.category_name}</span>
-                            </div>
-                          )}
-                          {(hasDiscount || isProductInOffers(p)) && (
-                            <span className="absolute top-2.5 start-2.5 px-2 py-0.5 bg-rose-600 text-white text-[11px] font-bold rounded-md">
-                              {isAr ? 'عرض' : 'Sale'}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="p-3.5 flex-1 flex flex-col justify-between gap-3">
-                          <div>
-                            <p className="text-[11px] font-semibold text-orange-700 truncate">{p.merchant_name}</p>
-                            <h4 className="text-sm font-bold text-slate-900 mt-0.5 line-clamp-2">{p.name_ar}</h4>
-                            {p.description && <p className="text-xs text-slate-500 mt-1 line-clamp-1">{p.description}</p>}
-                          </div>
-
-                          <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
-                            <div className="tabular-nums">
-                              <span className="text-base font-bold text-slate-900">{finalPrice} ج.م</span>
-                              {hasDiscount && (
-                                <span className="text-xs text-slate-400 line-through ms-1.5">{p.base_price}</span>
-                              )}
-                            </div>
-
-                            {p.requires_prescription ? (
-                              <button
-                                type="button"
-                                onClick={() => openServiceView('pharmacy')}
-                                className="px-3 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-semibold min-h-[40px] whitespace-nowrap"
-                              >
-                                {isAr ? 'اطلب بروشتة' : 'Rx Order'}
-                              </button>
-                            ) : qty > 0 ? (
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => handleAddToCart(p, -1)}
-                                  className="w-9 h-9 border border-slate-200 hover:bg-slate-50 rounded-xl flex items-center justify-center"
-                                >
-                                  <Minus className="w-3.5 h-3.5" />
-                                </button>
-                                <span className="w-6 text-center text-sm font-bold tabular-nums">{qty}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleAddToCart(p, 1)}
-                                  className="w-9 h-9 bg-orange-600 hover:bg-orange-700 text-white rounded-xl flex items-center justify-center"
-                                >
-                                  <Plus className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleAddToCart(p, 1)}
-                                className="flex items-center gap-1 px-3 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-semibold min-h-[40px] whitespace-nowrap"
-                              >
-                                <Plus className="w-3.5 h-3.5" />
-                                <span>{isAr ? 'أضف للسلة' : 'Add'}</span>
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            </div>
+            <OtlobhaStorefrontHome
+              zones={zones}
+              selectedZoneId={selectedZoneId}
+              onChangeZone={setSelectedZoneId}
+              merchants={merchants}
+              banners={storefrontBanners}
+              categories={storefrontCategories}
+              products={storefrontProducts}
+              brands={storefrontBrands}
+              loading={storefrontLoading}
+              hasMore={storefrontHasMore}
+              activeFilter={storefrontFilter}
+              selectedCategoryId={storefrontCategoryId}
+              selectedBrand={storefrontBrand}
+              selectedMerchantId={storefrontMerchantId}
+              cartQtyMap={cart}
+              unreadNotifCount={unreadCount}
+              onChangeFilter={(f) => setStorefrontFilter(f)}
+              onSelectCategory={(catId) => setStorefrontCategoryId(catId)}
+              onSelectBrand={(brand) => setStorefrontBrand(brand)}
+              onSelectMerchant={(mid) => setStorefrontMerchantId(mid)}
+              onClearAllFilters={() => {
+                setStorefrontFilter('for_you');
+                setStorefrontCategoryId('');
+                setStorefrontBrand('');
+                setStorefrontMerchantId('');
+              }}
+              onLoadMore={() => {
+                void loadStorefrontData({
+                  page: storefrontPage + 1,
+                  append: true,
+                });
+              }}
+              onOpenSearch={() => setSearchOverlayOpen(true)}
+              onOpenProduct={(pid) => {
+                setDetailFromStorefrontHome(true);
+                setDetailProductList(storefrontProducts);
+                setDetailProductId(pid);
+              }}
+              onOpenNotifications={() => {
+                setShowInbox(true);
+                setShowSideDrawer(false);
+                setShowLiveTracking(false);
+              }}
+              onOpenService={handleOpenOtlobhaService}
+              onAddProduct={handleAddStorefrontCard}
+              onDecrementProduct={handleDecrementStorefrontProduct}
+            />
           </div>
+        )}
+
+        {/* 1B. CATEGORIES TAB — Visual Storefront Categories Grid */}
+        {tab === 'categories' && (
+          <OtlobhaCategoriesView
+            categories={storefrontCategories}
+            zoneName={zones.find((z) => z.id === selectedZoneId)?.name_ar || 'المنزلة - الدقهلية'}
+            onOpenSearch={() => setSearchOverlayOpen(true)}
+            onSelectCategory={(cat) => {
+              setStorefrontCategoryId(cat.id);
+              setStorefrontBrand('');
+              setStorefrontMerchantId('');
+              setStorefrontFilter('for_you');
+              setTab('home');
+            }}
+            onSelectGroup={(groupKey) => {
+              setStorefrontCategoryId('');
+              setStorefrontBrand('');
+              setStorefrontMerchantId('');
+              if (groupKey === 'fresh') setStorefrontFilter('fresh');
+              else if (groupKey === 'groceries') setStorefrontFilter('groceries');
+              else setStorefrontFilter('for_you');
+              setTab('home');
+            }}
+          />
         )}
 
         {/* 2. SERVICES TAB (Hub + Inline Sub-Views for Stores, Pharmacy, Rides/Parcels, Market) */}
@@ -2772,7 +2774,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                       return (
                         <div key={p.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden flex flex-col justify-between">
                           {p.image_url && (
-                            <div className="h-32 bg-slate-100 relative overflow-hidden">
+                            <div
+                              onClick={() => {
+                                setDetailFromStorefrontHome(false);
+                                setDetailProductList(filteredStoreProducts);
+                                setDetailProductId(p.id);
+                              }}
+                              className="h-32 bg-slate-100 relative overflow-hidden cursor-pointer"
+                            >
                               <img
                                 src={p.image_url}
                                 alt={p.name_ar}
@@ -2787,7 +2796,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                             </div>
                           )}
                           <div className="p-4 flex-1 flex flex-col justify-between gap-3">
-                            <div>
+                            <div
+                              onClick={() => {
+                                setDetailFromStorefrontHome(false);
+                                setDetailProductList(filteredStoreProducts);
+                                setDetailProductId(p.id);
+                              }}
+                              className="cursor-pointer"
+                            >
                               <div className="flex items-center justify-between gap-2">
                                 <p className="text-xs text-slate-500">{p.category_name}</p>
                                 {!p.image_url && hasOfferBadge && (
@@ -2796,7 +2812,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                                   </span>
                                 )}
                               </div>
-                              <h4 className="text-sm font-bold text-slate-900 mt-0.5">{p.name_ar}</h4>
+                              <h4 className="text-sm font-bold text-slate-900 mt-0.5 hover:text-[#A92224] transition-colors">{p.name_ar}</h4>
                               <p className="text-xs text-slate-600 mt-1">{p.description}</p>
                             </div>
                             <div className="flex items-center justify-between pt-2 border-t border-slate-100">
@@ -3732,7 +3748,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                     return (
                       <div key={p.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden flex flex-col justify-between">
                         {p.image_url && (
-                          <div className="h-28 bg-slate-100 relative overflow-hidden">
+                          <div
+                            onClick={() => {
+                              setDetailFromStorefrontHome(false);
+                              setDetailProductList(discountedProducts);
+                              setDetailProductId(p.id);
+                            }}
+                            className="h-28 bg-slate-100 relative overflow-hidden cursor-pointer"
+                          >
                             <img
                               src={p.image_url}
                               alt={p.name_ar}
@@ -3745,7 +3768,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                           </div>
                         )}
                         <div className="p-4 flex-1 flex flex-col justify-between gap-3">
-                          <div>
+                          <div
+                            onClick={() => {
+                              setDetailFromStorefrontHome(false);
+                              setDetailProductList(discountedProducts);
+                              setDetailProductId(p.id);
+                            }}
+                            className="cursor-pointer"
+                          >
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-[11px] font-semibold text-orange-700 truncate">{p.merchant_name}</span>
                               {!p.image_url && (
@@ -3754,7 +3784,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                                 </span>
                               )}
                             </div>
-                            <h4 className="text-sm font-bold text-slate-900 mt-1">{p.name_ar}</h4>
+                            <h4 className="text-sm font-bold text-slate-900 mt-1 hover:text-[#A92224] transition-colors">{p.name_ar}</h4>
                             {p.description && <p className="text-xs text-slate-500 mt-1 line-clamp-2">{p.description}</p>}
                           </div>
                           <div className="flex items-center justify-between pt-2 border-t border-slate-100">
@@ -4946,40 +4976,123 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         )}
       </div>
 
-      {/* STICKY BOTTOM NAVIGATION BAR: الرئيسية | العروض | [الخدمات المبرزة في المنتصف] | السلة | الملف الشخصي */}
+      {/* SMART SEARCH OVERLAY, PRODUCT DETAIL + COMPARISON SHEET, AND SMART ASSISTANT MODAL */}
+      <OtlobhaSmartSearchOverlay
+        open={searchOverlayOpen}
+        cartQtyMap={cart}
+        onClose={() => setSearchOverlayOpen(false)}
+        onOpenProduct={(pid, orderedList) => {
+          setDetailFromStorefrontHome(false);
+          setDetailProductList(orderedList && orderedList.length > 0 ? orderedList : storefrontProducts);
+          setDetailProductId(pid);
+        }}
+        onAddProduct={handleAddStorefrontCard}
+        onDecrementProduct={handleDecrementStorefrontProduct}
+      />
+
+      <OtlobhaProductDetailSheet
+        productId={detailProductId}
+        productList={detailFromStorefrontHome ? storefrontProducts : detailProductList}
+        hasMore={detailFromStorefrontHome && storefrontHasMore}
+        onLoadMore={
+          detailFromStorefrontHome
+            ? () => {
+                void loadStorefrontData({
+                  page: storefrontPage + 1,
+                  append: true,
+                });
+              }
+            : undefined
+        }
+        onActiveProductChange={(pid) => setDetailProductId(pid)}
+        cartCount={cartTotalQty}
+        onClose={() => setDetailProductId(null)}
+        onOpenCart={() => {
+          setSearchOverlayOpen(false);
+          setTab('cart');
+        }}
+        onOpenProduct={(pid, listHint) => {
+          if (listHint && listHint.length > 0) {
+            setDetailFromStorefrontHome(false);
+            setDetailProductList(listHint);
+          }
+          setDetailProductId(pid);
+        }}
+        onSelectBrand={(brandName) => {
+          setSearchOverlayOpen(false);
+          setStorefrontBrand(brandName);
+          setStorefrontCategoryId('');
+          setStorefrontMerchantId('');
+          setTab('home');
+        }}
+        onSelectStore={(mid) => {
+          setSearchOverlayOpen(false);
+          setStorefrontMerchantId(mid);
+          setStorefrontCategoryId('');
+          setStorefrontBrand('');
+          setTab('home');
+        }}
+        onAddToCart={(item) => {
+          ensureProductInCatalogState({
+            id: item.id,
+            merchant_id: item.merchant_id,
+            merchant_name: item.merchant_name,
+            name_ar: item.name_ar,
+            image_url: item.image_url,
+            base_price: item.price,
+            sale_price: null,
+          });
+          setSelectedMerchantId(item.merchant_id);
+          setOrderChannel('catalog');
+          setCart((prev) => ({
+            ...prev,
+            [item.id]: (prev[item.id] || 0) + item.quantity,
+          }));
+        }}
+        onNotify={onNotify}
+      />
+
+      <OtlobhaSmartAssistantModal
+        open={assistantModalOpen}
+        onClose={() => setAssistantModalOpen(false)}
+        onOpenProduct={(pid, orderedList) => {
+          setDetailFromStorefrontHome(false);
+          setDetailProductList(orderedList && orderedList.length > 0 ? orderedList : storefrontProducts);
+          setDetailProductId(pid);
+        }}
+        onAddProduct={handleAddStorefrontCard}
+        onOpenService={handleOpenOtlobhaService}
+      />
+
+      {/* STICKY 5-TAB BOTTOM NAVIGATION BAR: الرئيسية | الأقسام | [المساعد الذكي المركزي] | السلة | حسابي */}
       <nav
         aria-label={isAr ? 'شريط التنقل السفلي لتطبيق العميل' : 'Customer Bottom Navigation'}
-        className="sticky bottom-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 rounded-t-2xl shadow-[0_-4px_20px_rgba(15,23,42,0.08)] px-1 sm:px-4 pt-1 pb-2"
+        className="sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 rounded-t-3xl shadow-[0_-6px_24px_rgba(15,23,42,0.08)] px-1.5 sm:px-4 pt-1 pb-2"
       >
         <div className="grid grid-cols-5 items-end gap-1">
           {bottomNavItems.map((item) => {
             const Icon = item.icon;
-            const active = tab === item.id;
+            const active = item.id !== 'assistant' && tab === item.id;
             if (item.isCenterFeatured) {
               return (
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => {
-                    if (tab !== 'services') {
-                      setServiceView('hub');
-                    }
-                    setTab('services');
-                  }}
-                  className="relative flex flex-col items-center justify-end gap-1 pb-1 min-h-[56px] group"
+                  onClick={() => setAssistantModalOpen(true)}
+                  className="relative flex flex-col items-center justify-end gap-1 pb-1 min-h-[56px] group cursor-pointer"
                 >
                   <div
-                    className={`-mt-6 w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg transition-transform duration-150 group-hover:scale-105 ring-4 ${
-                      active
-                        ? 'bg-gradient-to-br from-[#9E1C1E] via-[#C8431D] to-[#F5A623] text-white ring-[#F5A623]/40'
-                        : 'bg-gradient-to-br from-[#A92224] to-[#D97706] text-white ring-white'
+                    className={`-mt-6 w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition-transform duration-150 group-hover:scale-105 ring-4 ${
+                      assistantModalOpen
+                        ? 'bg-gradient-to-br from-[#86191B] via-[#A92224] to-[#F5A623] text-white ring-[#F5A623]/40'
+                        : 'bg-gradient-to-br from-[#A92224] via-[#C62F28] to-[#F5A623] text-white ring-white'
                     }`}
                   >
                     <Icon className="w-6 h-6" />
                   </div>
                   <span
-                    className={`text-[11px] sm:text-xs whitespace-nowrap leading-none font-extrabold ${
-                      active ? 'text-[#A92224]' : 'text-slate-800'
+                    className={`text-[10px] sm:text-xs whitespace-nowrap leading-none font-black ${
+                      assistantModalOpen ? 'text-[#A92224]' : 'text-slate-800'
                     }`}
                   >
                     {item.label}
@@ -4992,15 +5105,15 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setTab(item.id)}
-                className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl min-h-[54px] transition-colors ${
-                  active ? 'text-[#A92224] bg-red-50/70 font-bold' : 'text-slate-600 hover:bg-slate-50 font-medium'
+                onClick={() => setTab(item.id as BottomTab)}
+                className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-2xl min-h-[54px] transition-colors cursor-pointer ${
+                  active ? 'text-[#A92224] bg-[#FEF2F2] font-black' : 'text-slate-500 hover:bg-slate-50 font-bold'
                 }`}
               >
                 <div className="relative">
                   <Icon className="w-5 h-5" />
                   {typeof item.badge === 'number' && item.badge > 0 && (
-                    <span className="absolute -top-2 -end-2.5 min-w-[18px] h-[18px] px-1 bg-[#A92224] text-white rounded-full text-[10px] font-bold flex items-center justify-center tabular-nums">
+                    <span className="absolute -top-2 -end-2.5 min-w-[18px] h-[18px] px-1 bg-[#A92224] text-white rounded-full text-[10px] font-black flex items-center justify-center tabular-nums">
                       {item.badge}
                     </span>
                   )}

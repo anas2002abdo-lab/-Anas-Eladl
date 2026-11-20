@@ -76,15 +76,40 @@ function getPortalContextHeaders(): Record<string, string> {
 }
 
 async function request<T>(url: string, options?: RequestInit, retryOn401 = true): Promise<T> {
-  const res = await fetch(url, {
-    credentials: 'include',
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...getPortalContextHeaders(),
-      ...(options?.headers || {}),
-    },
-  });
+  const method = (options?.method || 'GET').toUpperCase();
+  const maxNetworkAttempts = method === 'GET' ? 3 : 1;
+  let res: Response | null = null;
+  let lastNetworkErr: unknown = null;
+
+  for (let attempt = 1; attempt <= maxNetworkAttempts; attempt++) {
+    try {
+      res = await fetch(url, {
+        credentials: 'include',
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...getPortalContextHeaders(),
+          ...(options?.headers || {}),
+        },
+      });
+      lastNetworkErr = null;
+      break;
+    } catch (err) {
+      lastNetworkErr = err;
+      if (attempt < maxNetworkAttempts) {
+        await new Promise((r) => setTimeout(r, attempt * 450));
+      }
+    }
+  }
+
+  if (!res) {
+    throw new Error(
+      lastNetworkErr instanceof Error && lastNetworkErr.message && lastNetworkErr.message !== 'Failed to fetch'
+        ? lastNetworkErr.message
+        : 'تعذر الاتصال بالخادم مؤقتًا — يرجى المحاولة مرة أخرى'
+    );
+  }
+
   if (res.status === 401 && retryOn401 && shouldAttemptRefresh(url)) {
     const refreshed = await tryRefreshCookieSession();
     if (refreshed) {
@@ -180,12 +205,50 @@ export const api = {
     request<any>('/api/orders/' + id + '/merchant-action', { method: 'PATCH', body: JSON.stringify(body) }),
   getCategories: (scope?: string) => request<any[]>(`/api/categories${scope ? `?scope=${scope}` : ''}`),
   createCategory: (body: Record<string, unknown>) =>
-    request<{ id: string }>('/api/categories', { method: 'POST', body: JSON.stringify(body) }),
+    request<{ id: string; created_count?: number; full_path_ar?: string }>('/api/categories', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  importCategoriesExcel: (body: {
+    paths?: string[];
+    rows?: Array<{ path?: string; image_url?: string }>;
+    scope?: 'merchant' | 'pharmacy' | 'market';
+    merchant_id?: string | null;
+  }) =>
+    request<{ ok: boolean; processed_paths: number; created_count: number }>('/api/categories/import-excel', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   updateCategory: (id: string, body: Record<string, unknown>) =>
     request('/api/categories/' + id, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteCategory: (id: string) => request('/api/categories/' + id, { method: 'DELETE' }),
   getProducts: (merchantId?: string) =>
     request<any[]>(`/api/products${merchantId ? `?merchant_id=${merchantId}` : ''}`),
+  getProductsPaginated: (params?: {
+    merchant_id?: string;
+    category_id?: string;
+    offers_only?: boolean;
+    q?: string;
+    page?: number;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    qs.set('paginated', '1');
+    if (params?.merchant_id && params.merchant_id !== 'all') qs.set('merchant_id', params.merchant_id);
+    if (params?.category_id && params.category_id !== 'all') qs.set('category_id', params.category_id);
+    if (params?.offers_only) qs.set('offers_only', '1');
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    return request<{
+      items: any[];
+      total: number;
+      page: number;
+      limit: number;
+      total_pages: number;
+      has_more: boolean;
+    }>(`/api/products?${qs.toString()}`);
+  },
   createProduct: (body: Record<string, unknown>) =>
     request<{ id: string }>('/api/products', { method: 'POST', body: JSON.stringify(body) }),
   updateProduct: (id: string, body: Record<string, unknown>) =>
@@ -667,6 +730,28 @@ export const api = {
       body: JSON.stringify(body),
     }),
   getAdminCustomers: () => request<any[]>('/api/admin/customers'),
+  getAdminCustomersPaginated: (params?: {
+    q?: string;
+    filter?: 'all' | 'active' | 'registered';
+    page?: number;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    qs.set('paginated', '1');
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    if (params?.filter && params.filter !== 'all') qs.set('filter', params.filter);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    return request<{
+      items: any[];
+      total: number;
+      page: number;
+      limit: number;
+      total_pages: number;
+      has_more: boolean;
+      stats: { total_customers: number; registered_count: number; active_users_count: number };
+    }>(`/api/admin/customers?${qs.toString()}`);
+  },
   getAdminCustomerDetail: (id: string) => request<any>('/api/admin/customers/' + encodeURIComponent(id)),
   adminUpdateOrder: (orderId: string, body: Record<string, unknown>) =>
     request<{ ok: boolean; order: any }>('/api/admin/orders/' + encodeURIComponent(orderId), {
@@ -776,6 +861,248 @@ export const api = {
     request<{ ok: boolean; ticket: any }>(`/api/support/tickets/${encodeURIComponent(ticketId)}`, {
       method: 'PATCH',
       body: JSON.stringify({ status }),
+    }),
+
+  // =========================================================================
+  // Storefront, Multi-Store Comparison & Smart Assistant APIs
+  // =========================================================================
+  getStorefrontHome: (params?: {
+    filter?: string;
+    category_id?: string;
+    merchant_id?: string;
+    brand?: string;
+    page?: number;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.filter) qs.set('filter', params.filter);
+    if (params?.category_id) qs.set('category_id', params.category_id);
+    if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
+    if (params?.brand) qs.set('brand', params.brand);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{
+      banners: any[];
+      categories: any[];
+      products: any[];
+      brands: string[];
+      pagination: { page: number; limit: number; total: number; has_more: boolean };
+    }>(`/api/storefront/home${suffix}`);
+  },
+  searchStorefront: (params?: {
+    q?: string;
+    merchant_id?: string;
+    category_id?: string;
+    brand?: string;
+    min_price?: string | number;
+    max_price?: string | number;
+    sort?: string;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
+    if (params?.category_id) qs.set('category_id', params.category_id);
+    if (params?.brand) qs.set('brand', params.brand);
+    if (params?.min_price !== undefined && params?.min_price !== '') qs.set('min_price', String(params.min_price));
+    if (params?.max_price !== undefined && params?.max_price !== '') qs.set('max_price', String(params.max_price));
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{
+      query: string;
+      items: any[];
+      top_offers: any[];
+      trending_queries: string[];
+      facets: { brands: string[]; stores: Array<{ id: string; business_name_ar: string; products_count: number }> };
+    }>(`/api/storefront/search${suffix}`);
+  },
+  getStorefrontProductDetails: (productId: string) =>
+    request<any>(`/api/storefront/products/${encodeURIComponent(productId)}/details`),
+  askStorefrontAssistant: (message: string) =>
+    request<{ reply_ar: string; suggested_products: any[]; quick_prompts: string[] }>('/api/storefront/assistant', {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+
+  // =========================================================================
+  // Merchant Master Catalog Matching, Linking & Savings Deals
+  // =========================================================================
+  matchMasterCatalog: (body: {
+    name_ar?: string;
+    name_en?: string;
+    brand?: string;
+    barcode?: string;
+    size_label?: string;
+    category_id?: string;
+  }) =>
+    request<{
+      match_status: 'exact' | 'possible' | 'none';
+      exact_match: any | null;
+      candidates: any[];
+      parsed_size: any | null;
+      size_conflict_warning?: string | null;
+    }>('/api/merchant/master-catalog/match', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  linkMerchantMasterListing: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; listing: any; updated_existing: boolean }>('/api/merchant/master-catalog/link-listing', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  requestNewMasterProduct: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; request: any; match_preview: any }>('/api/merchant/master-catalog/request-new', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  getMerchantMatchingRequests: (merchantId?: string) =>
+    request<any[]>(
+      `/api/merchant/master-catalog/my-requests${merchantId ? `?merchant_id=${encodeURIComponent(merchantId)}` : ''}`
+    ),
+  getProductDeals: (params?: { merchant_id?: string; product_id?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
+    if (params?.product_id) qs.set('product_id', params.product_id);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<any[]>(`/api/deals${suffix}`);
+  },
+  createProductDeal: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; id: string }>('/api/deals', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteProductDeal: (id: string) =>
+    request<{ ok: boolean }>(`/api/deals/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // =========================================================================
+  // Super Admin Master Catalog & Storefront Banners APIs
+  // =========================================================================
+  getAdminMasterProducts: (params?: { q?: string; status?: string; page?: number; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{
+      items: any[];
+      total: number;
+      page: number;
+      limit: number;
+      stats: {
+        approved_masters: number;
+        pending_requests: number;
+        linked_listings: number;
+        multi_store_masters: number;
+      };
+    }>(`/api/admin/master-products${suffix}`);
+  },
+  getAdminMasterProductListings: (masterId: string) =>
+    request<{ master: any; listings: any[]; attributes: any[] }>(
+      `/api/admin/master-products/${encodeURIComponent(masterId)}/listings`
+    ),
+  createAdminMasterProduct: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; master: any }>('/api/admin/master-products', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateAdminMasterProduct: (id: string, body: Record<string, unknown>) =>
+    request<{ ok: boolean; master: any }>(`/api/admin/master-products/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  getAdminMasterDuplicates: () => request<any[]>('/api/admin/master-products/duplicates'),
+  mergeAdminMasterProducts: (body: { source_master_id: string; target_master_id: string; reason?: string }) =>
+    request<{ ok: boolean; moved_listings: number; deduplicated_listings: number }>(
+      '/api/admin/master-products/merge',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+  unlinkMasterListing: (listing_id: string, reason?: string) =>
+    request<{ ok: boolean }>('/api/admin/master-products/unlink-listing', {
+      method: 'POST',
+      body: JSON.stringify({ listing_id, reason }),
+    }),
+  relinkMasterListing: (listing_id: string, target_master_id: string, reason?: string) =>
+    request<{ ok: boolean }>('/api/admin/master-products/relink-listing', {
+      method: 'POST',
+      body: JSON.stringify({ listing_id, target_master_id, reason }),
+    }),
+  getAdminMatchingRequests: (status = 'pending') =>
+    request<any[]>(`/api/admin/matching-requests?status=${encodeURIComponent(status)}`),
+  reviewAdminMatchingRequest: (
+    requestId: string,
+    body: {
+      decision: 'approve_new' | 'link_existing' | 'reject';
+      target_master_id?: string | null;
+      auto_create_listing?: boolean;
+      admin_note?: string;
+    }
+  ) =>
+    request<{ ok: boolean; request: any; master?: any; listing?: any }>(
+      `/api/admin/matching-requests/${encodeURIComponent(requestId)}/review`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+  getMasterCatalogAudit: () => request<any[]>('/api/admin/master-catalog/audit'),
+  getAdminStorefrontBanners: () => request<any[]>('/api/admin/storefront-banners'),
+  createAdminStorefrontBanner: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; id: string }>('/api/admin/storefront-banners', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateAdminStorefrontBanner: (id: string, body: Record<string, unknown>) =>
+    request<{ ok: boolean }>(`/api/admin/storefront-banners/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteAdminStorefrontBanner: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/storefront-banners/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  exportAllAdminMasterProducts: () =>
+    request<{ items: any[]; total: number }>('/api/admin/master-products/export-all'),
+  compareMasterProductsExcel: (rows: Array<Record<string, unknown>>) =>
+    request<{
+      summary: {
+        total_rows: number;
+        existing_count: number;
+        not_found_count: number;
+        possible_count: number;
+        duplicate_in_file_count: number;
+      };
+      existing: any[];
+      not_found: any[];
+      possible: any[];
+      all_rows: any[];
+    }>('/api/admin/master-products/excel-compare', {
+      method: 'POST',
+      body: JSON.stringify({ rows }),
+    }),
+  importMasterProductsExcel: (body: {
+    rows: Array<Record<string, unknown>>;
+    default_category_id?: string;
+    skip_existing?: boolean;
+    update_missing_fields?: boolean;
+  }) =>
+    request<{
+      ok: boolean;
+      created_count: number;
+      skipped_existing_count: number;
+      updated_existing_count: number;
+      categories_created_count?: number;
+      error_count: number;
+      errors: Array<{ row_index: number; name_ar: string; error: string }>;
+      created_ids: string[];
+    }>('/api/admin/master-products/excel-import', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 };
 

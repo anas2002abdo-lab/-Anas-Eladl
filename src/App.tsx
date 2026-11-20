@@ -3,7 +3,9 @@ import {
   BarChart3,
   Bell,
   CheckCircle2,
+  Cloud,
   Languages,
+  Layers,
   LogOut,
   MapPin,
   Menu,
@@ -34,16 +36,32 @@ import { MerchantsOrdersSection } from './components/MerchantsOrdersSection.tsx'
 import { CustomersSection } from './components/CustomersSection.tsx';
 import { SupportCenterSection } from './components/SupportCenterSection.tsx';
 import { CatalogSection } from './components/CatalogSection.tsx';
+import { MasterCatalogAdminSection } from './components/MasterCatalogAdminSection.tsx';
 import { InvoiceDesignSection } from './components/InvoiceDesignSection.tsx';
 import { MarketFinanceSection } from './components/MarketFinanceSection.tsx';
 import { GovernanceAuditSection } from './components/GovernanceAuditSection.tsx';
 import { NotificationsSection } from './components/NotificationsSection.tsx';
 import { CustomerMobilePreview } from './components/CustomerMobilePreview.tsx';
 import { CaptainMobilePreview } from './components/CaptainMobilePreview.tsx';
+import { CloudDatabaseSection } from './components/CloudDatabaseSection.tsx';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton.tsx';
+import type { User as FirebaseUser } from 'firebase/auth';
+import {
+  fetchCloudVaultMeta,
+  fetchServerSyncStatus,
+  pushAllToCloudVault,
+  restoreAllFromCloudVault,
+  signInFirebaseCloudVault,
+  signOutFirebaseCloudVault,
+  subscribeFirebaseAuth,
+  type CloudSyncProgress,
+  type CloudVaultMeta,
+  type ServerSyncStatus,
+} from './lib/cloudVaultSync.ts';
 import type {
   AdminUserRecord,
   CaptainRecord,
+  CategoryRecord,
   Language,
   MerchantRecord,
   OrderRecord,
@@ -85,6 +103,28 @@ export default function App() {
   const [captains, setCaptains] = useState<CaptainRecord[]>([]);
   const [merchants, setMerchants] = useState<MerchantRecord[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [categories, setCategories] = useState<CategoryRecord[]>([]);
+
+  // Permanent Firebase Cloud Vault state
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [firebaseAuthReady, setFirebaseAuthReady] = useState(false);
+  const [serverSyncStatus, setServerSyncStatus] = useState<ServerSyncStatus | null>(null);
+  const [cloudVaultMeta, setCloudVaultMeta] = useState<CloudVaultMeta | null>(null);
+  const [autoCloudSync, setAutoCloudSync] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('otlobha_auto_cloud_sync') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const [cloudProgress, setCloudProgress] = useState<CloudSyncProgress>({
+    phase: 'idle',
+    message: '',
+    processed: 0,
+    total: 0,
+  });
+  const cloudSyncBusyRef = useRef(false);
+  const autoRestoredBootRef = useRef<string | null>(null);
 
   const isAr = lang === 'ar';
 
@@ -104,59 +144,216 @@ export default function App() {
 
   const refreshCore = async (forceAdmin?: boolean, explicitMerchant?: MerchantRecord | null) => {
     const isAdmin = forceAdmin !== undefined ? forceAdmin : Boolean(adminUserRef.current);
-    if (isAdmin) {
-      const [ov, srv, zn, cap, mer, ord] = await Promise.all([
-        api.getOverview(),
+    try {
+      if (isAdmin) {
+        const [ovRes, srvRes, znRes, capRes, merRes, ordRes, catsRes] = await Promise.allSettled([
+          api.getOverview(),
+          api.getServices(),
+          api.getZones(),
+          api.getCaptains(),
+          api.getMerchants(false),
+          api.getOrders(),
+          api.getCategories(),
+        ]);
+        if (ovRes.status === 'fulfilled') setOverview(ovRes.value);
+        if (srvRes.status === 'fulfilled') setServices(srvRes.value);
+        if (znRes.status === 'fulfilled') setZones(znRes.value);
+        if (capRes.status === 'fulfilled') setCaptains(capRes.value);
+        if (merRes.status === 'fulfilled') {
+          const mer = merRes.value;
+          setMerchants(mer);
+          setMerchantSession((prev) => {
+            if (!prev) return null;
+            const fresh = mer.find((m: MerchantRecord) => m.id === prev.id);
+            if (!fresh) {
+              try {
+                localStorage.removeItem(MERCHANT_SESSION_KEY);
+              } catch {
+                // ignore
+              }
+              return null;
+            }
+            try {
+              localStorage.setItem(MERCHANT_SESSION_KEY, JSON.stringify(fresh));
+            } catch {
+              // ignore
+            }
+            return fresh;
+          });
+        }
+        if (ordRes.status === 'fulfilled') setOrders(ordRes.value);
+        if (catsRes.status === 'fulfilled') setCategories(catsRes.value);
+        return;
+      }
+
+      const [srvRes, znRes, merRes, ordRes] = await Promise.allSettled([
         api.getServices(),
         api.getZones(),
-        api.getCaptains(),
-        api.getMerchants(false),
+        api.getMerchants(true),
         api.getOrders(),
       ]);
-      setOverview(ov);
-      setServices(srv);
-      setZones(zn);
-      setCaptains(cap);
-      setMerchants(mer);
-      setOrders(ord);
-      setMerchantSession((prev) => {
-        if (!prev) return null;
-        const fresh = mer.find((m: MerchantRecord) => m.id === prev.id);
-        if (!fresh) {
-          try {
-            localStorage.removeItem(MERCHANT_SESSION_KEY);
-          } catch {
-            // ignore
-          }
-          return null;
-        }
-        try {
-          localStorage.setItem(MERCHANT_SESSION_KEY, JSON.stringify(fresh));
-        } catch {
-          // ignore
-        }
-        return fresh;
-      });
-      return;
+      setOverview(null);
+      setCaptains([]);
+      if (srvRes.status === 'fulfilled') setServices(srvRes.value);
+      if (znRes.status === 'fulfilled') setZones(znRes.value);
+      if (merRes.status === 'fulfilled') setMerchants(merRes.value);
+      if (ordRes.status === 'fulfilled') setOrders(ordRes.value);
+    } catch {
+      // Transient network errors are swallowed cleanly to avoid unhandled rejections
     }
-
-    const [srv, zn, mer, ord] = await Promise.all([
-      api.getServices(),
-      api.getZones(),
-      api.getMerchants(true),
-      api.getOrders().catch(() => []),
-    ]);
-    setOverview(null);
-    setCaptains([]);
-    setServices(srv);
-    setZones(zn);
-    setMerchants(mer);
-    setOrders(ord);
   };
 
   useEffect(() => {
     refreshCore().catch(() => {});
   }, [portalMode]);
+
+  // Subscribe to Firebase Auth state for the permanent Cloud Vault
+  useEffect(() => {
+    const unsub = subscribeFirebaseAuth((u) => {
+      setFirebaseUser(u);
+      setFirebaseAuthReady(true);
+    });
+    return () => unsub();
+  }, []);
+
+  const refreshCloudSyncStatus = async (explicitUser?: FirebaseUser | null) => {
+    if (!adminUserRef.current) return null;
+    try {
+      const srv = await fetchServerSyncStatus();
+      setServerSyncStatus(srv);
+      const activeFbUser = explicitUser !== undefined ? explicitUser : firebaseUser;
+      if (activeFbUser) {
+        const meta = await fetchCloudVaultMeta(activeFbUser);
+        setCloudVaultMeta(meta);
+        return { srv, meta };
+      }
+      setCloudVaultMeta(null);
+      return { srv, meta: null };
+    } catch (err) {
+      console.warn('[CloudVault] Status check error:', err);
+      return null;
+    }
+  };
+
+  const handleCloudPushNow = async (silent = false) => {
+    if (!firebaseUser || !adminUserRef.current || cloudSyncBusyRef.current) return;
+    cloudSyncBusyRef.current = true;
+    try {
+      const result = await pushAllToCloudVault(firebaseUser, setCloudProgress);
+      setCloudVaultMeta(result.meta);
+      const srv = await fetchServerSyncStatus().catch(() => null);
+      if (srv) setServerSyncStatus(srv);
+      if (!silent) {
+        notify(`تم حفظ ${result.syncedRecords.toLocaleString('ar-EG')} سجل في قاعدة البيانات السحابية الدائمة`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'تعذر الحفظ في قاعدة البيانات السحابية';
+      setCloudProgress({ phase: 'error', message: msg, processed: 0, total: 0 });
+      if (!silent) notify(msg);
+    } finally {
+      cloudSyncBusyRef.current = false;
+    }
+  };
+
+  const handleCloudRestoreNow = async (silent = false) => {
+    if (!firebaseUser || !adminUserRef.current || cloudSyncBusyRef.current) return;
+    cloudSyncBusyRef.current = true;
+    try {
+      const res = await restoreAllFromCloudVault(firebaseUser, setCloudProgress);
+      await refreshCore(true);
+      await refreshCloudSyncStatus(firebaseUser);
+      if (!silent) {
+        notify(`تمت استعادة ${res.totalRestored.toLocaleString('ar-EG')} سجل من السحابة بنجاح`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'تعذرت الاستعادة من قاعدة البيانات السحابية';
+      setCloudProgress({ phase: 'error', message: msg, processed: 0, total: 0 });
+      if (!silent) notify(msg);
+    } finally {
+      cloudSyncBusyRef.current = false;
+    }
+  };
+
+  const handleToggleAutoCloudSync = (enabled: boolean) => {
+    setAutoCloudSync(enabled);
+    try {
+      localStorage.setItem('otlobha_auto_cloud_sync', enabled ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSignInCloudGoogle = async () => {
+    try {
+      const u = await signInFirebaseCloudVault();
+      setFirebaseUser(u);
+      notify(`تم ربط الخزنة السحابية الدائمة بحساب ${u.email || ''}`);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'تعذر تسجيل الدخول عبر Google');
+    }
+  };
+
+  const handleSignOutCloudGoogle = async () => {
+    await signOutFirebaseCloudVault();
+    setFirebaseUser(null);
+    setCloudVaultMeta(null);
+    setCloudProgress({ phase: 'idle', message: '', processed: 0, total: 0 });
+    notify('تم فصل ربط الخزنة السحابية');
+  };
+
+  // Automatic recovery after any update/restart + background incremental push watchdog
+  useEffect(() => {
+    if (!adminUser || !firebaseAuthReady) return;
+    let cancelled = false;
+
+    const runCheckAndSync = async (isInitial: boolean) => {
+      if (cancelled || cloudSyncBusyRef.current) return;
+      const res = await refreshCloudSyncStatus(firebaseUser);
+      if (cancelled || !res || !firebaseUser || !autoCloudSync) return;
+
+      const { srv, meta } = res;
+      const cloudCoreTotal = meta
+        ? meta.customersCount +
+          meta.ordersCount +
+          meta.tripsCount +
+          meta.deliveriesCount +
+          meta.captainsCount +
+          meta.merchantsCount +
+          meta.categoriesCount +
+          meta.productsCount +
+          meta.walletsCount
+        : 0;
+
+      // Auto-restore immediately if container restarted/updated cleanly while cloud vault has persisted data
+      if (
+        meta &&
+        cloudCoreTotal > 0 &&
+        (srv.is_fresh_empty || (srv.total_core_records === 0 && !srv.restored_from_cloud_at)) &&
+        autoRestoredBootRef.current !== srv.server_boot_at
+      ) {
+        autoRestoredBootRef.current = srv.server_boot_at;
+        await handleCloudRestoreNow(false);
+        return;
+      }
+
+      // Auto-push whenever local DB has real data and either cloud is empty or new mutations occurred
+      const needsInitialBackup = !meta && srv.total_core_records > 0;
+      const needsDeltaBackup = srv.has_unsynced_changes && srv.total_core_records > 0;
+      if ((isInitial && needsInitialBackup) || needsDeltaBackup) {
+        await handleCloudPushNow(true);
+      }
+    };
+
+    void runCheckAndSync(true);
+    const interval = window.setInterval(() => {
+      void runCheckAndSync(false);
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [adminUser, firebaseUser, firebaseAuthReady, autoCloudSync]);
 
   useEffect(() => {
     if (portalMode === 'admin' && adminUserRef.current && (activeTab === 'captains' || activeTab === 'overview' || activeTab === 'orders')) {
@@ -239,29 +436,58 @@ export default function App() {
     else setActiveTab(mode);
   };
 
-  const navItems =
+  const navGroups =
     portalMode === 'admin' && adminUser
       ? [
-          { id: 'overview', label: isAr ? 'لوحة المؤشرات' : 'Overview', icon: BarChart3 },
-          { id: 'customers', label: isAr ? 'العملاء والمستخدمون' : 'Customers & Users', icon: Users },
-          { id: 'support', label: isAr ? 'التواصل مع العملاء والدعم' : 'Customer Support', icon: MessageSquare },
-          { id: 'notifications', label: isAr ? 'الإشعارات والحملات' : 'Push Notifications', icon: Bell },
-          { id: 'pricing', label: isAr ? 'التسعير والتوزيع والمالية' : 'Pricing & Dispatch', icon: Sliders },
-          { id: 'services', label: isAr ? 'الخدمات ومناطق المنزلة' : 'Services & Zones', icon: MapPin },
-          { id: 'catalog', label: isAr ? 'المنتجات والأقسام والمخزون' : 'Products & Categories', icon: Package },
-          { id: 'invoice_design', label: isAr ? 'تصميم فاتورة العميل' : 'Invoice Design', icon: Receipt },
-          { id: 'orders', label: isAr ? 'التجار والصيدليات والطلبات' : 'Merchants & Orders', icon: Store },
-          { id: 'captains', label: isAr ? 'الكباتن وتوثيق المركبات' : 'Captains & KYC', icon: Truck },
-          { id: 'market', label: isAr ? 'إدارة السوق (C2C)' : 'Otlobha Market', icon: ShoppingBag },
-          { id: 'finance', label: isAr ? 'الدفتر المالي والمحافظ' : 'Ledger & Wallets', icon: Wallet },
-          { id: 'governance', label: isAr ? 'الصلاحيات والشكاوى والتدقيق' : 'RBAC & Audit Logs', icon: ShieldCheck },
+          {
+            groupLabel: isAr ? 'الرئيسية والتقارير' : 'Overview',
+            items: [
+              { id: 'overview', label: isAr ? 'لوحة المؤشرات' : 'Overview', icon: BarChart3 },
+            ],
+          },
+          {
+            groupLabel: isAr ? 'الكتالوج والمتجر' : 'Catalog & Storefront',
+            items: [
+              { id: 'master_catalog', label: isAr ? 'الكتالوج المركزي والمقارنة' : 'Master Catalog', icon: Layers },
+              { id: 'catalog', label: isAr ? 'منتجات المتاجر والأقسام' : 'Store Products & Categories', icon: Package },
+              { id: 'invoice_design', label: isAr ? 'تصميم فاتورة العميل' : 'Invoice Design', icon: Receipt },
+            ],
+          },
+          {
+            groupLabel: isAr ? 'التشغيل والعملاء' : 'Operations & Users',
+            items: [
+              { id: 'orders', label: isAr ? 'التجار والصيدليات والطلبات' : 'Merchants & Orders', icon: Store },
+              { id: 'customers', label: isAr ? 'العملاء والمستخدمون' : 'Customers & Users', icon: Users },
+              { id: 'captains', label: isAr ? 'الكباتن وتوثيق المركبات' : 'Captains & KYC', icon: Truck },
+              { id: 'market', label: isAr ? 'إدارة السوق (C2C)' : 'Otlobha Market', icon: ShoppingBag },
+              { id: 'support', label: isAr ? 'التواصل مع العملاء والدعم' : 'Customer Support', icon: MessageSquare },
+              { id: 'notifications', label: isAr ? 'الإشعارات والحملات' : 'Push Notifications', icon: Bell },
+            ],
+          },
+          {
+            groupLabel: isAr ? 'المالية والنظام' : 'Finance & System',
+            items: [
+              { id: 'pricing', label: isAr ? 'التسعير والتوزيع والمالية' : 'Pricing & Dispatch', icon: Sliders },
+              { id: 'services', label: isAr ? 'الخدمات ومناطق المنزلة' : 'Services & Zones', icon: MapPin },
+              { id: 'finance', label: isAr ? 'الدفتر المالي والمحافظ' : 'Ledger & Wallets', icon: Wallet },
+              { id: 'cloud_db', label: isAr ? 'قاعدة البيانات السحابية' : 'Cloud Database', icon: Cloud },
+              { id: 'governance', label: isAr ? 'الصلاحيات والشكاوى والتدقيق' : 'RBAC & Audit Logs', icon: ShieldCheck },
+            ],
+          },
         ]
       : portalMode === 'merchant' && merchantSession
       ? [
-          { id: 'orders', label: isAr ? 'طلبات متجري الواردة' : 'Store Orders', icon: Store },
-          { id: 'catalog', label: isAr ? 'إدارة المنتجات والأقسام' : 'Products & Categories', icon: Package },
+          {
+            groupLabel: isAr ? 'بوابة التاجر' : 'Merchant Portal',
+            items: [
+              { id: 'orders', label: isAr ? 'طلبات متجري الواردة' : 'Store Orders', icon: Store },
+              { id: 'catalog', label: isAr ? 'المنتجات والكتالوج المركزي' : 'Products & Master Catalog', icon: Package },
+            ],
+          },
         ]
       : [];
+
+  const navItems = navGroups.flatMap((g) => g.items);
 
   const activeNav = navItems.find((n) => n.id === activeTab) ?? navItems[0];
 
@@ -287,31 +513,44 @@ export default function App() {
         <>
           {/* Desktop Sidebar */}
           <aside className="hidden md:flex w-64 shrink-0 bg-slate-900 text-slate-100 flex-col border-e border-slate-800">
-            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-center">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center gap-2.5 justify-center">
               <img
                 src="/assets/aistudio/Picsart_25-11-19_14-05-26-471_82d5a262.jpg"
                 alt="Otlobha Logo"
-                className="w-9 h-9 rounded-lg bg-white object-contain p-0.5 shadow-sm"
+                className="w-10 h-10 rounded-xl bg-white object-contain p-0.5 shadow-sm"
               />
+              <div className="text-start">
+                <div className="text-sm font-black text-white leading-tight">اطلبها Otlobha</div>
+                <div className="text-[10px] font-bold text-[#F5A623]">{portalLabel}</div>
+              </div>
             </div>
 
-            <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                const active = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => setActiveTab(item.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors text-start ${
-                      active ? 'bg-orange-600 text-white' : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                    }`}
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <span className="truncate">{item.label}</span>
-                  </button>
-                );
-              })}
+            <nav className="flex-1 p-3 space-y-4 overflow-y-auto">
+              {navGroups.map((grp) => (
+                <div key={grp.groupLabel} className="space-y-1">
+                  <div className="px-3 text-[10px] font-black tracking-wider uppercase text-slate-400">
+                    {grp.groupLabel}
+                  </div>
+                  {grp.items.map((item) => {
+                    const Icon = item.icon;
+                    const active = activeTab === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => setActiveTab(item.id)}
+                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors text-start cursor-pointer ${
+                          active
+                            ? 'bg-[#A92224] text-white shadow-sm'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <Icon className={`w-4 h-4 shrink-0 ${active ? 'text-[#F5A623]' : ''}`} />
+                        <span className="truncate">{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
 
               {((portalMode === 'admin' && !adminUser) || (portalMode === 'merchant' && !merchantSession)) && (
                 <div className="p-3 bg-slate-800/70 rounded-lg text-xs text-slate-300 space-y-2">
@@ -457,6 +696,23 @@ export default function App() {
             <PWAInstallButton lang={lang} onNotify={notify} />
 
             {portalMode === 'admin' && adminUser && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('cloud_db')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${
+                  activeTab === 'cloud_db'
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : firebaseUser
+                    ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
+                    : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                }`}
+              >
+                <Cloud className="w-3.5 h-3.5 shrink-0" />
+                <span>{isAr ? 'قاعدة البيانات السحابية' : 'Cloud DB'}</span>
+              </button>
+            )}
+
+            {portalMode === 'admin' && adminUser && (
               <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-xs">
                 <ShieldCheck className="w-3.5 h-3.5 text-teal-700 shrink-0" />
                 <span className="font-semibold text-slate-800">{adminUser.full_name}</span>
@@ -501,7 +757,7 @@ export default function App() {
                   </button>
                   <button
                     onClick={() => {
-                      refreshCore();
+                      void refreshCore();
                       setHeaderMenuOpen(false);
                     }}
                     className="w-full text-start px-4 py-2.5 hover:bg-slate-50 text-slate-700 font-medium flex items-center gap-2.5"
@@ -678,6 +934,14 @@ export default function App() {
                 <ServicesZonesSection lang={lang} services={services} zones={zones} onRefresh={refreshCore} onNotify={notify} />
               )}
               {activeTab === 'pricing' && portalMode === 'admin' && <PricingDispatchSection lang={lang} zones={zones} onNotify={notify} />}
+              {activeTab === 'master_catalog' && portalMode === 'admin' && (
+                <MasterCatalogAdminSection
+                  categories={categories}
+                  merchants={merchants}
+                  onRefresh={() => void refreshCore()}
+                  onToast={notify}
+                />
+              )}
               {activeTab === 'catalog' && (
                 <CatalogSection
                   lang={lang}
@@ -686,6 +950,9 @@ export default function App() {
                   merchantSession={merchantSession}
                   onRefreshCore={refreshCore}
                   onMerchantUpdated={(updated) => {
+                    setMerchants((prev) =>
+                      prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m))
+                    );
                     if (merchantSession && updated.id === merchantSession.id) {
                       const next = { ...merchantSession, ...updated };
                       setMerchantSession(next);
@@ -729,6 +996,25 @@ export default function App() {
               )}
               {activeTab === 'finance' && (
                 <MarketFinanceSection lang={lang} mode="finance" onNotify={notify} onRefreshOverview={refreshCore} />
+              )}
+              {activeTab === 'cloud_db' && (
+                <CloudDatabaseSection
+                  firebaseUser={firebaseUser}
+                  authReady={firebaseAuthReady}
+                  serverStatus={serverSyncStatus}
+                  cloudMeta={cloudVaultMeta}
+                  progress={cloudProgress}
+                  autoSyncEnabled={autoCloudSync}
+                  onToggleAutoSync={handleToggleAutoCloudSync}
+                  onSignInGoogle={handleSignInCloudGoogle}
+                  onSignOutGoogle={handleSignOutCloudGoogle}
+                  onPushNow={() => handleCloudPushNow(false)}
+                  onRestoreNow={() => handleCloudRestoreNow(false)}
+                  onRefreshStatus={async () => {
+                    await refreshCloudSyncStatus();
+                    notify('تم تحديث حالة قاعدة البيانات السحابية');
+                  }}
+                />
               )}
               {activeTab === 'governance' && (
                 <GovernanceAuditSection lang={lang} onNotify={notify} onRefreshOverview={refreshCore} />

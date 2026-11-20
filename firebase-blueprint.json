@@ -1,0 +1,426 @@
+{
+  "entities": {
+    "AdminAccount": {
+      "title": "AdminAccount",
+      "description": "Authorized Firebase administrator granted access to the Otlobha persistent cloud vault.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "ops_admin"] },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "role", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "VaultMeta": {
+      "title": "VaultMeta",
+      "description": "Master cloud synchronization state and entity counts for automatic recovery after updates or container restarts.",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "version": { "type": "integer" },
+        "customersCount": { "type": "integer" },
+        "ordersCount": { "type": "integer" },
+        "tripsCount": { "type": "integer" },
+        "deliveriesCount": { "type": "integer" },
+        "captainsCount": { "type": "integer" },
+        "merchantsCount": { "type": "integer" },
+        "categoriesCount": { "type": "integer" },
+        "productsCount": { "type": "integer" },
+        "walletsCount": { "type": "integer" },
+        "ledgerEntriesCount": { "type": "integer" },
+        "settlementsCount": { "type": "integer" },
+        "lastSourceFingerprint": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerUid",
+        "version",
+        "customersCount",
+        "ordersCount",
+        "tripsCount",
+        "deliveriesCount",
+        "captainsCount",
+        "merchantsCount",
+        "categoriesCount",
+        "productsCount",
+        "walletsCount",
+        "ledgerEntriesCount",
+        "settlementsCount",
+        "lastSourceFingerprint",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomerRecord": {
+      "title": "CustomerRecord",
+      "description": "Persistent customer account profile, credentials hash, and default address/zone.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "email": { "type": "string", "maxLength": 180 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "passwordHash": { "type": "string", "maxLength": 260 },
+        "status": { "type": "string", "enum": ["active", "suspended", "blocked", "deleted"] },
+        "defaultZoneId": { "type": "string", "maxLength": 128 },
+        "addressLandmark": { "type": "string", "maxLength": 400 },
+        "isEmailVerified": { "type": "boolean" },
+        "sourceCreatedAt": { "type": "string", "maxLength": 64 },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "fullName", "email", "phone", "passwordHash", "status", "defaultZoneId", "addressLandmark", "isEmailVerified", "sourceCreatedAt", "extra", "createdAt", "updatedAt"]
+    },
+    "CaptainRecord": {
+      "title": "CaptainRecord",
+      "description": "Persistent captain account, vehicle profile, verification state, and cash balance limits.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "username": { "type": "string", "maxLength": 120 },
+        "passwordHash": { "type": "string", "maxLength": 260 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "phone": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "nationalId": { "type": "string", "maxLength": 64 },
+        "zoneName": { "type": "string", "maxLength": 120 },
+        "vehicleType": { "type": "string", "maxLength": 64 },
+        "verificationStatus": { "type": "string", "maxLength": 40 },
+        "availabilityStatus": { "type": "string", "maxLength": 40 },
+        "cashOnHand": { "type": "number" },
+        "cashLimit": { "type": "number" },
+        "ratingAvg": { "type": "number" },
+        "completedCount": { "type": "integer" },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "userId", "username", "passwordHash", "fullName", "phone", "nationalId", "zoneName", "vehicleType", "verificationStatus", "availabilityStatus", "cashOnHand", "cashLimit", "ratingAvg", "completedCount", "extra", "createdAt", "updatedAt"]
+    },
+    "CaptainDocumentRecord": {
+      "title": "CaptainDocumentRecord",
+      "description": "Persistent captain KYC verification document.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "captainId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "docType": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "labelAr": { "type": "string", "maxLength": 160 },
+        "reviewStatus": { "type": "string", "maxLength": 40 },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "captainId", "docType", "labelAr", "reviewStatus", "extra", "createdAt", "updatedAt"]
+    },
+    "MerchantRecord": {
+      "title": "MerchantRecord",
+      "description": "Persistent merchant store account, credentials, payout details, commission rate, and logo.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 180 },
+        "passwordHash": { "type": "string", "maxLength": 260 },
+        "businessNameAr": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "businessNameEn": { "type": "string", "maxLength": 180 },
+        "merchantType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "zoneName": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "commissionRate": { "type": "number" },
+        "verificationStatus": { "type": "string", "maxLength": 40 },
+        "isOpenNow": { "type": "boolean" },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "email", "passwordHash", "businessNameAr", "businessNameEn", "merchantType", "zoneName", "phone", "commissionRate", "verificationStatus", "isOpenNow", "extra", "createdAt", "updatedAt"]
+    },
+    "CategoryRecord": {
+      "title": "CategoryRecord",
+      "description": "Persistent store and marketplace category.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "merchantId": { "type": "string", "maxLength": 128 },
+        "nameAr": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "nameEn": { "type": "string", "maxLength": 180 },
+        "sortOrder": { "type": "integer" },
+        "isActive": { "type": "boolean" },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "scope", "merchantId", "nameAr", "nameEn", "sortOrder", "isActive", "extra", "createdAt", "updatedAt"]
+    },
+    "ProductRecord": {
+      "title": "ProductRecord",
+      "description": "Persistent merchant catalog product.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "merchantId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "categoryId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "nameAr": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "nameEn": { "type": "string", "maxLength": 240 },
+        "basePrice": { "type": "number" },
+        "salePrice": { "type": "number" },
+        "hasSalePrice": { "type": "boolean" },
+        "isOffer": { "type": "boolean" },
+        "stockQuantity": { "type": "integer" },
+        "isAvailable": { "type": "boolean" },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "merchantId", "categoryId", "nameAr", "nameEn", "basePrice", "salePrice", "hasSalePrice", "isOffer", "stockQuantity", "isAvailable", "extra", "createdAt", "updatedAt"]
+    },
+    "OrderRecord": {
+      "title": "OrderRecord",
+      "description": "Persistent customer order record.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "customerId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 160 },
+        "customerPhone": { "type": "string", "maxLength": 40 },
+        "merchantId": { "type": "string", "maxLength": 128 },
+        "captainId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 48 },
+        "totalAmount": { "type": "number" },
+        "sourceCreatedAt": { "type": "string", "maxLength": 64 },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "orderNumber", "customerId", "customerName", "customerPhone", "merchantId", "captainId", "status", "totalAmount", "sourceCreatedAt", "extra", "createdAt", "updatedAt"]
+    },
+    "OrderStoreRecord": {
+      "title": "OrderStoreRecord",
+      "description": "Persistent multi-store leg associated with a customer order.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "merchantId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "prepStatus": { "type": "string", "maxLength": 48 },
+        "subtotal": { "type": "number" },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "orderId", "merchantId", "prepStatus", "subtotal", "extra", "createdAt", "updatedAt"]
+    },
+    "TripRecord": {
+      "title": "TripRecord",
+      "description": "Persistent ride-hailing trip record.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tripNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "customerName": { "type": "string", "maxLength": 160 },
+        "customerPhone": { "type": "string", "maxLength": 40 },
+        "captainId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 48 },
+        "estimatedFare": { "type": "number" },
+        "sourceCreatedAt": { "type": "string", "maxLength": 64 },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "tripNumber", "customerName", "customerPhone", "captainId", "status", "estimatedFare", "sourceCreatedAt", "extra", "createdAt", "updatedAt"]
+    },
+    "DeliveryRecord": {
+      "title": "DeliveryRecord",
+      "description": "Persistent parcel delivery record.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "deliveryNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "senderName": { "type": "string", "maxLength": 160 },
+        "senderPhone": { "type": "string", "maxLength": 40 },
+        "captainId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 48 },
+        "deliveryFee": { "type": "number" },
+        "sourceCreatedAt": { "type": "string", "maxLength": 64 },
+        "extra": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "deliveryNumber", "senderName", "senderPhone", "captainId", "status", "deliveryFee", "sourceCreatedAt", "extra", "createdAt", "updatedAt"]
+    },
+    "WalletRecord": {
+      "title": "WalletRecord",
+      "description": "Persistent financial wallet balance for captains, merchants, and customers.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ownerName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "ownerType": { "type": "string", "enum": ["captain", "merchant", "customer", "platform"] },
+        "availableBalance": { "type": "number" },
+        "pendingBalance": { "type": "number" },
+        "isFrozen": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "userId", "ownerName", "ownerType", "availableBalance", "pendingBalance", "isFrozen", "createdAt", "updatedAt"]
+    },
+    "LedgerEntryRecord": {
+      "title": "LedgerEntryRecord",
+      "description": "Persistent double-entry financial ledger entry.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "transactionGroupId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "accountCode": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "accountType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "debit": { "type": "number" },
+        "credit": { "type": "number" },
+        "referenceType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "referenceId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "descriptionAr": { "type": "string", "maxLength": 400 },
+        "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "sourceCreatedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "transactionGroupId", "accountCode", "accountType", "debit", "credit", "referenceType", "referenceId", "descriptionAr", "idempotencyKey", "sourceCreatedAt", "createdAt", "updatedAt"]
+    },
+    "SettlementRecord": {
+      "title": "SettlementRecord",
+      "description": "Persistent payout settlement record for captains and merchants.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "beneficiaryName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "beneficiaryType": { "type": "string", "minLength": 1, "maxLength": 48 },
+        "grossEarnings": { "type": "number" },
+        "deductedCommissions": { "type": "number" },
+        "netPayout": { "type": "number" },
+        "payoutMethod": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "minLength": 1, "maxLength": 48 },
+        "sourceCreatedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "beneficiaryName", "beneficiaryType", "grossEarnings", "deductedCommissions", "netPayout", "payoutMethod", "status", "sourceCreatedAt", "createdAt", "updatedAt"]
+    },
+    "PlatformConfigRecord": {
+      "title": "PlatformConfigRecord",
+      "description": "Persistent platform operational configuration item (zone, service config, pricing rule, coupon, payment or dispatch setting).",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "configGroup": {
+          "type": "string",
+          "enum": ["service_configs", "service_zones", "pricing_rules", "dispatch_config", "coupons", "payment_settings", "financial_model_settings", "invoice_design_settings"]
+        },
+        "data": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recordId", "ownerUid", "configGroup", "data", "createdAt", "updatedAt"]
+    },
+    "ConnectionTestRecord": {
+      "title": "ConnectionTestRecord",
+      "description": "Read-only connection verification sentinel.",
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" }
+      },
+      "required": ["ok"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminAccount" },
+      "description": "Authorized admin accounts for the cloud persistence vault."
+    },
+    "/vault_meta/{metaId}": {
+      "schema": { "$ref": "#/entities/VaultMeta" },
+      "description": "Master cloud sync metadata and entity counters."
+    },
+    "/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/CustomerRecord" },
+      "description": "Permanent customer accounts and credentials."
+    },
+    "/captains/{captainId}": {
+      "schema": { "$ref": "#/entities/CaptainRecord" },
+      "description": "Permanent captain accounts, vehicle profiles, and cash limits."
+    },
+    "/captain_documents/{docId}": {
+      "schema": { "$ref": "#/entities/CaptainDocumentRecord" },
+      "description": "Permanent captain KYC verification documents."
+    },
+    "/merchants/{merchantId}": {
+      "schema": { "$ref": "#/entities/MerchantRecord" },
+      "description": "Permanent merchant accounts, settings, and commissions."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/CategoryRecord" },
+      "description": "Permanent catalog and marketplace categories."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/ProductRecord" },
+      "description": "Permanent merchant catalog products."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/OrderRecord" },
+      "description": "Permanent customer orders."
+    },
+    "/order_stores/{orderStoreId}": {
+      "schema": { "$ref": "#/entities/OrderStoreRecord" },
+      "description": "Permanent multi-store order legs."
+    },
+    "/trips/{tripId}": {
+      "schema": { "$ref": "#/entities/TripRecord" },
+      "description": "Permanent ride-hailing trips."
+    },
+    "/deliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/DeliveryRecord" },
+      "description": "Permanent parcel deliveries."
+    },
+    "/wallets/{walletId}": {
+      "schema": { "$ref": "#/entities/WalletRecord" },
+      "description": "Permanent captain, merchant, and customer wallets and balances."
+    },
+    "/ledger_entries/{entryId}": {
+      "schema": { "$ref": "#/entities/LedgerEntryRecord" },
+      "description": "Permanent financial ledger entries."
+    },
+    "/settlements/{settlementId}": {
+      "schema": { "$ref": "#/entities/SettlementRecord" },
+      "description": "Permanent payout settlements."
+    },
+    "/platform_configs/{configId}": {
+      "schema": { "$ref": "#/entities/PlatformConfigRecord" },
+      "description": "Permanent operational platform configurations."
+    },
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/ConnectionTestRecord" },
+      "description": "Startup Firestore connection verification path."
+    }
+  }
+}

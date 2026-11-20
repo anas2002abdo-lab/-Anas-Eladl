@@ -78,7 +78,16 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
   const [customers, setCustomers] = useState<AdminCustomerSummary[]>([]);
   const [loadingList, setLoadingList] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [debouncedSearch, setDebouncedSearch] = useState<string>('');
   const [filterMode, setFilterMode] = useState<'all' | 'active' | 'registered'>('all');
+  const [customerPage, setCustomerPage] = useState<number>(1);
+  const [filteredTotal, setFilteredTotal] = useState<number>(0);
+  const [totalPages, setTotalPages] = useState<number>(1);
+  const [customerStats, setCustomerStats] = useState<{
+    total_customers: number;
+    registered_count: number;
+    active_users_count: number;
+  }>({ total_customers: 0, registered_count: 0, active_users_count: 0 });
 
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AdminCustomerDetail | null>(null);
@@ -120,12 +129,24 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
   const [tripWsLive, setTripWsLive] = useState<boolean>(false);
   const tripChatEndRef = useRef<HTMLDivElement | null>(null);
 
-  const loadCustomers = async (keepSelection = true) => {
+  const loadCustomers = async (keepSelection = true, opts?: { page?: number; search?: string; filter?: 'all' | 'active' | 'registered' }) => {
+    const targetPage = opts?.page ?? customerPage;
+    const targetSearch = opts?.search !== undefined ? opts.search : debouncedSearch;
+    const targetFilter = opts?.filter ?? filterMode;
     setLoadingList(true);
     try {
-      const list = (await api.getAdminCustomers()) as AdminCustomerSummary[];
-      setCustomers(list || []);
-      if (list && list.length > 0) {
+      const res = await api.getAdminCustomersPaginated({
+        q: targetSearch || undefined,
+        filter: targetFilter,
+        page: targetPage,
+        limit: 50,
+      });
+      const list = (res.items || []) as AdminCustomerSummary[];
+      setCustomers(list);
+      setFilteredTotal(res.total || 0);
+      setTotalPages(res.total_pages || 1);
+      if (res.stats) setCustomerStats(res.stats);
+      if (list.length > 0) {
         if (!keepSelection || !selectedCustomerId || !list.some((c) => c.id === selectedCustomerId)) {
           setSelectedCustomerId(list[0].id);
         }
@@ -167,8 +188,16 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
   };
 
   useEffect(() => {
-    loadCustomers(false);
-  }, []);
+    const t = setTimeout(() => {
+      setDebouncedSearch(searchQuery.trim());
+      setCustomerPage(1);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    loadCustomers(true, { page: customerPage, search: debouncedSearch, filter: filterMode });
+  }, [customerPage, debouncedSearch, filterMode]);
 
   useEffect(() => {
     if (selectedCustomerId) {
@@ -332,21 +361,8 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
     };
   }, [selectedTrip?.id]);
 
-  const filteredCustomers = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return customers.filter((c) => {
-      if (filterMode === 'active' && c.active_orders_count === 0 && c.trips_count === 0) return false;
-      if (filterMode === 'registered' && !c.is_registered) return false;
-      if (!q) return true;
-      return (
-        c.full_name.toLowerCase().includes(q) ||
-        (c.phone || '').toLowerCase().includes(q) ||
-        (c.email || '').toLowerCase().includes(q) ||
-        (c.zone_name || '').toLowerCase().includes(q) ||
-        (c.address_landmark || '').toLowerCase().includes(q)
-      );
-    });
-  }, [customers, searchQuery, filterMode]);
+  // Server-side filtered and paginated (50 customers/page)
+  const filteredCustomers = customers;
 
   const refreshAll = async () => {
     await Promise.all([
@@ -554,9 +570,9 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
     }
   };
 
-  const totalCustomers = customers.length;
-  const registeredCount = customers.filter((c) => c.is_registered).length;
-  const activeUsersCount = customers.filter((c) => c.active_orders_count > 0 || c.trips_count > 0).length;
+  const totalCustomers = customerStats.total_customers;
+  const registeredCount = customerStats.registered_count;
+  const activeUsersCount = customerStats.active_users_count;
   const activeCustomer = detail?.customer ?? customers.find((c) => c.id === selectedCustomerId) ?? null;
 
   // Map pins: show active customer + active order/trip captain & dropoff if currently viewing that tab
@@ -687,7 +703,7 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
                 <span>{isAr ? 'دليل المستخدمين' : 'Users Directory'}</span>
               </h2>
               <span className="text-[11px] text-slate-500 tabular-nums font-semibold">
-                {filteredCustomers.length} / {totalCustomers}
+                {filteredTotal.toLocaleString('en-US')} / {totalCustomers.toLocaleString('en-US')}
               </span>
             </div>
 
@@ -711,7 +727,10 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
                 <button
                   key={f.id}
                   type="button"
-                  onClick={() => setFilterMode(f.id)}
+                  onClick={() => {
+                    setFilterMode(f.id);
+                    setCustomerPage(1);
+                  }}
                   className={`flex-1 py-1.5 px-2 rounded-lg font-semibold transition-colors ${
                     filterMode === f.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
@@ -772,6 +791,29 @@ export const CustomersSection: React.FC<Props> = ({ lang, captains, onRefreshCor
               })
             )}
           </div>
+          {totalPages > 1 && (
+            <div className="px-3.5 py-2.5 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-[11px] text-slate-600">
+              <button
+                type="button"
+                disabled={customerPage <= 1 || loadingList}
+                onClick={() => setCustomerPage((p) => Math.max(1, p - 1))}
+                className="px-2.5 py-1 border border-slate-200 bg-white rounded-md font-semibold hover:bg-slate-100 disabled:opacity-40"
+              >
+                {isAr ? 'السابق' : 'Prev'}
+              </button>
+              <span className="font-bold tabular-nums text-slate-800">
+                {customerPage} / {totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={customerPage >= totalPages || loadingList}
+                onClick={() => setCustomerPage((p) => Math.min(totalPages, p + 1))}
+                className="px-2.5 py-1 border border-slate-200 bg-white rounded-md font-semibold hover:bg-slate-100 disabled:opacity-40"
+              >
+                {isAr ? 'التالي' : 'Next'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Right/End Column: Customer Inspector */}

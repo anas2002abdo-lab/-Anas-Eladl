@@ -1,0 +1,785 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrapAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'anas2002abdo@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin()
+        || (isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidExtraMap(val) {
+      return val is map && val.size() <= 60;
+    }
+
+    function isOwnerCreate(data) {
+      return data.ownerUid == request.auth.uid
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isImmutableMeta() {
+      return incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+
+    function isValidAdminAccount(data) {
+      return isValidId(data.uid)
+        && isStr(data.email, 3, 160)
+        && isStr(data.fullName, 1, 120)
+        && data.role in ['super_admin', 'ops_admin']
+        && isValidId(data.ownerUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVaultMeta(data) {
+      return isValidId(data.ownerUid)
+        && data.version is int && data.version >= 0
+        && data.customersCount is int && data.customersCount >= 0
+        && data.ordersCount is int && data.ordersCount >= 0
+        && data.tripsCount is int && data.tripsCount >= 0
+        && data.deliveriesCount is int && data.deliveriesCount >= 0
+        && data.captainsCount is int && data.captainsCount >= 0
+        && data.merchantsCount is int && data.merchantsCount >= 0
+        && data.categoriesCount is int && data.categoriesCount >= 0
+        && data.productsCount is int && data.productsCount >= 0
+        && data.walletsCount is int && data.walletsCount >= 0
+        && data.ledgerEntriesCount is int && data.ledgerEntriesCount >= 0
+        && data.settlementsCount is int && data.settlementsCount >= 0
+        && isStr(data.lastSourceFingerprint, 0, 128)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.fullName, 1, 160)
+        && isStr(data.email, 0, 180)
+        && isStr(data.phone, 0, 40)
+        && isStr(data.passwordHash, 0, 260)
+        && data.status in ['active', 'suspended', 'blocked', 'deleted']
+        && isStr(data.defaultZoneId, 0, 128)
+        && isStr(data.addressLandmark, 0, 400)
+        && data.isEmailVerified is bool
+        && isStr(data.sourceCreatedAt, 0, 64)
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCaptain(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.userId, 1, 128)
+        && isStr(data.username, 0, 120)
+        && isStr(data.passwordHash, 0, 260)
+        && isStr(data.fullName, 1, 160)
+        && isStr(data.phone, 1, 40)
+        && isStr(data.nationalId, 0, 64)
+        && isStr(data.zoneName, 0, 120)
+        && isStr(data.vehicleType, 0, 64)
+        && isStr(data.verificationStatus, 0, 40)
+        && isStr(data.availabilityStatus, 0, 40)
+        && data.cashOnHand is number && data.cashOnHand >= 0
+        && data.cashLimit is number && data.cashLimit >= 0
+        && data.ratingAvg is number && data.ratingAvg >= 0 && data.ratingAvg <= 5
+        && data.completedCount is int && data.completedCount >= 0
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCaptainDocument(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isValidId(data.captainId)
+        && isStr(data.docType, 1, 80)
+        && isStr(data.labelAr, 0, 160)
+        && isStr(data.reviewStatus, 0, 40)
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMerchant(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.email, 0, 180)
+        && isStr(data.passwordHash, 0, 260)
+        && isStr(data.businessNameAr, 1, 180)
+        && isStr(data.businessNameEn, 0, 180)
+        && isStr(data.merchantType, 1, 64)
+        && isStr(data.zoneName, 0, 120)
+        && isStr(data.phone, 0, 40)
+        && data.commissionRate is number && data.commissionRate >= 0 && data.commissionRate <= 100
+        && isStr(data.verificationStatus, 0, 40)
+        && data.isOpenNow is bool
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.scope, 1, 64)
+        && isStr(data.merchantId, 0, 128)
+        && isStr(data.nameAr, 1, 180)
+        && isStr(data.nameEn, 0, 180)
+        && data.sortOrder is int
+        && data.isActive is bool
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.merchantId, 1, 128)
+        && isStr(data.categoryId, 1, 128)
+        && isStr(data.nameAr, 1, 240)
+        && isStr(data.nameEn, 0, 240)
+        && data.basePrice is number && data.basePrice >= 0
+        && data.salePrice is number && data.salePrice >= 0
+        && data.hasSalePrice is bool
+        && data.isOffer is bool
+        && data.stockQuantity is int && data.stockQuantity >= 0
+        && data.isAvailable is bool
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrder(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.orderNumber, 1, 64)
+        && isStr(data.customerId, 0, 128)
+        && isStr(data.customerName, 0, 160)
+        && isStr(data.customerPhone, 0, 40)
+        && isStr(data.merchantId, 0, 128)
+        && isStr(data.captainId, 0, 128)
+        && isStr(data.status, 1, 48)
+        && data.totalAmount is number && data.totalAmount >= 0
+        && isStr(data.sourceCreatedAt, 0, 64)
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrderStore(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.orderId, 1, 128)
+        && isStr(data.merchantId, 1, 128)
+        && isStr(data.prepStatus, 0, 48)
+        && data.subtotal is number && data.subtotal >= 0
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTrip(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.tripNumber, 1, 64)
+        && isStr(data.customerName, 0, 160)
+        && isStr(data.customerPhone, 0, 40)
+        && isStr(data.captainId, 0, 128)
+        && isStr(data.status, 1, 48)
+        && data.estimatedFare is number && data.estimatedFare >= 0
+        && isStr(data.sourceCreatedAt, 0, 64)
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDelivery(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.deliveryNumber, 1, 64)
+        && isStr(data.senderName, 0, 160)
+        && isStr(data.senderPhone, 0, 40)
+        && isStr(data.captainId, 0, 128)
+        && isStr(data.status, 1, 48)
+        && data.deliveryFee is number && data.deliveryFee >= 0
+        && isStr(data.sourceCreatedAt, 0, 64)
+        && isValidExtraMap(data.extra)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWallet(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.userId, 1, 128)
+        && isStr(data.ownerName, 1, 160)
+        && data.ownerType in ['captain', 'merchant', 'customer', 'platform']
+        && data.availableBalance is number && data.availableBalance >= 0
+        && data.pendingBalance is number && data.pendingBalance >= 0
+        && data.isFrozen is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLedgerEntry(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.transactionGroupId, 1, 128)
+        && isStr(data.accountCode, 1, 128)
+        && isStr(data.accountType, 1, 64)
+        && data.debit is number && data.debit >= 0
+        && data.credit is number && data.credit >= 0
+        && isStr(data.referenceType, 1, 64)
+        && isStr(data.referenceId, 1, 128)
+        && isStr(data.descriptionAr, 0, 400)
+        && isStr(data.idempotencyKey, 1, 180)
+        && isStr(data.sourceCreatedAt, 0, 64)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSettlement(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && isStr(data.beneficiaryName, 1, 160)
+        && isStr(data.beneficiaryType, 1, 48)
+        && data.grossEarnings is number && data.grossEarnings >= 0
+        && data.deductedCommissions is number && data.deductedCommissions >= 0
+        && data.netPayout is number && data.netPayout >= 0
+        && isStr(data.payoutMethod, 0, 64)
+        && isStr(data.status, 1, 48)
+        && isStr(data.sourceCreatedAt, 0, 64)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlatformConfig(data) {
+      return isValidId(data.recordId)
+        && isValidId(data.ownerUid)
+        && data.configGroup in [
+          'service_configs',
+          'service_zones',
+          'pricing_rules',
+          'dispatch_config',
+          'coupons',
+          'payment_settings',
+          'financial_model_settings',
+          'invoice_design_settings'
+        ]
+        && isValidExtraMap(data.data)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules (Strict Order: Auth -> Static Validation -> Relational Check)
+
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+      allow list, write: if false;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && isValidId(adminId) && (request.auth.uid == adminId || isBootstrapAdmin());
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isBootstrapAdmin()
+        && isValidId(adminId)
+        && incoming().uid == adminId
+        && incoming().keys().hasAll(['uid', 'email', 'fullName', 'role', 'ownerUid', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasOnly(['uid', 'email', 'fullName', 'role', 'ownerUid', 'createdAt', 'updatedAt'])
+        && isValidAdminAccount(incoming())
+        && isOwnerCreate(incoming());
+      allow update: if isBootstrapAdmin()
+        && isValidId(adminId)
+        && isValidAdminAccount(incoming())
+        && isImmutableMeta()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'fullName', 'role', 'updatedAt']);
+      allow delete: if isBootstrapAdmin() && isValidId(adminId);
+    }
+
+    match /vault_meta/{metaId} {
+      allow get: if isVerifiedUser() && isValidId(metaId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(metaId)
+        && incoming().keys().hasAll([
+          'ownerUid', 'version', 'customersCount', 'ordersCount', 'tripsCount', 'deliveriesCount',
+          'captainsCount', 'merchantsCount', 'categoriesCount', 'productsCount', 'walletsCount',
+          'ledgerEntriesCount', 'settlementsCount', 'lastSourceFingerprint', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'ownerUid', 'version', 'customersCount', 'ordersCount', 'tripsCount', 'deliveriesCount',
+          'captainsCount', 'merchantsCount', 'categoriesCount', 'productsCount', 'walletsCount',
+          'ledgerEntriesCount', 'settlementsCount', 'lastSourceFingerprint', 'createdAt', 'updatedAt'
+        ])
+        && isValidVaultMeta(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(metaId)
+        && isValidVaultMeta(incoming())
+        && isImmutableMeta()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'version', 'customersCount', 'ordersCount', 'tripsCount', 'deliveriesCount',
+          'captainsCount', 'merchantsCount', 'categoriesCount', 'productsCount', 'walletsCount',
+          'ledgerEntriesCount', 'settlementsCount', 'lastSourceFingerprint', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(metaId) && isAdmin();
+    }
+
+    match /customers/{customerId} {
+      allow get: if isVerifiedUser() && isValidId(customerId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(customerId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'fullName', 'email', 'phone', 'passwordHash', 'status',
+          'defaultZoneId', 'addressLandmark', 'isEmailVerified', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'fullName', 'email', 'phone', 'passwordHash', 'status',
+          'defaultZoneId', 'addressLandmark', 'isEmailVerified', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidCustomer(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(customerId)
+        && isValidCustomer(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'email', 'phone', 'passwordHash', 'status', 'defaultZoneId',
+          'addressLandmark', 'isEmailVerified', 'sourceCreatedAt', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(customerId) && isAdmin();
+    }
+
+    match /captains/{captainId} {
+      allow get: if isVerifiedUser() && isValidId(captainId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(captainId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'userId', 'username', 'passwordHash', 'fullName', 'phone',
+          'nationalId', 'zoneName', 'vehicleType', 'verificationStatus', 'availabilityStatus',
+          'cashOnHand', 'cashLimit', 'ratingAvg', 'completedCount', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'userId', 'username', 'passwordHash', 'fullName', 'phone',
+          'nationalId', 'zoneName', 'vehicleType', 'verificationStatus', 'availabilityStatus',
+          'cashOnHand', 'cashLimit', 'ratingAvg', 'completedCount', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidCaptain(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(captainId)
+        && isValidCaptain(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'userId', 'username', 'passwordHash', 'fullName', 'phone', 'nationalId', 'zoneName',
+          'vehicleType', 'verificationStatus', 'availabilityStatus', 'cashOnHand', 'cashLimit',
+          'ratingAvg', 'completedCount', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(captainId) && isAdmin();
+    }
+
+    match /captain_documents/{docId} {
+      allow get: if isVerifiedUser() && isValidId(docId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(docId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'captainId', 'docType', 'labelAr', 'reviewStatus', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'captainId', 'docType', 'labelAr', 'reviewStatus', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidCaptainDocument(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(docId)
+        && isValidCaptainDocument(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'captainId', 'docType', 'labelAr', 'reviewStatus', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(docId) && isAdmin();
+    }
+
+    match /merchants/{merchantId} {
+      allow get: if isVerifiedUser() && isValidId(merchantId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(merchantId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'email', 'passwordHash', 'businessNameAr', 'businessNameEn',
+          'merchantType', 'zoneName', 'phone', 'commissionRate', 'verificationStatus', 'isOpenNow',
+          'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'email', 'passwordHash', 'businessNameAr', 'businessNameEn',
+          'merchantType', 'zoneName', 'phone', 'commissionRate', 'verificationStatus', 'isOpenNow',
+          'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidMerchant(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(merchantId)
+        && isValidMerchant(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'email', 'passwordHash', 'businessNameAr', 'businessNameEn', 'merchantType',
+          'zoneName', 'phone', 'commissionRate', 'verificationStatus', 'isOpenNow', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(merchantId) && isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow get: if isVerifiedUser() && isValidId(categoryId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(categoryId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'scope', 'merchantId', 'nameAr', 'nameEn', 'sortOrder', 'isActive',
+          'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'scope', 'merchantId', 'nameAr', 'nameEn', 'sortOrder', 'isActive',
+          'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidCategory(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(categoryId)
+        && isValidCategory(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'scope', 'merchantId', 'nameAr', 'nameEn', 'sortOrder', 'isActive', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(categoryId) && isAdmin();
+    }
+
+    match /products/{productId} {
+      allow get: if isVerifiedUser() && isValidId(productId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(productId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'merchantId', 'categoryId', 'nameAr', 'nameEn', 'basePrice',
+          'salePrice', 'hasSalePrice', 'isOffer', 'stockQuantity', 'isAvailable', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'merchantId', 'categoryId', 'nameAr', 'nameEn', 'basePrice',
+          'salePrice', 'hasSalePrice', 'isOffer', 'stockQuantity', 'isAvailable', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidProduct(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(productId)
+        && isValidProduct(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'merchantId', 'categoryId', 'nameAr', 'nameEn', 'basePrice', 'salePrice',
+          'hasSalePrice', 'isOffer', 'stockQuantity', 'isAvailable', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(productId) && isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow get: if isVerifiedUser() && isValidId(orderId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(orderId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'orderNumber', 'customerId', 'customerName', 'customerPhone',
+          'merchantId', 'captainId', 'status', 'totalAmount', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'orderNumber', 'customerId', 'customerName', 'customerPhone',
+          'merchantId', 'captainId', 'status', 'totalAmount', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidOrder(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(orderId)
+        && isValidOrder(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'orderNumber', 'customerId', 'customerName', 'customerPhone', 'merchantId',
+          'captainId', 'status', 'totalAmount', 'sourceCreatedAt', 'extra', 'updatedAt'
+        ])
+        && isAdmin()
+        && (
+          isBootstrapAdmin()
+          || !(existing().status in ['delivered', 'cancelled'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(orderId) && isAdmin();
+    }
+
+    match /order_stores/{orderStoreId} {
+      allow get: if isVerifiedUser() && isValidId(orderStoreId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(orderStoreId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'orderId', 'merchantId', 'prepStatus', 'subtotal', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'orderId', 'merchantId', 'prepStatus', 'subtotal', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidOrderStore(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(orderStoreId)
+        && isValidOrderStore(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'orderId', 'merchantId', 'prepStatus', 'subtotal', 'extra', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(orderStoreId) && isAdmin();
+    }
+
+    match /trips/{tripId} {
+      allow get: if isVerifiedUser() && isValidId(tripId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(tripId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'tripNumber', 'customerName', 'customerPhone', 'captainId',
+          'status', 'estimatedFare', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'tripNumber', 'customerName', 'customerPhone', 'captainId',
+          'status', 'estimatedFare', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidTrip(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(tripId)
+        && isValidTrip(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'tripNumber', 'customerName', 'customerPhone', 'captainId', 'status',
+          'estimatedFare', 'sourceCreatedAt', 'extra', 'updatedAt'
+        ])
+        && isAdmin()
+        && (
+          isBootstrapAdmin()
+          || !(existing().status in ['completed', 'cancelled'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(tripId) && isAdmin();
+    }
+
+    match /deliveries/{deliveryId} {
+      allow get: if isVerifiedUser() && isValidId(deliveryId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(deliveryId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'deliveryNumber', 'senderName', 'senderPhone', 'captainId',
+          'status', 'deliveryFee', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'deliveryNumber', 'senderName', 'senderPhone', 'captainId',
+          'status', 'deliveryFee', 'sourceCreatedAt', 'extra', 'createdAt', 'updatedAt'
+        ])
+        && isValidDelivery(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(deliveryId)
+        && isValidDelivery(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'deliveryNumber', 'senderName', 'senderPhone', 'captainId', 'status',
+          'deliveryFee', 'sourceCreatedAt', 'extra', 'updatedAt'
+        ])
+        && isAdmin()
+        && (
+          isBootstrapAdmin()
+          || !(existing().status in ['delivered', 'cancelled'])
+        );
+      allow delete: if isVerifiedUser() && isValidId(deliveryId) && isAdmin();
+    }
+
+    match /wallets/{walletId} {
+      allow get: if isVerifiedUser() && isValidId(walletId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(walletId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'userId', 'ownerName', 'ownerType', 'availableBalance',
+          'pendingBalance', 'isFrozen', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'userId', 'ownerName', 'ownerType', 'availableBalance',
+          'pendingBalance', 'isFrozen', 'createdAt', 'updatedAt'
+        ])
+        && isValidWallet(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(walletId)
+        && isValidWallet(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'userId', 'ownerName', 'ownerType', 'availableBalance', 'pendingBalance', 'isFrozen', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(walletId) && isAdmin();
+    }
+
+    match /ledger_entries/{entryId} {
+      allow get: if isVerifiedUser() && isValidId(entryId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(entryId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'transactionGroupId', 'accountCode', 'accountType', 'debit',
+          'credit', 'referenceType', 'referenceId', 'descriptionAr', 'idempotencyKey',
+          'sourceCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'transactionGroupId', 'accountCode', 'accountType', 'debit',
+          'credit', 'referenceType', 'referenceId', 'descriptionAr', 'idempotencyKey',
+          'sourceCreatedAt', 'createdAt', 'updatedAt'
+        ])
+        && isValidLedgerEntry(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(entryId)
+        && isValidLedgerEntry(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'transactionGroupId', 'accountCode', 'accountType', 'debit', 'credit', 'referenceType',
+          'referenceId', 'descriptionAr', 'idempotencyKey', 'sourceCreatedAt', 'updatedAt'
+        ])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(entryId) && isAdmin();
+    }
+
+    match /settlements/{settlementId} {
+      allow get: if isVerifiedUser() && isValidId(settlementId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(settlementId)
+        && incoming().keys().hasAll([
+          'recordId', 'ownerUid', 'beneficiaryName', 'beneficiaryType', 'grossEarnings',
+          'deductedCommissions', 'netPayout', 'payoutMethod', 'status', 'sourceCreatedAt',
+          'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'recordId', 'ownerUid', 'beneficiaryName', 'beneficiaryType', 'grossEarnings',
+          'deductedCommissions', 'netPayout', 'payoutMethod', 'status', 'sourceCreatedAt',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidSettlement(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(settlementId)
+        && isValidSettlement(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'beneficiaryName', 'beneficiaryType', 'grossEarnings', 'deductedCommissions',
+          'netPayout', 'payoutMethod', 'status', 'sourceCreatedAt', 'updatedAt'
+        ])
+        && isAdmin()
+        && (
+          isBootstrapAdmin()
+          || existing().status != 'paid'
+        );
+      allow delete: if isVerifiedUser() && isValidId(settlementId) && isAdmin();
+    }
+
+    match /platform_configs/{configId} {
+      allow get: if isVerifiedUser() && isValidId(configId) && isAdmin();
+      allow list: if isVerifiedUser() && (resource.data.ownerUid == request.auth.uid || isBootstrapAdmin());
+      allow create: if isVerifiedUser()
+        && isValidId(configId)
+        && incoming().keys().hasAll(['recordId', 'ownerUid', 'configGroup', 'data', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasOnly(['recordId', 'ownerUid', 'configGroup', 'data', 'createdAt', 'updatedAt'])
+        && isValidPlatformConfig(incoming())
+        && isOwnerCreate(incoming())
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(configId)
+        && isValidPlatformConfig(incoming())
+        && isImmutableMeta()
+        && incoming().recordId == existing().recordId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['configGroup', 'data', 'updatedAt'])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(configId) && isAdmin();
+    }
+  }
+}

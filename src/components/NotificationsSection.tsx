@@ -18,6 +18,10 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
   const [targetApp, setTargetApp] = useState<NotificationTargetApp>('customer');
   const [targetZone, setTargetZone] = useState<string>('all');
   const [recipientId, setRecipientId] = useState<string>('');
+  const [customerSegment, setCustomerSegment] = useState<'all' | 'unverified_email'>('all');
+  const [customers, setCustomers] = useState<
+    Array<{ id: string; full_name: string; email?: string | null; is_email_verified?: boolean | number }>
+  >([]);
   const [category, setCategory] = useState<'promo' | 'operational' | 'compliance' | 'alert'>('promo');
   const [deepLink, setDeepLink] = useState<string>('stores');
   const [titleAr, setTitleAr] = useState<string>('');
@@ -30,25 +34,38 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     registered_devices: { total: number; customer: number; captain: number };
   } | null>(null);
 
+  const unverifiedCustomersCount = customers.filter((c) => !Boolean(c.is_email_verified)).length;
+
   const loadHistory = async () => {
-    const [rows, status] = await Promise.all([
+    const [rows, status, custRows] = await Promise.all([
       api.getNotifications(filterApp === 'all_filter' ? undefined : filterApp),
       api.getFcmStatus().catch(() => null),
+      api.getAdminCustomers().catch(() => []),
     ]);
     setHistory(rows);
     if (status) setFcmStatus(status);
+    if (Array.isArray(custRows)) setCustomers(custRows);
   };
 
   useEffect(() => {
     loadHistory();
   }, [filterApp]);
 
-  const applyTemplate = (preset: 'cust_promo' | 'cust_rx' | 'cap_peak' | 'cap_kyc') => {
-    if (preset === 'cust_promo') {
+  const applyTemplate = (preset: 'cust_verify_email' | 'cust_promo' | 'cust_rx' | 'cap_peak' | 'cap_kyc') => {
+    if (preset === 'cust_verify_email') {
+      setTargetApp('customer');
+      setCategory('alert');
+      setDeepLink('verify_email');
+      setRecipientId('');
+      setCustomerSegment('unverified_email');
+      setTitleAr('وثّق بريدك الإلكتروني الآن');
+      setBodyAr('اضغط على الإشعار لفتح صفحة التوثيق وإدخال الرمز المرسل على بريدك الإلكتروني لتأمين حسابك في اطلبها.');
+    } else if (preset === 'cust_promo') {
       setTargetApp('customer');
       setCategory('promo');
       setDeepLink('stores');
       setRecipientId('');
+      setCustomerSegment('all');
       setTitleAr('عرض نهاية الأسبوع في المنزلة: توصيل بـ 10 ج.م فقط');
       setBodyAr('اطلب من أي سوبرماركت أو مطعم في المنزلة الآن واستمتع بتوصيل مخفض لفترة محدودة.');
     } else if (preset === 'cust_rx') {
@@ -56,18 +73,23 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
       setCategory('operational');
       setDeepLink('pharmacy');
       setRecipientId('');
+      setCustomerSegment('all');
       setTitleAr('صيدليات المنزلة المناوبة متاحة الآن');
       setBodyAr('ارسل صورة الروشتة أو اكتب طلبك ليراجعه الصيدلي المرخص خلال دقائق.');
     } else if (preset === 'cap_peak') {
       setTargetApp('captain');
       setCategory('operational');
       setDeepLink('orders');
+      setRecipientId('');
+      setCustomerSegment('all');
       setTitleAr('ذروة طلبات الآن في وسط المنزلة والبصراط');
       setBodyAr('فرصة مضاعفة لزيادة دخلك: حوّل حالتك إلى متاح لاستقبال طلبات المتاجر والطرود الفورية.');
     } else {
       setTargetApp('captain');
       setCategory('compliance');
       setDeepLink('kyc_upload');
+      setRecipientId('');
+      setCustomerSegment('all');
       setTitleAr('تذكير مهم بتحديث مستندات المركبة وحد الكاش');
       setBodyAr('تأكد من سريان رخصة المركبة وعدم تجاوز حد الكاش (1000 ج.م) لضمان استمرار استقبال الطلبات.');
     }
@@ -82,6 +104,7 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
         target_app: targetApp,
         target_zone: targetZone,
         recipient_id: recipientId || null,
+        target_segment: targetApp === 'customer' && !recipientId ? customerSegment : 'all',
         category,
         title_ar: titleAr,
         body_ar: bodyAr,
@@ -197,7 +220,8 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
                     key={item.id}
                     onClick={() => {
                       setTargetApp(item.id);
-                      if (item.id !== 'captain') setRecipientId('');
+                      setRecipientId('');
+                      if (item.id !== 'customer') setCustomerSegment('all');
                     }}
                     className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border text-xs font-semibold transition-colors ${
                       selected
@@ -249,6 +273,41 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
             </div>
           </div>
 
+          {targetApp === 'customer' && (
+            <div>
+              <label className="text-xs font-semibold text-slate-700 block mb-1">
+                {isAr ? 'استهداف العملاء' : 'Customer Targeting'}
+              </label>
+              <select
+                value={recipientId ? `cust:${recipientId}` : customerSegment}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'all' || val === 'unverified_email') {
+                    setRecipientId('');
+                    setCustomerSegment(val);
+                  } else if (val.startsWith('cust:')) {
+                    setCustomerSegment('all');
+                    setRecipientId(val.slice(5));
+                  }
+                }}
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
+              >
+                <option value="all">{isAr ? 'جميع العملاء في النطاق المختار' : 'All Customers in Zone'}</option>
+                <option value="unverified_email">
+                  {isAr
+                    ? `العملاء غير الموثّق بريدهم فقط (${unverifiedCustomersCount})`
+                    : `Unverified Email Customers Only (${unverifiedCustomersCount})`}
+                </option>
+                {customers.map((c) => (
+                  <option key={c.id} value={`cust:${c.id}`}>
+                    {c.full_name}
+                    {c.email ? ` — ${c.email}` : ''} ({c.is_email_verified ? (isAr ? 'موثّق' : 'Verified') : isAr ? 'غير موثّق' : 'Unverified'})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {targetApp === 'captain' && (
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1">
@@ -275,7 +334,14 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
             </label>
             <select
               value={deepLink}
-              onChange={(e) => setDeepLink(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setDeepLink(next);
+                if (next === 'verify_email' && targetApp !== 'customer') {
+                  setTargetApp('customer');
+                  setRecipientId('');
+                }
+              }}
               className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
             >
               <option value="home">{isAr ? 'الشاشة الرئيسية' : 'Home'}</option>
@@ -284,9 +350,17 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
               <option value="parcels">{isAr ? 'اطلبها أي حاجة (طرود)' : 'Parcels'}</option>
               <option value="market">{isAr ? 'سوق اطلبها (C2C)' : 'Otlobha Market'}</option>
               <option value="orders">{isAr ? 'الطلبات النشطة (للكباتن/العملاء)' : 'Active Orders'}</option>
+              <option value="verify_email">{isAr ? 'توثيق البريد الإلكتروني (verify_email)' : 'Verify Email (verify_email)'}</option>
               <option value="kyc_upload">{isAr ? 'مستندات الكابتن (KYC)' : 'Captain KYC'}</option>
               <option value="wallet">{isAr ? 'المحفظة والرصيد' : 'Wallet'}</option>
             </select>
+            {deepLink === 'verify_email' && (
+              <p className="text-[11px] text-orange-700 mt-1">
+                {isAr
+                  ? 'عند الضغط على الإشعار في تطبيق العملاء، يفتح مباشرة صفحة توثيق البريد الخارجي (verify_email) لإدخال رمز التحقق.'
+                  : 'Tapping this notification in the Customer App directly opens the external email verification page (verify_email).'}
+              </p>
+            )}
           </div>
 
           <div>
@@ -320,6 +394,13 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
           <div className="space-y-1.5">
             <p className="text-xs text-slate-500">{isAr ? 'قوالب جاهزة سريعة:' : 'Quick Templates:'}</p>
             <div className="flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={() => applyTemplate('cust_verify_email')}
+                className="px-2.5 py-1 bg-orange-50 hover:bg-orange-100 text-orange-800 border border-orange-200 rounded text-xs font-semibold whitespace-nowrap"
+              >
+                {isAr ? 'توثيق البريد (verify_email)' : 'Verify Email (verify_email)'}
+              </button>
               <button
                 type="button"
                 onClick={() => applyTemplate('cust_promo')}
@@ -399,7 +480,14 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
                     {isAr ? 'المستهدفون:' : 'Reach:'} <strong className="text-slate-800">{item.audience_count}</strong>
                   </span>
                   <span>
-                    {isAr ? 'الوجهة:' : 'Screen:'} <strong className="text-slate-800">{item.deep_link}</strong>
+                    {isAr ? 'الوجهة:' : 'Screen:'}{' '}
+                    <strong className={item.deep_link === 'verify_email' ? 'text-orange-700' : 'text-slate-800'}>
+                      {item.deep_link === 'verify_email'
+                        ? isAr
+                          ? 'توثيق البريد (verify_email)'
+                          : 'Verify Email (verify_email)'
+                        : item.deep_link}
+                    </strong>
                   </span>
                   <span>
                     {isAr ? 'الحالة:' : 'Status:'}{' '}
