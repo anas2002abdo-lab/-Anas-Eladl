@@ -19,6 +19,9 @@ import 'screens/trip_chat_screen.dart';
 import 'screens/customer_otp_login_screen.dart';
 import 'screens/complete_profile_screen.dart';
 import 'screens/support_screen.dart';
+import 'screens/storefront_categories_screen.dart';
+import 'screens/storefront_smart_search_screen.dart';
+import 'screens/storefront_assistant_sheet.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -78,10 +81,17 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   bool _isEmailVerified = true;
   bool _verifyNotifShownForSession = false;
   Map<String, dynamic> _currentUserSnapshot = {};
-  int _index = 0; // 0: الرئيسية | 1: العروض | 2: الخدمات (المنتصف) | 3: السلة | 4: الملف الشخصي
+  int _index = 0; // 0: الرئيسية | 1: الأقسام | 2: الخدمات | 3: السلة | 4: حسابي | 5: العروض والكوبونات
   String _serviceSubView = 'hub';
   bool _loading = true;
   Map<String, dynamic> _bootstrap = {};
+  List<Map<String, dynamic>> _storefrontCategories = [];
+  String _storefrontFilter = 'for_you';
+  String _storefrontCategoryId = '';
+  String _storefrontCategoryName = '';
+  String _storefrontBrand = '';
+  String _storefrontMerchantId = '';
+  String _storefrontMerchantName = '';
   final Map<String, int> _quickCart = {};
   final Map<String, Map<String, dynamic>> _cartProductsCache = {};
   String _quickMerchantId = '';
@@ -346,7 +356,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _addressLandmark = savedUser['address_landmark']?.toString() ?? '';
           final zoneId = savedUser['default_zone_id']?.toString() ?? '';
           if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
-          _index = savedTab.clamp(0, 4);
+          _index = savedTab.clamp(0, 5);
           _serviceSubView = savedSub;
         });
         if (!needsProfile) {
@@ -361,7 +371,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _isAuthenticated = false;
           _showAuthScreen = false;
           _customerName = 'زائر اطلبها';
-          _index = savedTab.clamp(0, 4);
+          _index = savedTab.clamp(0, 5);
           _serviceSubView = savedSub;
         });
         _loadData();
@@ -407,7 +417,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       return;
     }
     if (deepLink == 'offers' || deepLink == 'promo') {
-      setState(() => _index = 1);
+      setState(() => _index = 5);
       return;
     }
     if (deepLink == 'pharmacy' || deepLink == 'stores' || deepLink == 'parcels' || deepLink == 'market') {
@@ -682,13 +692,14 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   }
 
   void _onQuickAdd(Map<String, dynamic> product, int delta) {
-    final prodId = product['id'] as String;
-    final merchId = product['merchant_id'] as String;
+    final prodId = (product['id'] ?? '').toString().trim();
+    if (prodId.isEmpty) return;
+    final merchId = (product['merchant_id'] ?? '').toString().trim();
     final current = _quickCart[prodId] ?? 0;
     final next = (current + delta).clamp(0, 99);
     setState(() {
       if (delta > 0) {
-        _quickMerchantId = merchId;
+        if (merchId.isNotEmpty) _quickMerchantId = merchId;
         _orderChannel = 'catalog';
       }
       if (next == 0) {
@@ -699,6 +710,113 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         _cartProductsCache[prodId] = Map<String, dynamic>.from(product);
       }
     });
+  }
+
+  String _currentZoneName() {
+    final zones = ((_bootstrap['zones'] as List?) ?? []).whereType<Map>();
+    for (final z in zones) {
+      if ((z['id'] ?? '').toString() == _selectedZoneId) {
+        return (z['name_ar'] ?? 'المنزلة').toString();
+      }
+    }
+    if (zones.isNotEmpty) return (zones.first['name_ar'] ?? 'المنزلة').toString();
+    return 'المنزلة';
+  }
+
+  void _selectStorefrontCategory(String categoryId, String categoryName) {
+    setState(() {
+      _storefrontCategoryId = categoryId;
+      _storefrontCategoryName = categoryName;
+      _storefrontBrand = '';
+      _storefrontMerchantId = '';
+      _storefrontMerchantName = '';
+      _index = 0;
+    });
+    _persistNavState(tabIndex: 0);
+  }
+
+  void _selectStorefrontBrand(String brand) {
+    setState(() {
+      _storefrontBrand = brand;
+      _storefrontCategoryId = '';
+      _storefrontCategoryName = '';
+      _storefrontMerchantId = '';
+      _storefrontMerchantName = '';
+      _index = 0;
+    });
+    _persistNavState(tabIndex: 0);
+  }
+
+  void _selectStorefrontMerchant(String merchantId, String merchantName) {
+    setState(() {
+      _storefrontMerchantId = merchantId;
+      _storefrontMerchantName = merchantName;
+      _storefrontCategoryId = '';
+      _storefrontCategoryName = '';
+      _storefrontBrand = '';
+      _index = 0;
+    });
+    _persistNavState(tabIndex: 0);
+  }
+
+  void _clearStorefrontFilters() {
+    setState(() {
+      _storefrontCategoryId = '';
+      _storefrontCategoryName = '';
+      _storefrontBrand = '';
+      _storefrontMerchantId = '';
+      _storefrontMerchantName = '';
+    });
+  }
+
+  void _openSmartSearch({String initialQuery = ''}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StorefrontSmartSearchScreen(
+          api: api,
+          cart: _quickCart,
+          getCartCount: () => _quickCart.values.fold<int>(0, (sum, q) => sum + q),
+          onAddProduct: _onQuickAdd,
+          onOpenCart: () {
+            setState(() => _index = 3);
+            _persistNavState(tabIndex: 3);
+          },
+          onSelectBrand: _selectStorefrontBrand,
+          onSelectStore: _selectStorefrontMerchant,
+          initialQuery: initialQuery,
+        ),
+      ),
+    );
+  }
+
+  void _openSmartAssistant() {
+    showStorefrontAssistantSheet(
+      context: context,
+      api: api,
+      getCartCount: () => _quickCart.values.fold<int>(0, (sum, q) => sum + q),
+      onAddProduct: _onQuickAdd,
+      onOpenCart: () {
+        setState(() => _index = 3);
+        _persistNavState(tabIndex: 3);
+      },
+      onOpenFreeOrder: () {
+        setState(() {
+          _orderChannel = 'free_text';
+          _index = 3;
+        });
+        _persistNavState(tabIndex: 3);
+      },
+      onOpenService: (sub) {
+        setState(() {
+          _serviceSubView = sub;
+          _index = 2;
+        });
+        _persistNavState(tabIndex: 2, subView: sub);
+      },
+      onSelectBrand: _selectStorefrontBrand,
+      onSelectStore: _selectStorefrontMerchant,
+    );
   }
 
   Future<void> _applyCouponFromOffers(String code) async {
@@ -1202,14 +1320,39 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       HomeScreen(
         api: api,
         bootstrap: _bootstrap,
+        selectedZoneId: _selectedZoneId,
+        onChangeZone: (zId) => setState(() => _selectedZoneId = zId),
         cart: _quickCart,
         cartProductsCache: _cartProductsCache,
+        storefrontFilter: _storefrontFilter,
+        selectedCategoryId: _storefrontCategoryId,
+        selectedCategoryName: _storefrontCategoryName,
+        selectedBrand: _storefrontBrand,
+        selectedMerchantId: _storefrontMerchantId,
+        selectedMerchantName: _storefrontMerchantName,
+        onChangeFilter: (f) => setState(() => _storefrontFilter = f),
+        onSelectCategory: _selectStorefrontCategory,
+        onSelectBrand: _selectStorefrontBrand,
+        onSelectMerchant: _selectStorefrontMerchant,
+        onClearAllFilters: _clearStorefrontFilters,
+        onCategoriesLoaded: (cats) {
+          if (mounted && cats.isNotEmpty) {
+            setState(() => _storefrontCategories = cats);
+          }
+        },
+        onOpenSearch: () => _openSmartSearch(),
         onAddProduct: _onQuickAdd,
-        onOpenCart: () => setState(() => _index = 3),
-        onOpenFreeOrderCart: () => setState(() {
-          _orderChannel = 'free_text';
-          _index = 3;
-        }),
+        onOpenCart: () {
+          setState(() => _index = 3);
+          _persistNavState(tabIndex: 3);
+        },
+        onOpenFreeOrderCart: () {
+          setState(() {
+            _orderChannel = 'free_text';
+            _index = 3;
+          });
+          _persistNavState(tabIndex: 3);
+        },
         onOpenService: (sub) {
           setState(() {
             _serviceSubView = sub;
@@ -1218,19 +1361,29 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _persistNavState(tabIndex: 2, subView: sub);
         },
         onOpenOffers: () {
-          setState(() => _index = 1);
-          _persistNavState(tabIndex: 1);
+          setState(() => _index = 5);
+          _persistNavState(tabIndex: 5);
         },
-        onOpenOrderChat: _openOrderChat,
-        onOpenTripChat: _openTripChat,
         onRateCaptain: _showCaptainRatingDialog,
       ),
-      OffersScreen(
-        api: api,
-        bootstrap: _bootstrap,
-        cart: _quickCart,
-        onAddProduct: _onQuickAdd,
-        onApplyCoupon: _applyCouponFromOffers,
+      StorefrontCategoriesScreen(
+        categories: _storefrontCategories,
+        zoneName: _currentZoneName(),
+        onOpenSearch: () => _openSmartSearch(),
+        onSelectCategory: (cat) {
+          _selectStorefrontCategory(
+            (cat['id'] ?? '').toString(),
+            (cat['name_ar'] ?? '').toString(),
+          );
+        },
+        onSelectGroup: (groupKey) {
+          setState(() {
+            _clearStorefrontFilters();
+            _storefrontFilter = groupKey == 'fresh' ? 'fresh' : 'groceries';
+            _index = 0;
+          });
+          _persistNavState(tabIndex: 0);
+        },
       ),
       ServicesHubScreen(
         api: api,
@@ -1325,11 +1478,21 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           await _silentSync();
         },
         onOpenNotifications: _openNotifications,
-        onOpenOffers: () => setState(() => _index = 1),
+        onOpenOffers: () {
+          setState(() => _index = 5);
+          _persistNavState(tabIndex: 5);
+        },
         onOpenOrderChat: _openOrderChat,
         onOpenTripChat: _openTripChat,
         onRateCaptain: _showCaptainRatingDialog,
         onLogout: _logout,
+      ),
+      OffersScreen(
+        api: api,
+        bootstrap: _bootstrap,
+        cart: _quickCart,
+        onAddProduct: _onQuickAdd,
+        onApplyCoupon: _applyCouponFromOffers,
       ),
     ];
 
@@ -1526,7 +1689,45 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
             ),
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
-              child: Text('الخدمات والأقسام', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
+              child: Text('التسوق الذكي والخدمات', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.search_rounded, color: Color(0xFFA92224)),
+              title: const Text('البحث الذكي ومقارنة الأسعار', style: TextStyle(fontWeight: FontWeight.w600)),
+              onTap: () {
+                Navigator.pop(context);
+                _openSmartSearch();
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.auto_awesome_rounded, color: Color(0xFFD97706)),
+              title: const Text('مساعد اطلبها الذكي', style: TextStyle(fontWeight: FontWeight.w600)),
+              onTap: () {
+                Navigator.pop(context);
+                _openSmartAssistant();
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.category_rounded, color: Color(0xFFA92224)),
+              title: const Text('الأقسام الرئيسية والفرعية', style: TextStyle(fontWeight: FontWeight.w600)),
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _index = 1);
+                _persistNavState(tabIndex: 1);
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.local_offer_rounded, color: Color(0xFF7C3AED)),
+              title: const Text('العروض والكوبونات', style: TextStyle(fontWeight: FontWeight.w600)),
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _index = 5);
+                _persistNavState(tabIndex: 5);
+              },
             ),
             ListTile(
               dense: true,
@@ -1738,7 +1939,6 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       );
     }
 
-    final servicesActive = _index == 2;
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -1752,18 +1952,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              sideTab(idx: 0, icon: Icons.home_outlined, activeIcon: Icons.home, label: 'الرئيسية'),
-              sideTab(idx: 1, icon: Icons.local_offer_outlined, activeIcon: Icons.local_offer, label: 'العروض'),
+              sideTab(idx: 0, icon: Icons.home_outlined, activeIcon: Icons.home_rounded, label: 'الرئيسية'),
+              sideTab(idx: 1, icon: Icons.category_outlined, activeIcon: Icons.category_rounded, label: 'الأقسام'),
               Expanded(
                 child: GestureDetector(
-                  onTap: () {
-                    final nextSub = _index != 2 ? 'hub' : _serviceSubView;
-                    setState(() {
-                      _serviceSubView = nextSub;
-                      _index = 2;
-                    });
-                    _persistNavState(tabIndex: 2, subView: nextSub);
-                  },
+                  onTap: _openSmartAssistant,
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     mainAxisAlignment: MainAxisAlignment.end,
@@ -1777,28 +1970,28 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                             gradient: const LinearGradient(
                               begin: Alignment.topRight,
                               end: Alignment.bottomLeft,
-                              colors: [Color(0xFF9E1C1E), Color(0xFFC8431D), Color(0xFFF5A623)],
+                              colors: [Color(0xFFA92224), Color(0xFF86191B), Color(0xFFF5A623)],
                             ),
-                            borderRadius: BorderRadius.circular(18),
+                            shape: BoxShape.circle,
                             border: Border.all(
-                              color: servicesActive ? const Color(0xFFF5A623) : Colors.white,
+                              color: Colors.white,
                               width: 3,
                             ),
                             boxShadow: const [
-                              BoxShadow(color: Color(0x33A92224), blurRadius: 10, offset: Offset(0, 4)),
+                              BoxShadow(color: Color(0x3DA92224), blurRadius: 12, offset: Offset(0, 4)),
                             ],
                           ),
-                          child: const Icon(Icons.grid_view_rounded, color: Colors.white, size: 26),
+                          child: const Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 25),
                         ),
                       ),
                       Transform.translate(
                         offset: const Offset(0, -6),
-                        child: Text(
-                          'الخدمات',
+                        child: const Text(
+                          'المساعد',
                           style: TextStyle(
                             fontSize: 11,
-                            fontWeight: FontWeight.w800,
-                            color: servicesActive ? const Color(0xFFA92224) : const Color(0xFF0F172A),
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFFA92224),
                           ),
                         ),
                       ),
@@ -1809,11 +2002,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               sideTab(
                 idx: 3,
                 icon: Icons.shopping_cart_outlined,
-                activeIcon: Icons.shopping_cart,
+                activeIcon: Icons.shopping_cart_rounded,
                 label: 'السلة',
                 badge: cartTotalQty,
               ),
-              sideTab(idx: 4, icon: Icons.person_outline, activeIcon: Icons.person, label: 'الملف الشخصي'),
+              sideTab(idx: 4, icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded, label: 'حسابي'),
             ],
           ),
         ),

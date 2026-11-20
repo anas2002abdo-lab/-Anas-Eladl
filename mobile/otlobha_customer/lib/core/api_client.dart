@@ -1359,6 +1359,14 @@ class OtlobhaCustomerApi {
     parseJsonResponse(res, endpointHint: endpointHint, fallbackError: fallbackError);
   }
 
+  static String resolveMediaUrl(dynamic raw) {
+    final str = (raw ?? '').toString().trim();
+    if (str.isEmpty) return '';
+    if (str.startsWith('http://') || str.startsWith('https://')) return str;
+    if (str.startsWith('/')) return '$_resolvedBaseUrl$str';
+    return str;
+  }
+
   Future<Map<String, dynamic>> getStorefrontHome({
     String? filter,
     String? categoryId,
@@ -1389,6 +1397,9 @@ class OtlobhaCustomerApi {
     String? categoryId,
     String? brand,
     String? merchantId,
+    String? minPrice,
+    String? maxPrice,
+    String? sort,
     int limit = 30,
   }) async {
     final qp = <String, String>{
@@ -1397,6 +1408,9 @@ class OtlobhaCustomerApi {
       if (categoryId != null && categoryId.isNotEmpty) 'category_id': categoryId,
       if (brand != null && brand.isNotEmpty) 'brand': brand,
       if (merchantId != null && merchantId.isNotEmpty) 'merchant_id': merchantId,
+      if (minPrice != null && minPrice.trim().isNotEmpty) 'min_price': minPrice.trim(),
+      if (maxPrice != null && maxPrice.trim().isNotEmpty) 'max_price': maxPrice.trim(),
+      if (sort != null && sort.isNotEmpty) 'sort': sort,
     };
     final res = await _execute(
       () => http.get(
