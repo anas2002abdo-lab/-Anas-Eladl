@@ -274,6 +274,34 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
     }
   };
 
+  const handleDeleteAllMasters = async () => {
+    if (!window.confirm('هل أنت متأكد من حذف جميع المنتجات في الكتالوج المركزي بالكامل؟ سيتم فك ارتباط المنتجات المرتبطة بالمتاجر.')) {
+      return;
+    }
+    try {
+      const res = await api.deleteAllAdminMasterProducts();
+      onToast(res.message || 'تم حذف جميع المنتجات المركزية بنجاح');
+      await loadMasters();
+      onRefresh();
+    } catch (err) {
+      onToast((err as Error).message);
+    }
+  };
+
+  const handleDeleteSingleMaster = async (masterId: string, nameAr: string) => {
+    if (!window.confirm(`هل أنت متأكد من حذف المنتج المركزي "${nameAr}"؟`)) {
+      return;
+    }
+    try {
+      const res = await api.deleteAdminMasterProduct(masterId);
+      onToast(res.message || 'تم حذف المنتج المركزي بنجاح');
+      await loadMasters();
+      onRefresh();
+    } catch (err) {
+      onToast((err as Error).message);
+    }
+  };
+
   const handleCreateBanner = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -338,6 +366,14 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
             >
               <Plus className="w-4 h-4" />
               إضافة منتج مركزي معتمد
+            </button>
+            <button
+              onClick={() => void handleDeleteAllMasters()}
+              className="px-3.5 py-2.5 rounded-2xl bg-red-950/40 hover:bg-red-950/70 border border-red-400/40 text-red-200 hover:text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer"
+              title="حذف جميع المنتجات في الكتالوج المركزي"
+            >
+              <Trash2 className="w-4 h-4 text-red-400" />
+              حذف كل الكتالوج
             </button>
             <button
               onClick={() => void loadMasters()}
@@ -512,13 +548,22 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                         )}
                       </td>
                       <td className="py-3 px-2">
-                        <button
-                          onClick={() => void handleInspectMaster(m.id)}
-                          className="px-3 py-1.5 rounded-xl bg-red-50 text-[#A92224] hover:bg-red-100 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          المتاجر والأسعار
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => void handleInspectMaster(m.id)}
+                            className="px-3 py-1.5 rounded-xl bg-red-50 text-[#A92224] hover:bg-red-100 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            المتاجر والأسعار
+                          </button>
+                          <button
+                            onClick={() => void handleDeleteSingleMaster(m.id, m.canonical_name_ar)}
+                            className="p-1.5 rounded-xl text-slate-400 hover:text-red-700 hover:bg-red-50 text-xs font-bold inline-flex items-center cursor-pointer"
+                            title="حذف هذا المنتج المركزي"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

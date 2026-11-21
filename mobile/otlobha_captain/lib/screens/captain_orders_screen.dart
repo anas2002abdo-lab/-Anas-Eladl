@@ -138,41 +138,100 @@ class _CaptainOrdersScreenState extends State<CaptainOrdersScreen> {
             final o = Map<String, dynamic>.from(raw as Map);
             final hasProof = o['delivery_proof_image_url'] != null && o['delivery_proof_image_url'].toString().isNotEmpty;
             final isDelivered = o['status'] == 'delivered';
-            return Card(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '${o['order_number']} · ${o['merchant_name']}',
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                          ),
-                        ),
-                        Text('${o['total_amount']} ج.م', style: const TextStyle(fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text('${o['customer_name']} - ${o['address_landmark']}', style: const TextStyle(fontSize: 12)),
-                    const SizedBox(height: 6),
-                    Text(
-                      hasProof
-                          ? 'تم تصوير الأوردر عند منزل العميل ✓'
-                          : isDelivered
-                              ? 'مكتمل ✓'
-                              : o['status'] == 'on_the_way'
-                                  ? 'مطلوب تصوير الأوردر عند منزل العميل في الشات قبل التسليم'
-                                  : 'الحالة: ${o['status']}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: hasProof || isDelivered ? const Color(0xFF0D9488) : const Color(0xFFB45309),
-                      ),
-                    ),
+            final sections = (o['store_sections'] as List?) ?? [];
+            final isMulti = sections.length > 1;
+
+                    return Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Expanded(
+                                  child: Row(
+                                    children: [
+                                      Text(
+                                        '${o['order_number']}',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      ),
+                                      if (isMulti) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFFFFBEB),
+                                            borderRadius: BorderRadius.circular(6),
+                                            border: Border.all(color: const Color(0xFFF59E0B)),
+                                          ),
+                                          child: Text(
+                                            'مهمة مجمعة (${sections.length} متاجر)',
+                                            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFFB45309)),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                                Text('${o['total_amount']} ج.م', style: const TextStyle(fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text('${o['customer_name']} - ${o['address_landmark']}', style: const TextStyle(fontSize: 12)),
+                            const SizedBox(height: 6),
+                            if (sections.isNotEmpty) ...[
+                              ...sections.map((sec) {
+                                final s = Map<String, dynamic>.from(sec as Map);
+                                final isPicked = s['captain_picked_up_at'] != null || s['prep_status'] == 'on_the_way' || s['prep_status'] == 'delivered';
+                                final isReady = s['prep_status'] == 'ready_for_pickup';
+                                return Container(
+                                  margin: const EdgeInsets.only(top: 3),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: isPicked ? const Color(0xFFECFDF5) : const Color(0xFFF8FAFC),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: isPicked ? const Color(0xFFA7F3D0) : const Color(0xFFE2E8F0)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        isPicked ? Icons.check_circle_rounded : (isReady ? Icons.storefront : Icons.hourglass_top_rounded),
+                                        size: 13,
+                                        color: isPicked ? const Color(0xFF047857) : (isReady ? const Color(0xFFD97706) : const Color(0xFF64748B)),
+                                      ),
+                                      const SizedBox(width: 5),
+                                      Expanded(
+                                        child: Text(
+                                          'محطة: ${s['merchant_name']} (${isPicked ? 'تم الاستلام' : (isReady ? 'جاهز للاستلام' : 'قيد التجهيز')})',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: isPicked ? const Color(0xFF047857) : const Color(0xFF334155),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }),
+                              const SizedBox(height: 6),
+                            ],
+                            Text(
+                              hasProof
+                                  ? 'تم تصوير الأوردر عند منزل العميل ✓'
+                                  : isDelivered
+                                      ? 'مكتمل ✓'
+                                      : o['status'] == 'on_the_way'
+                                          ? 'مطلوب تصوير الأوردر عند منزل العميل في الشات قبل التسليم'
+                                          : 'الحالة: ${o['status']}',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: hasProof || isDelivered ? const Color(0xFF0D9488) : const Color(0xFFB45309),
+                              ),
+                            ),
                     const SizedBox(height: 8),
                     Wrap(
                       spacing: 8,

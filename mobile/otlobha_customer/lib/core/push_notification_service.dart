@@ -75,12 +75,20 @@ class OtlobhaPushChannels {
       ];
 }
 
+const FirebaseOptions otlobhaFirebaseOptions = FirebaseOptions(
+  apiKey: 'AIzaSyC7N1cRgBNqZU0Hfm0UKHJnGXe0cIM8ibU',
+  appId: '1:681956982552:android:a3c27c08d02027531f286d',
+  messagingSenderId: '681956982552',
+  projectId: 'third-accumulator-bgtt6',
+  storageBucket: 'third-accumulator-bgtt6.firebasestorage.app',
+);
+
 /// Top-level background handler invoked by FCM when the app is in background or terminated.
 @pragma('vm:entry-point')
 Future<void> otlobhaCustomerBackgroundHandler(RemoteMessage message) async {
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp();
+      await Firebase.initializeApp(options: otlobhaFirebaseOptions);
     }
     // When message.notification != null, Android FCM SDK automatically displays the system tray notification
     // using android.notification.channel_id. For data-only messages, display it via local notifications.
@@ -317,13 +325,17 @@ class CustomerPushNotificationService {
   Future<void> _initFirebaseMessaging() async {
     try {
       if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp();
+        await Firebase.initializeApp(options: otlobhaFirebaseOptions);
       }
       _firebaseReady = Firebase.apps.isNotEmpty;
     } catch (e) {
-      _firebaseReady = false;
-      debugPrint('[CustomerPush] Firebase not configured yet (add google-services.json): $e');
-      return;
+      if (Firebase.apps.isNotEmpty) {
+        _firebaseReady = true;
+      } else {
+        _firebaseReady = false;
+        debugPrint('[CustomerPush] Firebase init error: $e');
+        return;
+      }
     }
 
     if (!_firebaseReady) return;

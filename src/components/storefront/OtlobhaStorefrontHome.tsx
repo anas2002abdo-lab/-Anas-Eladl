@@ -222,64 +222,6 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
         </div>
       )}
 
-      {/* 3. OFFERS STRIP (Free delivery, Discounts, Limited Offers, Store Deals) */}
-      {!hasScopedFilter && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {[
-            {
-              key: 'free_delivery',
-              title: 'عروض التوصيل المجاني',
-              sub: stripBanners[0]?.badge_ar || 'توفير فوري',
-              icon: Truck,
-              tone: 'bg-[#FFFBEB] border-[#F5A623]/50 text-[#92400E]',
-              iconBg: 'bg-[#F5A623] text-[#3B180E]',
-            },
-            {
-              key: 'offers',
-              title: 'خصومات اليوم',
-              sub: 'أعلى نسب الخصم',
-              icon: Flame,
-              tone: 'bg-[#FEF2F2] border-red-200 text-[#A92224]',
-              iconBg: 'bg-[#A92224] text-white',
-            },
-            {
-              key: 'fresh',
-              title: 'العروض الطازجة',
-              sub: 'خضروات وألبان',
-              icon: Leaf,
-              tone: 'bg-emerald-50 border-emerald-200 text-emerald-800',
-              iconBg: 'bg-emerald-600 text-white',
-            },
-            {
-              key: 'groceries',
-              title: 'عروض المتاجر',
-              sub: 'قارن واختر الأرخص',
-              icon: Gift,
-              tone: 'bg-white border-slate-200 text-slate-800',
-              iconBg: 'bg-slate-900 text-[#F5A623]',
-            },
-          ].map((card) => {
-            const Icon = card.icon;
-            return (
-              <button
-                key={card.key}
-                type="button"
-                onClick={() => onChangeFilter(card.key as any)}
-                className={`rounded-2xl border p-2.5 flex items-center gap-2.5 text-right transition hover:shadow-sm cursor-pointer ${card.tone}`}
-              >
-                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${card.iconBg}`}>
-                  <Icon className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-[11px] font-black leading-tight truncate">{card.title}</div>
-                  <div className="text-[10px] opacity-80 truncate">{card.sub}</div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
       {/* Compact Otlobha Multi-Services Access Row (Zero Feature Loss!) */}
       {!hasScopedFilter && (
         <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
@@ -329,7 +271,7 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
         </div>
       )}
 
-      {/* 4. QUICK FILTER BUTTONS (Inspired directly by reference video, Otlobha colors) */}
+      {/* 4. QUICK FILTER BUTTONS & TRENDING CATEGORIES (الأقسام الأكثر رواجًا) */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
         <button
           type="button"
@@ -340,28 +282,43 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
           <span>الفلاتر</span>
         </button>
 
-        {[
-          { id: 'for_you', label: 'مختارة لك' },
-          { id: 'groceries', label: 'المقاضي' },
-          { id: 'fresh', label: 'المنتجات الطازجة' },
-          { id: 'offers', label: 'العروض والخصومات' },
-        ].map((chip) => {
-          const active = activeFilter === chip.id && !hasScopedFilter;
+        {/* زر الكل */}
+        <button
+          type="button"
+          onClick={() => {
+            if (hasScopedFilter) onClearAllFilters();
+            onSelectCategory('');
+          }}
+          className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer ${
+            !selectedCategoryId && !selectedBrand && !selectedMerchantId
+              ? 'bg-[#A92224] text-white shadow-sm'
+              : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224]/40'
+          }`}
+        >
+          الكل
+        </button>
+
+        {/* مستطيلات الأقسام الأكثر رواجًا */}
+        {(categories || []).slice(0, 12).map((cat) => {
+          const active = selectedCategoryId === cat.id;
           return (
             <button
-              key={chip.id}
+              key={cat.id}
               type="button"
               onClick={() => {
-                if (hasScopedFilter) onClearAllFilters();
-                onChangeFilter(chip.id as any);
+                if (active) {
+                  onSelectCategory('');
+                } else {
+                  onSelectCategory(cat.id);
+                }
               }}
-              className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer ${
+              className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer whitespace-nowrap ${
                 active
                   ? 'bg-[#A92224] text-white shadow-sm'
                   : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224]/40'
               }`}
             >
-              {chip.label}
+              {cat.name_ar}
             </button>
           );
         })}

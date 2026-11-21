@@ -1013,6 +1013,14 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+  deleteAdminMasterProduct: (id: string) =>
+    request<{ ok: boolean; message: string }>(`/api/admin/master-products/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  deleteAllAdminMasterProducts: () =>
+    request<{ ok: boolean; message: string }>('/api/admin/master-products/all', {
+      method: 'DELETE',
+    }),
   getAdminMasterDuplicates: () => request<any[]>('/api/admin/master-products/duplicates'),
   mergeAdminMasterProducts: (body: { source_master_id: string; target_master_id: string; reason?: string }) =>
     request<{ ok: boolean; moved_listings: number; deduplicated_listings: number }>(

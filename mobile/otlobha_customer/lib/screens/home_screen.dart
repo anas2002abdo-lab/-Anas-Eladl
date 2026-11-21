@@ -658,15 +658,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
 
-                // 4. 4-Card Offers Strip
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
-                    child: _buildOffersStrip(),
-                  ),
-                ),
-
-                // 5. Compact Otlobha Multi-Services Strip
+                // 4. Compact Otlobha Multi-Services Strip
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: const EdgeInsets.only(top: 14),
@@ -1124,114 +1116,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildOffersStrip() {
-    final cards = [
-      (
-        title: 'توصيل مجاني',
-        sub: 'عروض التوفير',
-        icon: Icons.local_shipping_rounded,
-        bg: const Color(0xFFFEF2F2),
-        fg: const Color(0xFFA92224),
-        onTap: () => widget.onChangeFilter('offers'),
-      ),
-      (
-        title: 'خصومات اليوم',
-        sub: 'أقوى الأسعار',
-        icon: Icons.percent_rounded,
-        bg: const Color(0xFFFFFBEB),
-        fg: const Color(0xFFD97706),
-        onTap: () => widget.onChangeFilter('offers'),
-      ),
-      (
-        title: 'العروض الطازجة',
-        sub: 'مخبوزات وألبان',
-        icon: Icons.eco_rounded,
-        bg: const Color(0xFFECFDF5),
-        fg: const Color(0xFF047857),
-        onTap: () => widget.onChangeFilter('fresh'),
-      ),
-      (
-        title: 'كوبونات المتاجر',
-        sub: 'أكواد خصم فورية',
-        icon: Icons.confirmation_number_rounded,
-        bg: const Color(0xFFF5F3FF),
-        fg: const Color(0xFF7C3AED),
-        onTap: widget.onOpenOffers,
-      ),
-    ];
-
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 8,
-        childAspectRatio: 2.65,
-      ),
-      itemCount: cards.length,
-      itemBuilder: (_, idx) {
-        final item = cards[idx];
-        return Material(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          child: InkWell(
-            onTap: item.onTap,
-            borderRadius: BorderRadius.circular(14),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFFE2E8F0)),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: item.bg,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(item.icon, size: 18, color: item.fg),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          item.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xFF0F172A),
-                          ),
-                        ),
-                        Text(
-                          item.sub,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF64748B),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
 
   Widget _buildServicesStrip() {
     final services = [
@@ -1329,18 +1213,25 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildQuickFilterChips() {
-    final filters = [
-      ('for_you', 'مختارة لك'),
-      ('groceries', 'المقاضي'),
-      ('fresh', 'المنتجات الطازجة'),
-      ('offers', 'العروض والخصومات'),
-    ];
+    final hasNoCat = widget.selectedCategoryId.isEmpty && widget.selectedBrand.isEmpty && widget.selectedMerchantId.isEmpty;
+    final trendingCats = _categories.isNotEmpty
+        ? _categories.where((c) => (c['name_ar'] ?? '').toString().trim().isNotEmpty).toList()
+        : <Map<String, dynamic>>[
+            {'id': 'supermarket', 'name_ar': 'سوبر ماركت'},
+            {'id': 'bakery', 'name_ar': 'مخبوزات'},
+            {'id': 'fresh', 'name_ar': 'خضار وفواكه'},
+            {'id': 'dairy', 'name_ar': 'ألبان وأجبان'},
+            {'id': 'meat', 'name_ar': 'لحوم ودواجن'},
+            {'id': 'drinks', 'name_ar': 'مشروبات ومياه'},
+            {'id': 'care', 'name_ar': 'عناية ومنظفات'},
+          ];
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: Row(
         children: [
+          // 1. زر الفلاتر
           InkWell(
             onTap: _openFilterModal,
             borderRadius: BorderRadius.circular(12),
@@ -1375,14 +1266,53 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(width: 8),
-          ...filters.map((f) {
-            final active = widget.storefrontFilter == f.$1 && !_hasScopedFilter;
+
+          // 2. زر الكل
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: InkWell(
+              onTap: () {
+                if (_hasScopedFilter) widget.onClearAllFilters();
+                widget.onSelectCategory('', '');
+                widget.onChangeFilter('all');
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+                decoration: BoxDecoration(
+                  color: hasNoCat ? const Color(0xFFA92224) : Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: hasNoCat ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
+                  ),
+                ),
+                child: Text(
+                  'الكل',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: hasNoCat ? Colors.white : const Color(0xFF334155),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // 3. مستطيلات الأقسام الأكثر رواجًا
+          ...trendingCats.map((cat) {
+            final catId = (cat['id'] ?? '').toString();
+            final catName = (cat['name_ar'] ?? '').toString().trim();
+            final active = widget.selectedCategoryId == catId;
+
             return Padding(
               padding: const EdgeInsets.only(left: 8),
               child: InkWell(
                 onTap: () {
-                  if (_hasScopedFilter) widget.onClearAllFilters();
-                  widget.onChangeFilter(f.$1);
+                  if (active) {
+                    widget.onSelectCategory('', '');
+                  } else {
+                    widget.onSelectCategory(catId, catName);
+                  }
                 },
                 borderRadius: BorderRadius.circular(12),
                 child: Container(
@@ -1395,7 +1325,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                   child: Text(
-                    f.$2,
+                    catName,
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w800,

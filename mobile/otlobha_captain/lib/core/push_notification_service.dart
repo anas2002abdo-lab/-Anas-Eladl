@@ -75,12 +75,20 @@ class CaptainPushChannels {
       ];
 }
 
+const FirebaseOptions otlobhaFirebaseOptions = FirebaseOptions(
+  apiKey: 'AIzaSyC7N1cRgBNqZU0Hfm0UKHJnGXe0cIM8ibU',
+  appId: '1:681956982552:android:b4d38e19e13138642g397e',
+  messagingSenderId: '681956982552',
+  projectId: 'third-accumulator-bgtt6',
+  storageBucket: 'third-accumulator-bgtt6.firebasestorage.app',
+);
+
 /// Top-level background handler invoked by FCM when the captain app is in background or terminated.
 @pragma('vm:entry-point')
 Future<void> otlobhaCaptainBackgroundHandler(RemoteMessage message) async {
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp();
+      await Firebase.initializeApp(options: otlobhaFirebaseOptions);
     }
     if (message.notification == null && message.data.isNotEmpty) {
       final title = message.data['title_ar']?.toString() ?? message.data['title']?.toString() ?? '';
@@ -254,13 +262,17 @@ class CaptainPushNotificationService {
   Future<void> _initFirebaseMessaging() async {
     try {
       if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp();
+        await Firebase.initializeApp(options: otlobhaFirebaseOptions);
       }
       _firebaseReady = Firebase.apps.isNotEmpty;
     } catch (e) {
-      _firebaseReady = false;
-      debugPrint('[CaptainPush] Firebase not configured yet (add google-services.json): $e');
-      return;
+      if (Firebase.apps.isNotEmpty) {
+        _firebaseReady = true;
+      } else {
+        _firebaseReady = false;
+        debugPrint('[CaptainPush] Firebase init error: $e');
+        return;
+      }
     }
 
     if (!_firebaseReady) return;

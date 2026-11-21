@@ -390,26 +390,19 @@ class _CartScreenState extends State<CartScreen> {
                   }
                   setState(() => _submitting = true);
                   try {
-                    final createdNumbers = <String>[];
+                    String createdOrderNumber = '';
+                    int storeCount = 1;
                     if (widget.orderChannel == 'catalog') {
-                      double remainingDisc = widget.appliedDiscount;
-                      var idx = 0;
+                      final storesPayload = <Map<String, dynamic>>[];
                       for (final grp in merchantGroups.values) {
                         final grpItems = grp['items'] as List<Map<String, dynamic>>;
-                        final grpSub = grp['subtotal'] as double;
-                        final grpDelivery = idx == 0 ? singleDelivery : 5.0;
-                        final grpDisc = remainingDisc > (grpSub + grpDelivery) ? (grpSub + grpDelivery) : remainingDisc;
-                        remainingDisc = (remainingDisc - grpDisc).clamp(0, 999999);
+                        final grpSub = (grp['subtotal'] as num).toDouble();
                         final summary = grpItems.map((c) => "${c['product']['name_ar']} × ${c['qty']}").join(' + ');
-                        final res = await widget.api.createOrder({
-                          'customer_name': widget.customerName,
-                          'customer_phone': widget.customerPhone,
+                        storesPayload.add({
                           'merchant_id': grp['merchant_id'],
-                          'zone_id': effectiveZoneId,
-                          'zone_name': selectedZone['name_ar'],
-                          'address_landmark': widget.addressLandmark,
                           'order_channel': 'catalog',
                           'free_order_text': summary,
+                          'subtotal': grpSub,
                           'items': grpItems
                               .map((c) => {
                                     'product_id': c['product']['id'],
@@ -418,16 +411,20 @@ class _CartScreenState extends State<CartScreen> {
                                     'unit_price': (c['product']['sale_price'] ?? c['product']['base_price']),
                                   })
                               .toList(),
-                          'is_express': _isExpress,
-                          'is_additional_store_stop': idx > 0,
-                          'subtotal': grpSub,
-                          if (widget.couponCode.trim().isNotEmpty) 'coupon_code': widget.couponCode.trim(),
-                          'discount_amount': grpDisc,
-                          'payment_method': 'cash',
                         });
-                        createdNumbers.add('${res['order_number']}');
-                        idx++;
                       }
+                      storeCount = storesPayload.length;
+                      final res = await widget.api.createBundleOrder({
+                        'customer_name': widget.customerName,
+                        'customer_phone': widget.customerPhone,
+                        'zone_id': effectiveZoneId,
+                        'address_landmark': widget.addressLandmark,
+                        'is_express': _isExpress,
+                        if (widget.couponCode.trim().isNotEmpty) 'coupon_code': widget.couponCode.trim(),
+                        'payment_method': 'cash',
+                        'stores': storesPayload,
+                      });
+                      createdOrderNumber = '${res['order_number'] ?? res['id']}';
                     } else {
                       final res = await widget.api.createOrder({
                         'customer_name': widget.customerName,
@@ -444,7 +441,7 @@ class _CartScreenState extends State<CartScreen> {
                         'discount_amount': widget.appliedDiscount,
                         'payment_method': 'cash',
                       });
-                      createdNumbers.add('${res['order_number']}');
+                      createdOrderNumber = '${res['order_number'] ?? res['id']}';
                     }
                     _freeTextCtrl.clear();
                     widget.onClearCart();
@@ -454,9 +451,9 @@ class _CartScreenState extends State<CartScreen> {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
                           content: Text(
-                            createdNumbers.length > 1
-                                ? 'تم إرسال ${createdNumbers.length} طلبات بنجاح: ${createdNumbers.map((n) => '#$n').join(' · ')}'
-                                : 'تم إرسال الطلب #${createdNumbers.first} بنجاح',
+                            storeCount > 1
+                                ? 'تم إرسال الطلب الموحد #$createdOrderNumber بنجاح من $storeCount متاجر'
+                                : 'تم إرسال الطلب #$createdOrderNumber بنجاح',
                           ),
                         ),
                       );

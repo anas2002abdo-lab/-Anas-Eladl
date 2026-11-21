@@ -943,6 +943,15 @@ class OtlobhaCustomerApi {
     return _decode(res, endpointHint: '/api/orders');
   }
 
+  Future<Map<String, dynamic>> createBundleOrder(Map<String, dynamic> payload) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(_apiUri('/api/orders/bundle'), headers: h, body: jsonEncode(payload)),
+      json: true,
+      timeout: _uploadTimeout,
+    );
+    return _decode(res, endpointHint: '/api/orders/bundle');
+  }
+
   Future<Map<String, dynamic>> requestRide(Map<String, dynamic> payload) async {
     final res = await _sendWithAuth(
       (h) => http.post(_apiUri('/api/mobile/rides'), headers: h, body: jsonEncode(payload)),
@@ -1422,9 +1431,10 @@ class OtlobhaCustomerApi {
   }
 
   Future<Map<String, dynamic>> getStorefrontProductDetails(String productId) async {
+    final encId = Uri.encodeComponent(productId);
     final res = await _execute(
       () => http.get(
-        _apiUri('/api/storefront/products/${Uri.encodeComponent(productId)}'),
+        _apiUri('/api/storefront/products/$encId/details'),
         headers: _headers(includeAuth: false),
       ),
     );

@@ -887,6 +887,170 @@ export function linkMerchantListingToMaster(input: {
   return { listing, updated_existing: false };
 }
 
+export function ensureMasterProductForListing(input: {
+  id?: string;
+  name_ar: string;
+  name_en?: string;
+  brand?: string;
+  category_id?: string | null;
+  barcode?: string | null;
+  size_value?: number | null;
+  size_unit?: string | null;
+  size_label?: string | null;
+  image_url?: string;
+  description?: string;
+  merchant_id?: string;
+  master_product_id?: string | null;
+}): { master_product_id: string; master: Record<string, any>; is_new: boolean } {
+  const nameAr = String(input.name_ar || '').trim();
+  if (!nameAr) throw new Error('اسم المنتج بالعربية مطلوب للربط بالكتالوج المركزي');
+
+  const cleanBarcode = String(input.barcode || '').trim() || null;
+  const parsedSize = extractSize({
+    size_value: input.size_value,
+    size_unit: input.size_unit,
+    size_label: input.size_label,
+    name_ar: nameAr,
+    name_en: input.name_en,
+  });
+
+  // 1. If explicit, valid master_product_id is provided, verify it exists
+  const explicitMasterId = String(input.master_product_id || '').trim();
+  if (explicitMasterId) {
+    const existingMaster = db
+      .prepare('SELECT * FROM master_products WHERE id = ?')
+      .get(explicitMasterId) as Record<string, any> | undefined;
+    if (existingMaster) {
+      if (existingMaster.merged_into_id) {
+        return ensureMasterProductForListing({ ...input, master_product_id: String(existingMaster.merged_into_id) });
+      }
+      return { master_product_id: existingMaster.id, master: existingMaster, is_new: false };
+    }
+  }
+
+  // 2. Search central master catalog for an exact match (exact barcode or normalized name + brand + compatible size)
+  const matchResult = matchMasterProducts({
+    name_ar: nameAr,
+    name_en: input.name_en,
+    brand: input.brand,
+    barcode: cleanBarcode,
+    size_value: parsedSize?.canonicalValue ?? input.size_value ?? null,
+    size_unit: parsedSize?.canonicalUnit ?? input.size_unit ?? null,
+    size_label: input.size_label || parsedSize?.displayLabel || '',
+    category_id: input.category_id,
+  });
+
+  if (matchResult.match_status === 'exact' && matchResult.exact_match) {
+    const matchedMaster = db
+      .prepare('SELECT * FROM master_products WHERE id = ?')
+      .get(matchResult.exact_match.id) as Record<string, any>;
+    if (matchedMaster) {
+      // If master lacks image, barcode, brand, or description and listing provides them, update master
+      const updates: string[] = [];
+      const params: any[] = [];
+      if (!matchedMaster.image_url && input.image_url && input.image_url.trim()) {
+        updates.push('image_url = ?');
+        params.push(input.image_url.trim());
+      }
+      if (!matchedMaster.barcode && cleanBarcode) {
+        updates.push('barcode = ?');
+        params.push(cleanBarcode);
+      }
+      if (!matchedMaster.brand && input.brand && input.brand.trim()) {
+        updates.push('brand = ?');
+        params.push(input.brand.trim());
+      }
+      if (!matchedMaster.description && input.description && input.description.trim()) {
+        updates.push('description = ?');
+        params.push(input.description.trim());
+      }
+      if (updates.length > 0) {
+        params.push(matchedMaster.id);
+        db.prepare(`UPDATE master_products SET ${updates.join(', ')}, updated_at = datetime('now') WHERE id = ?`).run(...params);
+      }
+      return { master_product_id: matchedMaster.id, master: matchedMaster, is_new: false };
+    }
+  }
+
+  // 3. No exact match found: create a new canonical master product record automatically
+  const created = createMasterProductRecord({
+    canonical_name_ar: nameAr,
+    canonical_name_en: input.name_en || nameAr,
+    trade_name: nameAr,
+    brand: input.brand || '',
+    category_id: input.category_id || null,
+    barcode: cleanBarcode,
+    size_value: parsedSize?.canonicalValue ?? (input.size_value ?? null),
+    size_unit: parsedSize?.canonicalUnit ?? (input.size_unit || ''),
+    size_label: input.size_label || parsedSize?.displayLabel || '',
+    image_url: input.image_url || '',
+    description: input.description || '',
+    allow_reuse_exact: true,
+  });
+
+  return { master_product_id: created.master.id, master: created.master, is_new: !created.reused };
+}
+
+export function reconcileAllExistingProductsToMasterCatalog(): {
+  total: number;
+  reconciled: number;
+  linked_existing: number;
+  new_masters: number;
+} {
+  const allProducts = db.prepare(`
+    SELECT id, product_code, merchant_id, category_id, master_product_id,
+           name_ar, name_en, description, image_url, brand, size_label,
+           size_value, size_unit, barcode
+    FROM products
+  `).all() as Array<Record<string, any>>;
+
+  let reconciled = 0;
+  let linkedExisting = 0;
+  let newMasters = 0;
+
+  const updateStmt = db.prepare('UPDATE products SET master_product_id = ? WHERE id = ?');
+
+  db.transaction(() => {
+    for (const prod of allProducts) {
+      const existingMasterId = prod.master_product_id ? String(prod.master_product_id).trim() : '';
+      let isValid = false;
+      if (existingMasterId) {
+        const check = db.prepare('SELECT id FROM master_products WHERE id = ?').get(existingMasterId);
+        if (check) isValid = true;
+      }
+
+      if (!isValid) {
+        const res = ensureMasterProductForListing({
+          id: prod.id,
+          name_ar: prod.name_ar,
+          name_en: prod.name_en,
+          brand: prod.brand,
+          category_id: prod.category_id,
+          barcode: prod.barcode,
+          size_value: prod.size_value,
+          size_unit: prod.size_unit,
+          size_label: prod.size_label,
+          image_url: prod.image_url,
+          description: prod.description,
+          merchant_id: prod.merchant_id,
+        });
+
+        updateStmt.run(res.master_product_id, prod.id);
+        reconciled++;
+        if (res.is_new) newMasters++;
+        else linkedExisting++;
+      }
+    }
+  })();
+
+  return {
+    total: allProducts.length,
+    reconciled,
+    linked_existing: linkedExisting,
+    new_masters: newMasters,
+  };
+}
+
 export function submitMerchantProductRequestRecord(input: {
   merchant_id: string;
   requested_by?: string;
@@ -1206,14 +1370,22 @@ export function getStorefrontProductDetailsData(productId: string) {
         mp.usage_notes AS master_usage_notes,
         mp.ingredients AS master_ingredients
       FROM products p
-      JOIN merchants m ON m.id = p.merchant_id
+      LEFT JOIN merchants m ON m.id = p.merchant_id
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN master_products mp ON mp.id = p.master_product_id
       WHERE p.id = ?
     `)
     .get(productId) as Record<string, any> | undefined;
 
-  if (!row) return null;
+  if (!row) {
+    const linkedProd = db
+      .prepare('SELECT id FROM products WHERE master_product_id = ? ORDER BY is_available DESC LIMIT 1')
+      .get(productId) as { id: string } | undefined;
+    if (linkedProd?.id) {
+      return getStorefrontProductDetailsData(linkedProd.id);
+    }
+    return null;
+  }
 
   const effectivePrice =
     row.sale_price !== null && row.sale_price !== undefined && Number(row.sale_price) < Number(row.base_price)
@@ -1682,71 +1854,84 @@ export function registerMasterCatalogRoutes(app: Express): void {
     const whereSql = `WHERE ${where.join(' AND ')}`;
 
     // Deduplicate same master_product_id in home feed by preferring cheapest store listing
-    const totalRow = db
-      .prepare(`
-        SELECT COUNT(*) AS c
-        FROM products p
-        JOIN merchants m ON m.id = p.merchant_id
-        LEFT JOIN categories c ON c.id = p.category_id
-        LEFT JOIN master_products mp ON mp.id = p.master_product_id
-        ${whereSql}
-      `)
-      .get(...params) as { c: number };
+    const totalRow = merchantId
+      ? (db
+          .prepare(`
+            SELECT COUNT(*) AS c
+            FROM products p
+            JOIN merchants m ON m.id = p.merchant_id
+            LEFT JOIN categories c ON c.id = p.category_id
+            LEFT JOIN master_products mp ON mp.id = p.master_product_id
+            ${whereSql}
+          `)
+          .get(...params) as { c: number })
+      : (db
+          .prepare(`
+            SELECT COUNT(DISTINCT COALESCE(p.master_product_id, p.id)) AS c
+            FROM products p
+            JOIN merchants m ON m.id = p.merchant_id
+            LEFT JOIN categories c ON c.id = p.category_id
+            LEFT JOIN master_products mp ON mp.id = p.master_product_id
+            ${whereSql}
+          `)
+          .get(...params) as { c: number });
 
-    const rawProducts = db
-      .prepare(`
-        SELECT
-          p.*,
-          m.business_name_ar AS merchant_name,
-          m.merchant_type,
-          c.name_ar AS category_name,
-          c.group_key AS category_group_key,
-          mp.canonical_name_ar AS master_name_ar,
-          mp.canonical_name_en AS master_name_en,
-          mp.brand AS master_brand,
-          mp.size_label AS master_size_label,
-          mp.image_url AS master_image_url,
-          mp.description AS master_description
-        FROM products p
-        JOIN merchants m ON m.id = p.merchant_id
-        LEFT JOIN categories c ON c.id = p.category_id
-        LEFT JOIN master_products mp ON mp.id = p.master_product_id
-        ${whereSql}
-        ORDER BY p.is_offer DESC, p.purchase_count DESC, COALESCE(p.sale_price, p.base_price) ASC, p.updated_at DESC
-        LIMIT ? OFFSET ?
-      `)
-      .all(...params, limit, offset) as Array<Record<string, any>>;
+    const rawProducts = merchantId
+      ? (db
+          .prepare(`
+            SELECT
+              p.*,
+              m.business_name_ar AS merchant_name,
+              m.merchant_type,
+              c.name_ar AS category_name,
+              c.group_key AS category_group_key,
+              mp.canonical_name_ar AS master_name_ar,
+              mp.canonical_name_en AS master_name_en,
+              mp.brand AS master_brand,
+              mp.size_label AS master_size_label,
+              mp.image_url AS master_image_url,
+              mp.description AS master_description
+            FROM products p
+            JOIN merchants m ON m.id = p.merchant_id
+            LEFT JOIN categories c ON c.id = p.category_id
+            LEFT JOIN master_products mp ON mp.id = p.master_product_id
+            ${whereSql}
+            ORDER BY p.is_offer DESC, p.purchase_count DESC, COALESCE(p.sale_price, p.base_price) ASC, p.updated_at DESC
+            LIMIT ? OFFSET ?
+          `)
+          .all(...params, limit, offset) as Array<Record<string, any>>)
+      : (db
+          .prepare(`
+            SELECT * FROM (
+              SELECT
+                p.*,
+                m.business_name_ar AS merchant_name,
+                m.merchant_type,
+                c.name_ar AS category_name,
+                c.group_key AS category_group_key,
+                mp.canonical_name_ar AS master_name_ar,
+                mp.canonical_name_en AS master_name_en,
+                mp.brand AS master_brand,
+                mp.size_label AS master_size_label,
+                mp.image_url AS master_image_url,
+                mp.description AS master_description,
+                ROW_NUMBER() OVER (
+                  PARTITION BY COALESCE(p.master_product_id, p.id)
+                  ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC
+                ) AS rn
+              FROM products p
+              JOIN merchants m ON m.id = p.merchant_id
+              LEFT JOIN categories c ON c.id = p.category_id
+              LEFT JOIN master_products mp ON mp.id = p.master_product_id
+              ${whereSql}
+            ) sub
+            WHERE sub.rn = 1
+            ORDER BY sub.is_offer DESC, sub.purchase_count DESC, COALESCE(sub.sale_price, sub.base_price) ASC, sub.updated_at DESC
+            LIMIT ? OFFSET ?
+          `)
+          .all(...params, limit, offset) as Array<Record<string, any>>);
 
-    // When showing unified storefront (not filtered to a specific merchant), keep cheapest card per master_product_id so user doesn't see duplicates on home grid
-    const dedupedRows = merchantId
-      ? rawProducts
-      : (() => {
-          const seenMasters = new Map<string, Record<string, any>>();
-          const list: Array<Record<string, any>> = [];
-          for (const item of rawProducts) {
-            if (!item.master_product_id) {
-              list.push(item);
-              continue;
-            }
-            const existing = seenMasters.get(item.master_product_id);
-            const itemPrice = item.sale_price !== null && item.sale_price < item.base_price ? item.sale_price : item.base_price;
-            if (!existing) {
-              seenMasters.set(item.master_product_id, item);
-              list.push(item);
-            } else {
-              const exPrice =
-                existing.sale_price !== null && existing.sale_price < existing.base_price
-                  ? existing.sale_price
-                  : existing.base_price;
-              if (itemPrice < exPrice) {
-                const idx = list.indexOf(existing);
-                if (idx !== -1) list[idx] = item;
-                seenMasters.set(item.master_product_id, item);
-              }
-            }
-          }
-          return list;
-        })();
+    const dedupedRows = rawProducts;
 
     const brands = db
       .prepare(`
@@ -1928,9 +2113,41 @@ export function registerMasterCatalogRoutes(app: Express): void {
       `)
       .all() as Array<{ id: string; business_name_ar: string; products_count: number }>;
 
+    const dedupedSearchItems = merchantId
+      ? rawItems
+      : (() => {
+          const seen = new Map<string, Record<string, any>>();
+          const list: Array<Record<string, any>> = [];
+          for (const item of rawItems) {
+            const mId = item.master_product_id;
+            if (!mId) {
+              list.push(item);
+              continue;
+            }
+            const existing = seen.get(mId);
+            const itemPrice =
+              item.sale_price !== null && item.sale_price < item.base_price ? item.sale_price : item.base_price;
+            if (!existing) {
+              seen.set(mId, item);
+              list.push(item);
+            } else {
+              const exPrice =
+                existing.sale_price !== null && existing.sale_price < existing.base_price
+                  ? existing.sale_price
+                  : existing.base_price;
+              if (itemPrice < exPrice) {
+                const idx = list.indexOf(existing);
+                if (idx !== -1) list[idx] = item;
+                seen.set(mId, item);
+              }
+            }
+          }
+          return list;
+        })();
+
     res.json({
       query: q,
-      items: enrichStorefrontProducts(rawItems),
+      items: enrichStorefrontProducts(dedupedSearchItems),
       top_offers: enrichStorefrontProducts(topOffers),
       trending_queries: trendingQueries,
       facets: {
@@ -1940,11 +2157,14 @@ export function registerMasterCatalogRoutes(app: Express): void {
     });
   });
 
-  app.get('/api/storefront/products/:productId/details', (req: Request, res: Response) => {
-    const data = getStorefrontProductDetailsData(String(req.params.productId || ''));
-    if (!data) return res.status(404).json({ error: 'المنتج غير موجود' });
-    res.json(data);
-  });
+  app.get(
+    ['/api/storefront/products/:productId/details', '/api/storefront/products/:productId'],
+    (req: Request, res: Response) => {
+      const data = getStorefrontProductDetailsData(String(req.params.productId || ''));
+      if (!data) return res.status(404).json({ error: 'المنتج غير موجود' });
+      res.json(data);
+    }
+  );
 
   // Otlobha Smart Shopping Assistant (real DB catalog & price comparison helper)
   app.post('/api/storefront/assistant', (req: Request, res: Response) => {
@@ -2695,6 +2915,73 @@ export function registerMasterCatalogRoutes(app: Express): void {
     if (!ensureAdminCatalogAccess(req, res)) return;
     db.prepare('DELETE FROM storefront_banners WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
+  });
+
+  // Delete all products in Central Master Catalog
+  app.delete('/api/admin/master-products/all', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+    if (!ensureAdminCatalogAccess(req, res)) return;
+    try {
+      db.transaction(() => {
+        db.prepare('UPDATE products SET master_product_id = NULL WHERE master_product_id IS NOT NULL').run();
+        db.prepare('DELETE FROM master_products').run();
+        recordAuditLog({
+          actor_name: req.auth!.fullName,
+          actor_role: req.auth!.role,
+          action: 'MASTER_CATALOG_CLEARED',
+          entity_type: 'master_products',
+          entity_id: 'all',
+          details: 'حذف جميع المنتجات في الكتالوج المركزي وفصل ربط المنتجات',
+        });
+      })();
+      res.json({ ok: true, message: 'تم حذف جميع المنتجات في الكتالوج المركزي بنجاح' });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Delete single Master Product
+  app.delete('/api/admin/master-products/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+    if (!ensureAdminCatalogAccess(req, res)) return;
+    const { id } = req.params;
+    try {
+      db.transaction(() => {
+        db.prepare('UPDATE products SET master_product_id = NULL WHERE master_product_id = ?').run(id);
+        const info = db.prepare('DELETE FROM master_products WHERE id = ?').run(id);
+        if (info.changes === 0) {
+          throw new Error('المنتج المركزي غير موجود');
+        }
+        recordAuditLog({
+          actor_name: req.auth!.fullName,
+          actor_role: req.auth!.role,
+          action: 'MASTER_PRODUCT_DELETED',
+          entity_type: 'master_products',
+          entity_id: id,
+          details: `حذف المنتج المركزي ${id} وفصل ربط المتاجر به`,
+        });
+      })();
+      res.json({ ok: true, message: 'تم حذف المنتج المركزي بنجاح' });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Reconcile and unify all merchant products to master catalog
+  app.post('/api/admin/master-products/reconcile-all', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+    if (!ensureAdminCatalogAccess(req, res)) return;
+    try {
+      const summary = reconcileAllExistingProductsToMasterCatalog();
+      recordAuditLog({
+        actor_name: req.auth!.fullName,
+        actor_role: req.auth!.role,
+        action: 'MASTER_PRODUCTS_RECONCILED',
+        entity_type: 'master_products',
+        entity_id: 'bulk',
+        details: `معالجة وتوحيد ربط المنتجات بالكتالوج المركزي (إجمالي: ${summary.total}، تم ربطه: ${summary.reconciled}، كتالوج جديد: ${summary.new_masters})`,
+      });
+      res.json({ ok: true, summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   // Export all approved Master Products (for full Excel download)

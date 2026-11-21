@@ -23,7 +23,12 @@ import {
 } from './src/server/db.ts';
 import { startSqlitePersistSync, type SqlitePersistController } from './src/server/sqlitePersist.ts';
 import { registerCloudSyncRoutes } from './src/server/cloudSyncRoutes.ts';
-import { registerMasterCatalogRoutes, extractSize } from './src/server/masterCatalog.ts';
+import {
+  registerMasterCatalogRoutes,
+  extractSize,
+  ensureMasterProductForListing,
+  reconcileAllExistingProductsToMasterCatalog,
+} from './src/server/masterCatalog.ts';
 import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
@@ -69,6 +74,16 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 validateAuthConfiguration();
 initDatabase();
 ensureBootstrapSuperAdmin();
+try {
+  const recon = reconcileAllExistingProductsToMasterCatalog();
+  if (recon.reconciled > 0 || recon.new_masters > 0) {
+    console.log(
+      `[MasterCatalog] Startup reconciliation complete: total=${recon.total}, reconciled=${recon.reconciled}, new_masters=${recon.new_masters}, linked_existing=${recon.linked_existing}`
+    );
+  }
+} catch (err) {
+  console.error('[MasterCatalog] Startup reconciliation error:', err);
+}
 
 const app = express();
 app.set('trust proxy', 1);
@@ -2299,6 +2314,39 @@ function allowAnyUserOrGuest(req: any, res: any, next: any) {
 }
 
 app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
+  // If multi-store payload is provided, process as a unified bundle order
+  if (Array.isArray(req.body?.stores) && req.body.stores.length > 0) {
+    return handleBundleOrder(req, res);
+  }
+
+  // Auto-detect multi-store items if merchant_id is not specified
+  const incomingRawItems = Array.isArray(req.body?.items) ? (req.body.items as Array<Record<string, unknown>>) : [];
+  if (!req.body?.merchant_id && incomingRawItems.length > 0) {
+    const storeMap = new Map<string, Array<Record<string, unknown>>>();
+    for (const it of incomingRawItems) {
+      const pId = it?.product_id ? String(it.product_id).trim() : null;
+      let mId = it?.merchant_id ? String(it.merchant_id).trim() : null;
+      if (!mId && pId) {
+        const prod = db.prepare('SELECT merchant_id FROM products WHERE id = ?').get(pId) as { merchant_id?: string } | undefined;
+        if (prod?.merchant_id) mId = prod.merchant_id;
+      }
+      if (mId) {
+        if (!storeMap.has(mId)) storeMap.set(mId, []);
+        storeMap.get(mId)!.push(it);
+      }
+    }
+    if (storeMap.size > 1) {
+      req.body.stores = Array.from(storeMap.entries()).map(([mId, items]) => ({
+        merchant_id: mId,
+        order_channel: req.body.order_channel || 'catalog',
+        items,
+      }));
+      return handleBundleOrder(req, res);
+    } else if (storeMap.size === 1) {
+      req.body.merchant_id = Array.from(storeMap.keys())[0];
+    }
+  }
+
   const {
     customer_name,
     customer_phone,
@@ -2589,10 +2637,39 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
     status: initialStatus,
   });
 
+  if (rawCustId) {
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: String(zone.name_ar || 'all'),
+      recipientId: rawCustId,
+      category: 'operational',
+      titleAr: `تم استلام طلبك #${orderNum}`,
+      bodyAr: `طلبك من ${String(merchant.business_name_ar)} بقيمة ${finalTotal} ج.م قيد المتابعة والتجهيز الآن.`,
+      deepLink: 'order',
+      orderId: id,
+      status: initialStatus,
+      channelId: 'otlobha_orders_channel',
+      sentBy: 'النظام',
+    });
+  }
+
+  enqueueSystemPushNotification({
+    targetApp: 'captain',
+    targetZone: String(zone.name_ar || 'all'),
+    category: 'operational',
+    titleAr: `طلب جديد متاح #${orderNum}`,
+    bodyAr: `طلب جديد بقيمة ${finalTotal} ج.م من ${String(merchant.business_name_ar)} متاح في ${String(zone.name_ar)}.`,
+    deepLink: 'order',
+    orderId: id,
+    status: initialStatus,
+    channelId: 'otlobha_dispatch_channel',
+    sentBy: 'النظام',
+  });
+
   res.status(201).json({ id, order_number: orderNum });
 });
 
-app.post('/api/orders/bundle', allowAnyUserOrGuest, (req, res) => {
+function handleBundleOrder(req: express.Request, res: express.Response) {
   const {
     customer_name,
     customer_phone,
@@ -2980,6 +3057,39 @@ app.post('/api/orders/bundle', allowAnyUserOrGuest, (req, res) => {
     status: unifiedStatus,
   });
 
+  if (rawCustId) {
+    enqueueSystemPushNotification({
+      targetApp: 'customer',
+      targetZone: String(zone.name_ar || 'all'),
+      recipientId: rawCustId,
+      category: 'operational',
+      titleAr: `تم استلام طلبك #${orderNum}`,
+      bodyAr: isMultiStore
+        ? `طلبك المقسم (${preparedStores.length} متاجر) بقيمة ${combinedFinalTotal} ج.م قيد المتابعة والتجهيز الآن.`
+        : `طلبك من ${String(anchorStore.merchant.business_name_ar)} بقيمة ${combinedFinalTotal} ج.م قيد المتابعة والتجهيز الآن.`,
+      deepLink: 'order',
+      orderId: orderId,
+      status: unifiedStatus,
+      channelId: 'otlobha_orders_channel',
+      sentBy: 'النظام',
+    });
+  }
+
+  enqueueSystemPushNotification({
+    targetApp: 'captain',
+    targetZone: String(zone.name_ar || 'all'),
+    category: 'operational',
+    titleAr: isMultiStore ? `طلب مقسم متاح #${orderNum}` : `طلب جديد متاح #${orderNum}`,
+    bodyAr: isMultiStore
+      ? `طلب مقسم (${preparedStores.length} متاجر) بقيمة ${combinedFinalTotal} ج.م متاح للكباتن في ${String(zone.name_ar)}.`
+      : `طلب جديد بقيمة ${combinedFinalTotal} ج.م من ${String(anchorStore.merchant.business_name_ar)} متاح في ${String(zone.name_ar)}.`,
+    deepLink: 'order',
+    orderId: orderId,
+    status: unifiedStatus,
+    channelId: 'otlobha_dispatch_channel',
+    sentBy: 'النظام',
+  });
+
   res.status(201).json({
     ok: true,
     id: orderId,
@@ -2988,7 +3098,9 @@ app.post('/api/orders/bundle', allowAnyUserOrGuest, (req, res) => {
     order: mappedOrder,
     orders: [mappedOrder],
   });
-});
+}
+
+app.post('/api/orders/bundle', allowAnyUserOrGuest, handleBundleOrder);
 
 app.patch(
   '/api/orders/:id/merchant-action',
@@ -4347,12 +4459,30 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
   const parsedSize = extractSize({ size_label, name_ar, name_en });
   const cleanMasterId = String(master_product_id || '').trim() || null;
 
-  if (cleanMasterId) {
+  // Guarantee that every added product passes through the central master catalog first
+  const masterLink = ensureMasterProductForListing({
+    name_ar: String(name_ar).trim(),
+    name_en: String(name_en || name_ar).trim(),
+    brand: String(brand || '').trim(),
+    category_id: resolvedCategoryId,
+    barcode: String(barcode || '').trim() || null,
+    size_value: parsedSize?.canonicalValue ?? null,
+    size_unit: parsedSize?.canonicalUnit ?? '',
+    size_label: String(size_label || parsedSize?.displayLabel || '').trim(),
+    image_url: String(image_url || '').trim(),
+    description: String(description || '').trim(),
+    merchant_id: effectiveMerchantId,
+    master_product_id: cleanMasterId,
+  });
+
+  const finalMasterId = masterLink.master_product_id;
+
+  if (finalMasterId) {
     const dupMasterListing = db
       .prepare('SELECT id FROM products WHERE merchant_id = ? AND master_product_id = ? AND is_available = 1')
-      .get(effectiveMerchantId, cleanMasterId);
+      .get(effectiveMerchantId, finalMasterId);
     if (dupMasterListing) {
-      return res.status(409).json({ error: 'لديك بالفعل عرض نشط لهذا المنتج المركزي في متجرك؛ قم بتعديل السعر أو المخزون بدلًا من التكرار' });
+      return res.status(409).json({ error: 'لديك بالفعل عرض نشط لهذا المنتج في متجرك؛ قم بتعديل السعر أو المخزون بدلًا من التكرار' });
     }
   }
 
@@ -4388,7 +4518,7 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     finalCode,
     effectiveMerchantId,
     resolvedCategoryId,
-    cleanMasterId,
+    finalMasterId,
     String(name_ar).trim(),
     String(name_en || name_ar).trim(),
     String(description || ''),
@@ -4499,9 +4629,9 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
 
   const insertProdStmt = db.prepare(`
     INSERT INTO products (
-      id, product_code, merchant_id, category_id, name_ar, name_en, description, image_url,
+      id, product_code, merchant_id, category_id, master_product_id, name_ar, name_en, description, image_url,
       base_price, sale_price, stock_quantity, low_stock_threshold, requires_prescription, addons_text, is_offer, is_available
-    ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, NULL, 25, 5, 0, '', ?, 1)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL, 25, 5, 0, '', ?, 1)
   `);
   const updateProdStmt = db.prepare(`
     UPDATE products SET
@@ -4543,6 +4673,15 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
         }
       }
 
+      const masterLink = ensureMasterProductForListing({
+        name_ar: nameAr,
+        name_en: nameAr,
+        category_id: categoryId,
+        image_url: rawImage,
+        merchant_id: effectiveMerchantId,
+      });
+      const finalMasterId = masterLink.master_product_id;
+
       if (rawCode) {
         const codeKey = rawCode.toUpperCase();
         const existingProd = prodCodeMap.get(codeKey);
@@ -4559,7 +4698,7 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
         const newProdId = uid('prd');
         existingCodes.add(codeKey);
         prodCodeMap.set(codeKey, { id: newProdId, merchant_id: effectiveMerchantId });
-        insertProdStmt.run(newProdId, rawCode, effectiveMerchantId, categoryId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
+        insertProdStmt.run(newProdId, rawCode, effectiveMerchantId, categoryId, finalMasterId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
         created += 1;
         return;
       }
@@ -4567,7 +4706,7 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
       const generatedCode = nextGeneratedCode();
       const newProdId = uid('prd');
       prodCodeMap.set(generatedCode.toUpperCase(), { id: newProdId, merchant_id: effectiveMerchantId });
-      insertProdStmt.run(newProdId, generatedCode, effectiveMerchantId, categoryId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
+      insertProdStmt.run(newProdId, generatedCode, effectiveMerchantId, categoryId, finalMasterId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
       created += 1;
     });
   });
@@ -4670,13 +4809,41 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
   const nextBrand = b.brand !== undefined ? String(b.brand || '').trim() : String(existing.brand || '');
   const nextSizeLabel = b.size_label !== undefined ? String(b.size_label || '').trim() : String(existing.size_label || '');
   const nextParsedSize = extractSize({ size_label: nextSizeLabel, name_ar: String(b.name_ar ?? existing.name_ar), name_en: String(b.name_en ?? existing.name_en) });
-  const nextBarcode = b.barcode !== undefined ? (String(b.barcode || '').trim() || null) : (existing.barcode ?? null);
+  const nextBarcode: string | null =
+    b.barcode !== undefined
+      ? (String(b.barcode || '').trim() || null)
+      : existing.barcode ? String(existing.barcode).trim() : null;
   const nextMerchantSku = b.merchant_sku !== undefined ? String(b.merchant_sku || '').trim() : String(existing.merchant_sku || '');
   const nextMinQty = b.min_order_qty !== undefined ? Math.max(1, Math.floor(Number(b.min_order_qty))) : Number(existing.min_order_qty || 1);
 
+  let nextMasterId = existing.master_product_id ? String(existing.master_product_id).trim() : null;
+  const nameChanged = b.name_ar !== undefined && String(b.name_ar).trim() !== String(existing.name_ar).trim();
+  const brandChanged = b.brand !== undefined && String(b.brand).trim() !== String(existing.brand || '').trim();
+  const sizeChanged = b.size_label !== undefined && String(b.size_label).trim() !== String(existing.size_label || '').trim();
+  const barcodeChanged = b.barcode !== undefined && String(b.barcode || '').trim() !== String(existing.barcode || '').trim();
+
+  if (!nextMasterId || nameChanged || brandChanged || sizeChanged || barcodeChanged) {
+    const syncRes = ensureMasterProductForListing({
+      id: String(id),
+      name_ar: String(b.name_ar ?? existing.name_ar).trim(),
+      name_en: String(b.name_en ?? existing.name_en ?? b.name_ar ?? existing.name_ar).trim(),
+      brand: nextBrand,
+      category_id: nextCatId,
+      barcode: nextBarcode,
+      size_value: nextParsedSize?.canonicalValue ?? null,
+      size_unit: nextParsedSize?.canonicalUnit ?? '',
+      size_label: nextSizeLabel || nextParsedSize?.displayLabel || '',
+      image_url: String(b.image_url ?? existing.image_url ?? '').trim(),
+      description: String(b.description ?? existing.description ?? '').trim(),
+      merchant_id: String(existing.merchant_id),
+      master_product_id: nextMasterId,
+    });
+    nextMasterId = syncRes.master_product_id;
+  }
+
   db.prepare(`
     UPDATE products SET
-      product_code = ?, merchant_id = ?, category_id = ?, name_ar = ?, name_en = ?, description = ?, image_url = ?,
+      product_code = ?, merchant_id = ?, category_id = ?, master_product_id = ?, name_ar = ?, name_en = ?, description = ?, image_url = ?,
       brand = ?, size_label = ?, size_value = ?, size_unit = ?, barcode = ?, merchant_sku = ?, min_order_qty = ?,
       base_price = ?, sale_price = ?, is_offer = ?, stock_quantity = ?, low_stock_threshold = ?,
       requires_prescription = ?, addons_text = ?, is_available = ?, updated_at = datetime('now')
@@ -4685,6 +4852,7 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
     nextCode || existing.product_code || null,
     auth.role === 'merchant' ? existing.merchant_id : (b.merchant_id ?? existing.merchant_id),
     nextCatId,
+    nextMasterId,
     b.name_ar ?? existing.name_ar,
     b.name_en ?? existing.name_en,
     b.description !== undefined ? b.description : existing.description,
@@ -7270,6 +7438,35 @@ app.post('/api/mobile/rides', requireAuth, requireRole('customer', ...ALL_ADMIN_
     entity_id: id,
     details: `طلب مشوار ${tripNumber} بسعر مقترح من العميل ${proposedFare} ج.م${preferredCapName ? ` — موجه للطيار ${preferredCapName}` : ' — متاح لاختيار الطيارين'}`,
   });
+
+  if (preferredCapId) {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      targetZone: 'all',
+      recipientId: preferredCapId,
+      category: 'operational',
+      titleAr: `مشوار جديد مخصص لك #${tripNumber}`,
+      bodyAr: `طلب مشوار مباشر من ${resolvedCustName} بسعر ${proposedFare} ج.م — اضغط لقبول المشوار.`,
+      deepLink: 'trip',
+      tripId: id,
+      status: 'searching',
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: 'النظام',
+    });
+  } else {
+    enqueueSystemPushNotification({
+      targetApp: 'captain',
+      targetZone: 'all',
+      category: 'operational',
+      titleAr: `مشوار جديد متاح #${tripNumber}`,
+      bodyAr: `مشوار جديد من ${pickup_address || 'المنزلة'} إلى ${dropoff_address || 'المنزلة'} بقيمة ${proposedFare} ج.م متاح للكباتن.`,
+      deepLink: 'trip',
+      tripId: id,
+      status: 'searching',
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: 'النظام',
+    });
+  }
 
   res.status(201).json({
     id,

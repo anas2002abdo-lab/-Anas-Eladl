@@ -62,7 +62,7 @@ export type CustomMulticastTransport = (
 
 let initializedApp: App | null = null;
 let initAttempted = false;
-let initSource: 'service_account_json' | 'fcm_env_vars' | 'google_application_credentials' | 'none' = 'none';
+let initSource: 'service_account_json' | 'fcm_env_vars' | 'google_application_credentials' | 'application_default' | 'none' = 'none';
 let initProjectId: string | null = null;
 let customTransportForTests: CustomMulticastTransport | null = null;
 
@@ -150,19 +150,21 @@ function ensureFirebaseAdmin(): App | null {
   }
 
   const gac = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
-  if (gac) {
-    try {
-      initializedApp = initializeApp({
-        credential: applicationDefault(),
-      });
-      initSource = 'google_application_credentials';
-      initProjectId = String(process.env.FCM_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '').trim() || null;
-      console.log('[FCM] Firebase Admin SDK initialized via GOOGLE_APPLICATION_CREDENTIALS');
-      return initializedApp;
-    } catch (err) {
-      console.error('[FCM] Firebase Admin ADC initialization failed:', err instanceof Error ? err.message : err);
-      return null;
-    }
+  const fallbackProjectId =
+    String(process.env.FCM_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '').trim() ||
+    'third-accumulator-bgtt6';
+
+  try {
+    initializedApp = initializeApp({
+      credential: applicationDefault(),
+      projectId: fallbackProjectId,
+    });
+    initSource = gac ? 'google_application_credentials' : 'application_default';
+    initProjectId = fallbackProjectId;
+    console.log(`[FCM] Firebase Admin SDK initialized via ${initSource} (project: ${initProjectId})`);
+    return initializedApp;
+  } catch (err) {
+    console.warn('[FCM] applicationDefault() initialization failed:', err instanceof Error ? err.message : err);
   }
 
   console.warn(
