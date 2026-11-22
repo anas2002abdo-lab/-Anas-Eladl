@@ -976,21 +976,74 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _handleBannerTap(Map<String, dynamic> b) {
+    final targetFilter = (b['target_filter'] ?? b['action_filter'] ?? '').toString().trim();
+    final rawService = (b['target_service'] ?? '').toString().trim();
+    final serviceKey = rawService.isNotEmpty
+        ? rawService
+        : (targetFilter.startsWith('service:') ? targetFilter.substring('service:'.length).trim() : '');
+
+    if (serviceKey.isNotEmpty) {
+      if (serviceKey == 'free_order') {
+        widget.onOpenFreeOrderCart();
+        return;
+      }
+      if (serviceKey == 'rides' || serviceKey == 'parcels' || serviceKey == 'rides_parcels') {
+        widget.onOpenService('rides_parcels');
+        return;
+      }
+      if (serviceKey == 'pharmacy' || serviceKey == 'market' || serviceKey == 'stores' || serviceKey == 'hub') {
+        widget.onOpenService(serviceKey);
+        return;
+      }
+      widget.onOpenService('hub');
+      return;
+    }
+
+    final catId = (b['target_category_id'] ?? '').toString().trim();
+    if (catId.isNotEmpty) {
+      final matched = _categories.firstWhere(
+        (c) => (c['id'] ?? '').toString() == catId,
+        orElse: () => <String, dynamic>{},
+      );
+      final catName = (matched['name_ar'] ?? b['title_ar'] ?? b['title'] ?? 'قسم').toString();
+      widget.onSelectCategory(catId, catName);
+      return;
+    }
+
+    final merchantId = (b['target_merchant_id'] ?? '').toString().trim();
+    if (merchantId.isNotEmpty) {
+      final merchants = (widget.bootstrap['merchants'] as List?) ?? [];
+      String merchantName = (b['title_ar'] ?? b['title'] ?? 'متجر').toString();
+      for (final m in merchants) {
+        if (m is Map && (m['id'] ?? '').toString() == merchantId) {
+          merchantName = (m['business_name_ar'] ?? merchantName).toString();
+          break;
+        }
+      }
+      widget.onSelectMerchant(merchantId, merchantName);
+      return;
+    }
+
+    final resolvedFilter = targetFilter.isNotEmpty ? targetFilter : 'offers';
+    widget.onChangeFilter(resolvedFilter);
+  }
+
   Widget _buildHeroCarousel() {
     final items = _banners.isNotEmpty
         ? _banners
         : [
             {
-              'badge': 'عروض اطلبها الحصرية',
-              'title': 'قارن أسعار السوبر ماركت ووفّر على كل طلب',
-              'subtitle': 'اكتشف أرخص سعر لنفس المنتج بين متاجر المنزلة بنقرة واحدة',
-              'action_filter': 'offers',
+              'badge_ar': 'عروض اطلبها الحصرية',
+              'title_ar': 'قارن أسعار السوبر ماركت ووفّر على كل طلب',
+              'subtitle_ar': 'اكتشف أرخص سعر لنفس المنتج بين متاجر المنزلة بنقرة واحدة',
+              'target_filter': 'offers',
             },
             {
-              'badge': 'طازج يوميًا',
-              'title': 'المخبوزات والخضار والألبان لباب البيت',
-              'subtitle': 'توصيل سريع بمتابعة مباشرة مع الطيار حتى الاستلام',
-              'action_filter': 'fresh',
+              'badge_ar': 'طازج يوميًا',
+              'title_ar': 'المخبوزات والخضار والألبان لباب البيت',
+              'subtitle_ar': 'توصيل سريع بمتابعة مباشرة مع الطيار حتى الاستلام',
+              'target_filter': 'fresh',
             },
           ];
 
@@ -1003,18 +1056,25 @@ class _HomeScreenState extends State<HomeScreen> {
         separatorBuilder: (_, __) => const SizedBox(width: 10),
         itemBuilder: (_, idx) {
           final b = items[idx];
-          final badge = (b['badge'] ?? b['tag_ar'] ?? 'عرض اطلبها').toString();
-          final title = (b['title'] ?? b['title_ar'] ?? '').toString();
-          final subtitle = (b['subtitle'] ?? b['subtitle_ar'] ?? '').toString();
+          final badge = (b['badge_ar'] ?? b['badge'] ?? b['tag_ar'] ?? 'عرض اطلبها').toString().trim();
+          final title = (b['title_ar'] ?? b['title'] ?? '').toString();
+          final subtitle = (b['subtitle_ar'] ?? b['subtitle'] ?? '').toString();
+          final rawTargetFilter = (b['target_filter'] ?? b['action_filter'] ?? '').toString().trim();
+          final isServiceBanner =
+              (b['target_service'] ?? '').toString().trim().isNotEmpty ||
+              rawTargetFilter.startsWith('service:');
+          final rawCta = (b['cta_label'] ?? '').toString().trim();
+          final ctaLabel = rawCta.isNotEmpty
+              ? rawCta
+              : (isServiceBanner ? 'اطلب الخدمة' : 'تسوّق الآن');
           final imgUrl = OtlobhaCustomerApi.resolveMediaUrl(b['image_url']);
-          final actionFilter = (b['action_filter'] ?? 'offers').toString();
           final isAlt = idx.isOdd;
 
           return InkWell(
-            onTap: () => widget.onChangeFilter(actionFilter),
+            onTap: () => _handleBannerTap(b),
             borderRadius: BorderRadius.circular(20),
             child: Container(
-              width: MediaQuery.of(context).size.width * 0.82,
+              width: MediaQuery.of(context).size.width * 0.86,
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topRight,
@@ -1055,54 +1115,99 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                   Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF5A623),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            badge,
-                            style: const TextStyle(
-                              color: Color(0xFF3B180E),
-                              fontSize: 10,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14.5,
-                                fontWeight: FontWeight.w900,
-                                height: 1.25,
-                              ),
-                            ),
-                            if (subtitle.isNotEmpty) ...[
-                              const SizedBox(height: 3),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (badge.isNotEmpty) ...[
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.18),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: const Color(0xFFF5A623).withOpacity(0.6),
+                                      width: 0.8,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    badge,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0xFFFDE68A),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                              ],
                               Text(
-                                subtitle,
-                                maxLines: 1,
+                                title,
+                                maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
-                                  color: Color(0xFFFDE68A),
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w900,
+                                  height: 1.25,
                                 ),
                               ),
+                              if (subtitle.isNotEmpty) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  subtitle,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Color(0xFFFDE68A),
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
                             ],
-                          ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF5A623),
+                            borderRadius: BorderRadius.circular(14),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x33000000),
+                                blurRadius: 8,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                ctaLabel,
+                                style: const TextStyle(
+                                  color: Color(0xFF3B180E),
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(width: 3),
+                              const Icon(
+                                Icons.arrow_forward_ios_rounded,
+                                size: 11,
+                                color: Color(0xFF3B180E),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),

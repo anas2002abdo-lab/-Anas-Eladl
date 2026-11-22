@@ -53,7 +53,7 @@ interface Props {
   onOpenSearch: () => void;
   onOpenProduct: (productId: string) => void;
   onOpenNotifications: () => void;
-  onOpenService: (service: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order') => void;
+  onOpenService: (service: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order' | 'stores' | 'hub') => void;
   onAddProduct: (product: StorefrontProductCard) => void;
   onDecrementProduct: (productId: string) => void;
 }
@@ -98,6 +98,40 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
   const activeCatObj = categories.find((c) => c.id === selectedCategoryId);
   const activeMerchantObj = merchants.find((m) => m.id === selectedMerchantId);
   const hasScopedFilter = Boolean(selectedCategoryId || selectedBrand || selectedMerchantId);
+
+  const handleBannerClick = (b: StorefrontBannerRecord) => {
+    const tf = String(b.target_filter || '').trim();
+    const serviceKey = (b.target_service || (tf.startsWith('service:') ? tf.slice('service:'.length) : '')).trim();
+    if (serviceKey) {
+      if (
+        serviceKey === 'pharmacy' ||
+        serviceKey === 'rides' ||
+        serviceKey === 'parcels' ||
+        serviceKey === 'market' ||
+        serviceKey === 'free_order' ||
+        serviceKey === 'stores' ||
+        serviceKey === 'hub'
+      ) {
+        onOpenService(serviceKey);
+        return;
+      }
+      onOpenService('hub');
+      return;
+    }
+    if (b.target_category_id) {
+      onSelectCategory(b.target_category_id);
+      return;
+    }
+    if (b.target_merchant_id) {
+      onSelectMerchant(b.target_merchant_id);
+      return;
+    }
+    if (tf === 'fresh') onChangeFilter('fresh');
+    else if (tf === 'groceries') onChangeFilter('groceries');
+    else if (tf === 'free_delivery') onChangeFilter('free_delivery');
+    else if (tf === 'for_you') onChangeFilter('for_you');
+    else onChangeFilter('offers');
+  };
 
   return (
     <div className="space-y-4 pb-28" dir="rtl">
@@ -192,31 +226,70 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
             <button
               key={b.id}
               type="button"
-              onClick={() => {
-                if (b.target_filter === 'fresh') onChangeFilter('fresh');
-                else if (b.target_filter === 'groceries') onChangeFilter('groceries');
-                else onChangeFilter('offers');
-              }}
+              onClick={() => handleBannerClick(b)}
               className={`min-w-[88%] sm:min-w-[360px] snap-center rounded-3xl p-5 text-right text-white relative overflow-hidden shadow-md cursor-pointer transition hover:brightness-[1.03] ${
                 idx % 2 === 0
                   ? 'bg-gradient-to-l from-[#A92224] via-[#8E1B1D] to-[#631214]'
                   : 'bg-gradient-to-l from-[#5C2E1F] via-[#86191B] to-[#A92224]'
               }`}
             >
-              <div className="relative z-10 space-y-1.5 max-w-[82%]">
-                {b.badge_ar && (
-                  <span className="inline-block px-2.5 py-0.5 rounded-full bg-[#F5A623] text-[#3B180E] text-[10px] font-black">
-                    {b.badge_ar}
-                  </span>
-                )}
-                <h2 className="text-lg font-black leading-snug">{b.title_ar}</h2>
-                <p className="text-xs text-white/85 leading-relaxed line-clamp-2">{b.subtitle_ar}</p>
-                <div className="pt-1 inline-flex items-center gap-1 text-xs font-black text-[#F5A623]">
+              {b.image_url && (
+                <img
+                  src={b.image_url}
+                  alt={b.title_ar}
+                  className="absolute inset-0 w-full h-full object-cover opacity-20 pointer-events-none"
+                />
+              )}
+              <div className="relative z-10 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  {b.badge_ar && (
+                    <span className="inline-block px-2.5 py-0.5 rounded-lg bg-white/15 border border-[#F5A623]/50 text-[#FDE68A] text-[10px] font-black">
+                      {b.badge_ar}
+                    </span>
+                  )}
+                  <h2 className="text-base sm:text-lg font-black leading-snug line-clamp-2">{b.title_ar}</h2>
+                  {b.subtitle_ar && (
+                    <p className="text-xs text-white/85 leading-relaxed line-clamp-2">{b.subtitle_ar}</p>
+                  )}
+                </div>
+                <span className="shrink-0 inline-flex items-center gap-1 px-3.5 py-2.5 rounded-2xl bg-[#F5A623] text-[#3B180E] text-xs font-black shadow-md whitespace-nowrap">
                   <span>{b.cta_label || 'تسوّق الآن'}</span>
                   <ChevronLeft className="w-3.5 h-3.5" />
-                </div>
+                </span>
               </div>
               <div className="absolute -left-6 -bottom-6 w-28 h-28 rounded-full bg-[#F5A623]/15 pointer-events-none" />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 2B. PROMOTIONAL STRIP BANNERS (Supports Services, Categories, Merchants & Offers) */}
+      {!hasScopedFilter && stripBanners.length > 0 && (
+        <div className="space-y-2">
+          {stripBanners.map((b) => (
+            <button
+              key={b.id}
+              type="button"
+              onClick={() => handleBannerClick(b)}
+              className="w-full rounded-2xl bg-gradient-to-l from-[#FFFBEB] to-white border border-[#F5A623]/40 px-4 py-3 flex items-center justify-between gap-3 text-right shadow-xs hover:border-[#A92224]/50 transition cursor-pointer"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex items-center gap-2">
+                  {b.badge_ar && (
+                    <span className="px-2 py-0.5 rounded-md bg-[#A92224] text-white text-[10px] font-black shrink-0">
+                      {b.badge_ar}
+                    </span>
+                  )}
+                  <span className="font-black text-xs text-slate-900 truncate">{b.title_ar}</span>
+                </div>
+                {b.subtitle_ar && (
+                  <p className="text-[11px] text-slate-600 truncate">{b.subtitle_ar}</p>
+                )}
+              </div>
+              <span className="inline-flex items-center gap-1 text-[11px] font-black text-[#A92224] shrink-0">
+                <span>{b.cta_label || 'افتح الآن'}</span>
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </span>
             </button>
           ))}
         </div>

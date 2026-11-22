@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Apple,
   ArrowRight,
@@ -9,9 +9,8 @@ import {
   Egg,
   Fish,
   Flame,
-  FolderTree,
   Home,
-  Layers,
+  Loader2,
   MapPin,
   Milk,
   Package,
@@ -22,14 +21,19 @@ import {
   Utensils,
   Wheat,
 } from 'lucide-react';
-import type { StorefrontCategoryRecord } from '../../shared/types';
+import { api } from '../../lib/api';
+import type { StorefrontCategoryRecord, StorefrontProductCard } from '../../shared/types';
+import { OtlobhaProductCard } from './OtlobhaProductCard';
 
 interface Props {
   categories: StorefrontCategoryRecord[];
   zoneName: string;
+  cartQtyMap: Record<string, number>;
   onOpenSearch: () => void;
-  onSelectCategory: (category: StorefrontCategoryRecord) => void;
-  onSelectGroup: (groupKey: string) => void;
+  onOpenProduct: (productId: string, list: StorefrontProductCard[]) => void;
+  onAddProduct: (product: StorefrontProductCard) => void;
+  onDecrementProduct: (productId: string) => void;
+  onSelectGroup?: (groupKey: string) => void;
 }
 
 const CATEGORY_VISUALS: Record<string, { icon: React.ComponentType<any>; bg: string; fg: string }> = {
@@ -64,11 +68,30 @@ const GROUP_ORDER = [
 export const OtlobhaCategoriesView: React.FC<Props> = ({
   categories,
   zoneName,
+  cartQtyMap,
   onOpenSearch,
-  onSelectCategory,
+  onOpenProduct,
+  onAddProduct,
+  onDecrementProduct,
   onSelectGroup,
 }) => {
-  const [activeParentId, setActiveParentId] = useState<string | null>(null);
+  // 3-level inline hierarchy state:
+  // Level 1 (Root square cards) -> Level 2 (Horizontal bar 1) -> Level 3 (Horizontal bar 2) -> Inline products
+  const [selectedL1Id, setSelectedL1Id] = useState<string | null>(null);
+  const [selectedL2Id, setSelectedL2Id] = useState<string | null>(null);
+  const [selectedL3Id, setSelectedL3Id] = useState<string | null>(null);
+
+  const [products, setProducts] = useState<StorefrontProductCard[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [productsError, setProductsError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [totalProducts, setTotalProducts] = useState(0);
+
+  const fetchSeqRef = useRef(0);
+  const l2StripRef = useRef<HTMLDivElement | null>(null);
+  const l3StripRef = useRef<HTMLDivElement | null>(null);
 
   const byId = useMemo(() => {
     const map = new Map<string, StorefrontCategoryRecord>();
@@ -88,23 +111,25 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
   }, [categories, byId]);
 
   const rootCategories = childrenByParent.get('__root__') || [];
-  const activeParent = activeParentId ? byId.get(activeParentId) || null : null;
-  const activeChildren = activeParent ? childrenByParent.get(activeParent.id) || [] : [];
+  const selectedL1 = selectedL1Id ? byId.get(selectedL1Id) || null : null;
+  const l2Children = useMemo(
+    () => (selectedL1 ? childrenByParent.get(selectedL1.id) || [] : []),
+    [selectedL1, childrenByParent]
+  );
 
-  // Build RTL breadcrumb chain from root down to activeParent
-  const breadcrumb = useMemo(() => {
-    const chain: StorefrontCategoryRecord[] = [];
-    const seen = new Set<string>();
-    let cur = activeParent;
-    while (cur && !seen.has(cur.id)) {
-      seen.add(cur.id);
-      chain.unshift(cur);
-      cur = cur.parent_id ? byId.get(cur.parent_id) || null : null;
-    }
-    return chain;
-  }, [activeParent, byId]);
+  const selectedL2 = selectedL2Id ? byId.get(selectedL2Id) || null : null;
+  const l3Children = useMemo(
+    () => (selectedL2 ? childrenByParent.get(selectedL2.id) || [] : []),
+    [selectedL2, childrenByParent]
+  );
 
-  // Group root categories when browsing top-level
+  const selectedL3 = selectedL3Id ? byId.get(selectedL3Id) || null : null;
+
+  // Deepest selected category whose products are displayed inline below the horizontal strips
+  const activeCategory = selectedL3 || selectedL2 || selectedL1;
+  const activeCategoryId = activeCategory?.id || null;
+
+  // Group root categories when browsing Level 1 squares
   const grouped = useMemo(() => {
     const res = GROUP_ORDER.map((grp) => ({
       ...grp,
@@ -122,179 +147,430 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
     return res;
   }, [rootCategories]);
 
-  const handleCardClick = (cat: StorefrontCategoryRecord) => {
-    const kids = childrenByParent.get(cat.id) || [];
-    if (kids.length > 0) {
-      setActiveParentId(cat.id);
-    } else {
-      onSelectCategory(cat);
+  const fetchCategoryProducts = useCallback(
+    async (categoryId: string, targetPage: number, append: boolean) => {
+      const seq = ++fetchSeqRef.current;
+      if (append) {
+        setLoadingMore(true);
+      } else {
+        setProductsLoading(true);
+        setProductsError(null);
+      }
+
+      try {
+        const res = await api.getStorefrontHome({
+          category_id: categoryId,
+          page: targetPage,
+          limit: 24,
+        });
+        if (seq !== fetchSeqRef.current) return;
+
+        const nextItems = (res.products || []) as StorefrontProductCard[];
+        setProducts((prev) => {
+          if (!append) return nextItems;
+          const seen = new Set(prev.map((p) => p.id));
+          return [...prev, ...nextItems.filter((p) => !seen.has(p.id))];
+        });
+        setPage(targetPage);
+        setHasMore(Boolean(res.pagination?.has_more));
+        setTotalProducts(Number(res.pagination?.total ?? nextItems.length));
+      } catch (err: any) {
+        if (seq !== fetchSeqRef.current) return;
+        if (!append) {
+          setProductsError(err?.message || 'تعذر تحميل منتجات القسم حاليًا');
+          setProducts([]);
+        }
+      } finally {
+        if (seq === fetchSeqRef.current) {
+          setProductsLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    []
+  );
+
+  // Trigger inline product fetch whenever the deepest active category changes
+  useEffect(() => {
+    if (!activeCategoryId) {
+      fetchSeqRef.current += 1;
+      setProducts([]);
+      setProductsLoading(false);
+      setLoadingMore(false);
+      setProductsError(null);
+      setPage(1);
+      setHasMore(false);
+      setTotalProducts(0);
+      return;
     }
+    void fetchCategoryProducts(activeCategoryId, 1, false);
+  }, [activeCategoryId, fetchCategoryProducts]);
+
+  const handleSelectL1 = (cat: StorefrontCategoryRecord) => {
+    setSelectedL1Id(cat.id);
+    setSelectedL2Id(null);
+    setSelectedL3Id(null);
+    if (l2StripRef.current) l2StripRef.current.scrollTo({ left: 0, behavior: 'auto' });
   };
 
-  const renderCategoryCard = (cat: StorefrontCategoryRecord) => {
+  const handleSelectL2 = (catId: string | null) => {
+    setSelectedL2Id(catId);
+    setSelectedL3Id(null);
+    if (l3StripRef.current) l3StripRef.current.scrollTo({ left: 0, behavior: 'auto' });
+  };
+
+  const handleSelectL3 = (catId: string | null) => {
+    setSelectedL3Id(catId);
+  };
+
+  const handleBackToRoots = () => {
+    setSelectedL1Id(null);
+    setSelectedL2Id(null);
+    setSelectedL3Id(null);
+  };
+
+  const renderRootSquareCard = (cat: StorefrontCategoryRecord) => {
     const vis = CATEGORY_VISUALS[cat.id] || {
       icon: Package,
       bg: 'bg-[#FEF2F2]',
       fg: 'text-[#A92224]',
     };
     const Icon = vis.icon;
-    const kidsCount = (childrenByParent.get(cat.id) || []).length;
 
     return (
       <button
         key={cat.id}
         type="button"
-        onClick={() => handleCardClick(cat)}
-        className="group flex flex-col items-center text-center gap-2 p-2.5 rounded-2xl bg-white border border-slate-200/80 hover:border-[#A92224]/50 shadow-[0_2px_8px_rgba(15,23,42,0.03)] hover:shadow-md transition cursor-pointer"
+        onClick={() => handleSelectL1(cat)}
+        className="group flex flex-col items-stretch text-center rounded-2xl bg-white border border-slate-200/80 hover:border-[#A92224]/50 shadow-[0_2px_8px_rgba(15,23,42,0.03)] hover:shadow-md transition-all duration-200 overflow-hidden cursor-pointer focus-visible:outline-2 focus-visible:outline-[#A92224]"
       >
-        <div
-          className={`w-full aspect-square rounded-xl ${vis.bg} flex items-center justify-center overflow-hidden relative`}
-        >
+        <div className={`w-full aspect-square ${vis.bg} flex items-center justify-center overflow-hidden`}>
           {cat.image_url ? (
             <img
               src={cat.image_url}
               alt={cat.name_ar}
               loading="lazy"
               referrerPolicy="no-referrer"
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
             />
           ) : (
-            <Icon className={`w-8 h-8 ${vis.fg} group-hover:scale-110 transition-transform`} />
-          )}
-          {kidsCount > 0 && (
-            <span className="absolute top-1 right-1 px-1.5 py-0.5 rounded-md bg-[#A92224] text-white text-[9px] font-black shadow-xs flex items-center gap-0.5">
-              <Layers className="w-2.5 h-2.5" />
-              {kidsCount}
-            </span>
-          )}
-          {cat.products_count > 0 && (
-            <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded-md bg-white/95 text-[9px] font-black text-slate-700 shadow-xs">
-              {cat.products_count}
-            </span>
+            <div className="w-full h-full flex items-center justify-center">
+              <Icon className={`w-9 h-9 ${vis.fg} group-hover:scale-110 transition-transform duration-200`} />
+            </div>
           )}
         </div>
-        <span className="text-[11px] font-extrabold text-slate-800 leading-tight line-clamp-2 min-h-[2rem] flex items-center">
-          {cat.name_ar}
-        </span>
+        <div className="px-2 py-2.5 flex items-center justify-center min-h-[2.85rem] bg-white">
+          <span className="text-[12px] font-extrabold text-slate-900 leading-snug line-clamp-2">
+            {cat.name_ar}
+          </span>
+        </div>
       </button>
     );
   };
 
   return (
-    <div className="space-y-5 pb-24" dir="rtl">
-      {/* Sticky Top Header with Address + Search Bar */}
-      <div className="sticky top-0 z-20 bg-[#F6F7F9]/95 backdrop-blur-md pt-2 pb-3 space-y-2.5 border-b border-slate-200/70">
-        <div className="flex items-center justify-between gap-2 px-1">
-          <div className="flex items-center gap-2 min-w-0">
-            <img
-              src="/assets/aistudio/Picsart_25-11-19_14-05-26-471_82d5a262.jpg"
-              alt="اطلبها"
-              className="w-8 h-8 rounded-xl object-contain bg-white p-0.5 border border-slate-200 shrink-0"
-            />
-            <div className="min-w-0">
-              <div className="text-[11px] font-bold text-slate-500">الأقسام الرئيسية والفرعية</div>
-              <div className="text-xs font-black text-slate-900 truncate flex items-center gap-1">
-                <MapPin className="w-3 h-3 text-[#A92224] shrink-0" />
-                <span className="truncate">{zoneName}</span>
+    <div className="pb-24" dir="rtl">
+      {/* Top Sticky Header: switches cleanly between Root header and Active L1 + Horizontal Strips */}
+      <div className="sticky top-0 z-20 bg-[#F6F7F9]/95 backdrop-blur-md border-b border-slate-200/80">
+        {selectedL1 ? (
+          <div>
+            {/* Compact L1 Context Header */}
+            <div className="flex items-center justify-between gap-2 px-1 py-2.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <button
+                  type="button"
+                  onClick={handleBackToRoots}
+                  aria-label="العودة للأقسام الرئيسية"
+                  className="inline-flex items-center gap-1 h-10 px-3 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#A92224] hover:text-[#A92224] text-xs font-extrabold transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  <ArrowRight className="w-4 h-4 shrink-0" />
+                  <span>الأقسام</span>
+                </button>
+                <div className="min-w-0">
+                  <h2 className="text-[15px] font-black text-slate-900 truncate leading-tight">
+                    {selectedL1.name_ar}
+                  </h2>
+                  <div className="text-[11px] font-semibold text-slate-500 truncate flex items-center gap-1.5">
+                    {selectedL2 && <span>{selectedL2.name_ar}</span>}
+                    {selectedL2 && selectedL3 && <span aria-hidden="true">/</span>}
+                    {selectedL3 && <span className="text-[#A92224] font-bold">{selectedL3.name_ar}</span>}
+                    {!selectedL2 && <span>{zoneName}</span>}
+                  </div>
+                </div>
               </div>
+
+              <button
+                type="button"
+                onClick={onOpenSearch}
+                aria-label="بحث في المنتجات"
+                className="w-10 h-10 rounded-xl bg-white border border-slate-200 text-[#A92224] hover:bg-[#FEF2F2] hover:border-[#A92224]/40 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+              >
+                <Search className="w-4 h-4" />
+              </button>
             </div>
+
+            {/* Horizontal Scrollable Bar 1 — Level 2 Subcategories (Text tabs only, NO squares/icons) */}
+            {l2Children.length > 0 && (
+              <div
+                ref={l2StripRef}
+                role="tablist"
+                aria-label="الأقسام الفرعية"
+                className="flex items-center gap-2 overflow-x-auto no-scrollbar px-1 pb-2.5 pt-0.5"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedL2Id === null}
+                  onClick={() => handleSelectL2(null)}
+                  className={`h-9 px-4 rounded-lg text-xs font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    selectedL2Id === null
+                      ? 'bg-[#A92224] text-white shadow-xs'
+                      : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:text-slate-900'
+                  }`}
+                >
+                  الكل
+                </button>
+                {l2Children.map((l2) => {
+                  const isActive = selectedL2Id === l2.id;
+                  return (
+                    <button
+                      key={l2.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => handleSelectL2(l2.id)}
+                      className={`h-9 px-4 rounded-lg text-xs font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-[#A92224] text-white shadow-xs'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:text-slate-900'
+                      }`}
+                    >
+                      {l2.name_ar}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Horizontal Scrollable Bar 2 — Level 3 Subcategories directly underneath Bar 1 */}
+            {selectedL2 && l3Children.length > 0 && (
+              <div
+                ref={l3StripRef}
+                role="tablist"
+                aria-label="أقسام المستوى الثالث"
+                className="flex items-center gap-1.5 overflow-x-auto no-scrollbar px-1 py-2 border-t border-slate-200/70 bg-white/75"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedL3Id === null}
+                  onClick={() => handleSelectL3(null)}
+                  className={`h-8 px-3.5 rounded-lg text-[11.5px] font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    selectedL3Id === null
+                      ? 'bg-[#FEF2F2] text-[#A92224] border border-[#A92224]'
+                      : 'bg-slate-50 text-slate-600 border border-slate-200/90 hover:text-slate-900'
+                  }`}
+                >
+                  الكل
+                </button>
+                {l3Children.map((l3) => {
+                  const isActive = selectedL3Id === l3.id;
+                  return (
+                    <button
+                      key={l3.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => handleSelectL3(l3.id)}
+                      className={`h-8 px-3.5 rounded-lg text-[11.5px] font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                        isActive
+                          ? 'bg-[#FEF2F2] text-[#A92224] border border-[#A92224]'
+                          : 'bg-slate-50 text-slate-600 border border-slate-200/90 hover:text-slate-900'
+                      }`}
+                    >
+                      {l3.name_ar}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          <span className="px-2.5 py-1 rounded-full bg-[#FEF2F2] text-[#A92224] text-[11px] font-black shrink-0">
-            {activeParent ? `${activeChildren.length} قسم فرعي` : `${rootCategories.length} قسم رئيسي`}
-          </span>
-        </div>
+        ) : (
+          /* Root Level Sticky Header */
+          <div className="pt-2 pb-3 space-y-2.5">
+            <div className="flex items-center justify-between gap-2 px-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <img
+                  src="/assets/aistudio/Picsart_25-11-19_14-05-26-471_82d5a262.jpg"
+                  alt="اطلبها"
+                  className="w-8 h-8 rounded-xl object-contain bg-white p-0.5 border border-slate-200 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="text-[12px] font-black text-slate-900 truncate">الأقسام الرئيسية</div>
+                  <div className="text-[11px] font-semibold text-slate-500 truncate flex items-center gap-1">
+                    <MapPin className="w-3 h-3 text-[#A92224] shrink-0" />
+                    <span className="truncate">{zoneName}</span>
+                  </div>
+                </div>
+              </div>
+              <span className="text-xs font-bold text-slate-500 tabular-nums shrink-0">
+                {rootCategories.length} قسم رئيسي
+              </span>
+            </div>
 
-        <button
-          type="button"
-          onClick={onOpenSearch}
-          className="w-full h-11 rounded-2xl bg-white border border-slate-200/90 px-3.5 flex items-center gap-2.5 text-slate-400 text-sm shadow-sm hover:border-[#A92224]/40 transition cursor-pointer"
-        >
-          <Search className="w-4 h-4 text-[#A92224] shrink-0" />
-          <span className="truncate">ابحث في جميع الأقسام والمنتجات...</span>
-        </button>
-
-        {/* Interactive Hierarchy Breadcrumb when drilling into subcategories */}
-        {activeParent && (
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5 px-1 text-xs">
             <button
               type="button"
-              onClick={() => setActiveParentId(null)}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-white border border-slate-200 text-slate-700 font-bold hover:border-[#A92224] hover:text-[#A92224] transition cursor-pointer"
+              onClick={onOpenSearch}
+              className="w-full h-11 rounded-2xl bg-white border border-slate-200/90 px-3.5 flex items-center gap-2.5 text-slate-400 text-sm shadow-xs hover:border-[#A92224]/40 transition cursor-pointer"
             >
-              <ArrowRight className="w-3.5 h-3.5" />
-              <span>الأقسام الرئيسية</span>
+              <Search className="w-4 h-4 text-[#A92224] shrink-0" />
+              <span className="truncate">ابحث في جميع الأقسام والمنتجات...</span>
             </button>
-            {breadcrumb.map((node, idx) => {
-              const isLast = idx === breadcrumb.length - 1;
-              return (
-                <React.Fragment key={node.id}>
-                  <ChevronLeft className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                  <button
-                    type="button"
-                    onClick={() => !isLast && setActiveParentId(node.id)}
-                    className={`px-2.5 py-1 rounded-xl font-extrabold transition ${
-                      isLast
-                        ? 'bg-[#A92224] text-white'
-                        : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224] cursor-pointer'
-                    }`}
-                  >
-                    {node.name_ar}
-                  </button>
-                </React.Fragment>
-              );
-            })}
           </div>
         )}
       </div>
 
-      {/* Subcategory Drill-down View */}
-      {activeParent ? (
-        <div className="space-y-4">
-          {/* Action banner to view ALL products under this parent category & its children */}
-          <div className="rounded-2xl bg-gradient-to-l from-[#A92224] to-[#86191B] text-white p-4 shadow-sm flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[11px] font-bold text-[#F5A623] flex items-center gap-1">
-                <FolderTree className="w-3.5 h-3.5" />
-                <span>{activeParent.full_path_ar?.replace(/;\s*$/, '') || activeParent.name_ar}</span>
-              </div>
-              <h3 className="text-base font-black mt-0.5">{activeParent.name_ar}</h3>
-              <p className="text-xs text-white/80 mt-0.5">
-                اختر قسمًا فرعيًا أدناه أو تصفّح جميع منتجات {activeParent.name_ar} ({activeParent.products_count} منتج)
-              </p>
+      {/* Main Content Area */}
+      {selectedL1 ? (
+        /* Inline Products Grid directly underneath the Level 2 & Level 3 Horizontal Strips */
+        <div className="pt-3.5 space-y-3.5">
+          {/* Clean unboxed context line showing active selection & total count */}
+          <div className="flex items-center justify-between gap-2 px-1">
+            <div className="flex items-center gap-2 min-w-0">
+              <h3 className="text-sm font-black text-slate-900 truncate">
+                {activeCategory?.name_ar}
+              </h3>
+              {!productsLoading && (
+                <>
+                  <span className="text-slate-300" aria-hidden="true">·</span>
+                  <span className="text-xs font-bold text-slate-500 tabular-nums shrink-0">
+                    {totalProducts.toLocaleString('ar-EG')} منتج
+                  </span>
+                </>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={() => onSelectCategory(activeParent)}
-              className="px-4 py-2 rounded-xl bg-[#F5A623] hover:bg-[#E0961A] text-[#3B180E] text-xs font-black flex items-center gap-1 shadow-xs transition cursor-pointer shrink-0"
-            >
-              <span>عرض كل منتجات {activeParent.name_ar}</span>
-              <ChevronLeft className="w-4 h-4" />
-            </button>
+            {(selectedL2Id || selectedL3Id) && (
+              <button
+                type="button"
+                onClick={() => handleSelectL2(null)}
+                className="text-xs font-bold text-[#A92224] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                كل {selectedL1.name_ar}
+              </button>
+            )}
           </div>
 
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2.5">
-            {activeChildren.map((child) => renderCategoryCard(child))}
-          </div>
+          {/* Loading Skeleton */}
+          {productsLoading ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+              {Array.from({ length: 6 }).map((_, idx) => (
+                <div
+                  key={idx}
+                  className="bg-white rounded-2xl border border-slate-200/70 overflow-hidden animate-pulse"
+                >
+                  <div className="aspect-square bg-slate-100" />
+                  <div className="p-3 space-y-2">
+                    <div className="h-3 w-1/2 bg-slate-100 rounded" />
+                    <div className="h-3.5 w-full bg-slate-100 rounded" />
+                    <div className="h-4 w-1/3 bg-slate-200/80 rounded mt-2" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : productsError ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center space-y-3">
+              <p className="text-sm font-bold text-slate-700">{productsError}</p>
+              <button
+                type="button"
+                onClick={() => activeCategoryId && void fetchCategoryProducts(activeCategoryId, 1, false)}
+                className="px-4 py-2 rounded-xl bg-[#A92224] text-white text-xs font-extrabold cursor-pointer"
+              >
+                إعادة المحاولة
+              </button>
+            </div>
+          ) : products.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200/80 p-8 text-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-[#FEF2F2] text-[#A92224] mx-auto flex items-center justify-center">
+                <Package className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-black text-slate-900">
+                  لا توجد منتجات متاحة حاليًا في «{activeCategory?.name_ar}»
+                </p>
+                <p className="text-xs text-slate-500">
+                  يمكنك اختيار قسم فرعي آخر من الشريط أعلاه أو عرض كل منتجات {selectedL1.name_ar}
+                </p>
+              </div>
+              {(selectedL2Id || selectedL3Id) && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectL2(null)}
+                  className="px-4 py-2 rounded-xl bg-[#A92224] text-white text-xs font-extrabold cursor-pointer"
+                >
+                  عرض كل منتجات {selectedL1.name_ar}
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                {products.map((prod) => (
+                  <OtlobhaProductCard
+                    key={prod.id}
+                    product={prod}
+                    cartQty={cartQtyMap[prod.id] || 0}
+                    onOpenDetails={(pid) => onOpenProduct(pid, products)}
+                    onAdd={onAddProduct}
+                    onDecrement={onDecrementProduct}
+                  />
+                ))}
+              </div>
+
+              {hasMore && (
+                <div className="pt-2 flex justify-center">
+                  <button
+                    type="button"
+                    disabled={loadingMore}
+                    onClick={() =>
+                      activeCategoryId && void fetchCategoryProducts(activeCategoryId, page + 1, true)
+                    }
+                    className="h-11 px-6 rounded-xl bg-white border border-slate-200 hover:border-[#A92224] text-slate-800 hover:text-[#A92224] text-xs font-extrabold inline-flex items-center gap-2 shadow-xs transition cursor-pointer disabled:opacity-60"
+                  >
+                    {loadingMore ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>جاري تحميل المزيد...</span>
+                      </>
+                    ) : (
+                      <span>عرض المزيد من المنتجات</span>
+                    )}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       ) : (
-        /* Root Level Grouped Visual Categories Grid */
-        <div className="space-y-6">
+        /* Level 1 Root Categories: Square Image Cards with Category Name */
+        <div className="pt-4 space-y-6">
           {grouped.map((group) => (
             <section key={group.key} className="space-y-3">
               <div className="flex items-center justify-between px-1">
-                <h3 className="text-base font-black text-slate-900">{group.title}</h3>
-                <button
-                  type="button"
-                  onClick={() => onSelectGroup(group.key)}
-                  className="text-xs font-extrabold text-[#A92224] hover:text-[#86191B] flex items-center gap-0.5 cursor-pointer"
-                >
-                  <span>عرض الكل</span>
-                  <ChevronLeft className="w-4 h-4" />
-                </button>
+                <h3 className="text-[15px] font-black text-slate-900">{group.title}</h3>
+                {onSelectGroup && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectGroup(group.key)}
+                    className="text-xs font-extrabold text-[#A92224] hover:text-[#86191B] flex items-center gap-0.5 cursor-pointer"
+                  >
+                    <span>عرض الكل</span>
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                )}
               </div>
 
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2.5">
-                {group.items.map((cat) => renderCategoryCard(cat))}
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+                {group.items.map((cat) => renderRootSquareCard(cat))}
               </div>
             </section>
           ))}

@@ -92,6 +92,16 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
   const [manualTargetId, setManualTargetId] = useState('');
 
   // Banners & Deals tab
+  const OTLOBHA_BANNER_SERVICES = [
+    { key: 'pharmacy', label: 'الصيدليات (فارما اطلبها)' },
+    { key: 'rides', label: 'اطلبها مشوار (توصيل ركاب)' },
+    { key: 'parcels', label: 'أي حاجة (توصيل طرود ومشتريات)' },
+    { key: 'market', label: 'سوق اطلبها (بيع وشراء)' },
+    { key: 'free_order', label: 'طلب نصي حر (اطلب أي شيء)' },
+    { key: 'stores', label: 'دليل جميع المتاجر' },
+    { key: 'hub', label: 'مركز جميع الخدمات' },
+  ] as const;
+
   const [banners, setBanners] = useState<StorefrontBannerRecord[]>([]);
   const [deals, setDeals] = useState<any[]>([]);
   const [newBanner, setNewBanner] = useState({
@@ -100,7 +110,12 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
     badge_ar: 'عرض اطلبها',
     banner_type: 'hero' as 'hero' | 'strip',
     cta_label: 'تسوّق الآن',
+    destination_type: 'filter' as 'filter' | 'service' | 'category' | 'merchant',
     target_filter: 'offers',
+    target_service: 'pharmacy',
+    target_category_id: '',
+    target_merchant_id: '',
+    image_url: '',
     accent_color: '#A92224',
   });
 
@@ -304,8 +319,34 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
 
   const handleCreateBanner = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (newBanner.destination_type === 'category' && !newBanner.target_category_id) {
+      onToast('يرجى اختيار القسم المطلوب ربط البانر به');
+      return;
+    }
+    if (newBanner.destination_type === 'merchant' && !newBanner.target_merchant_id) {
+      onToast('يرجى اختيار المتجر المطلوب ربط البانر به');
+      return;
+    }
     try {
-      await api.createAdminStorefrontBanner(newBanner);
+      const payload: Record<string, unknown> = {
+        title_ar: newBanner.title_ar,
+        subtitle_ar: newBanner.subtitle_ar,
+        badge_ar: newBanner.badge_ar,
+        banner_type: newBanner.banner_type,
+        cta_label: newBanner.cta_label,
+        image_url: newBanner.image_url.trim(),
+        accent_color: newBanner.accent_color,
+        target_filter:
+          newBanner.destination_type === 'service'
+            ? `service:${newBanner.target_service}`
+            : newBanner.destination_type === 'filter'
+            ? newBanner.target_filter
+            : 'for_you',
+        target_service: newBanner.destination_type === 'service' ? newBanner.target_service : '',
+        target_category_id: newBanner.destination_type === 'category' ? newBanner.target_category_id : null,
+        target_merchant_id: newBanner.destination_type === 'merchant' ? newBanner.target_merchant_id : null,
+      };
+      await api.createAdminStorefrontBanner(payload);
       onToast('تم إضافة بانر الواجهة الرئيسية بنجاح');
       setNewBanner({
         title_ar: '',
@@ -313,13 +354,40 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
         badge_ar: 'عرض اطلبها',
         banner_type: 'hero',
         cta_label: 'تسوّق الآن',
+        destination_type: 'filter',
         target_filter: 'offers',
+        target_service: 'pharmacy',
+        target_category_id: '',
+        target_merchant_id: '',
+        image_url: '',
         accent_color: '#A92224',
       });
       await loadBannersAndDeals();
     } catch (err) {
       onToast((err as Error).message);
     }
+  };
+
+  const describeBannerDestination = (b: StorefrontBannerRecord): string => {
+    const tf = String(b.target_filter || '');
+    const srvKey = (b.target_service || (tf.startsWith('service:') ? tf.slice('service:'.length) : '')).trim();
+    if (srvKey) {
+      const found = OTLOBHA_BANNER_SERVICES.find((s) => s.key === srvKey);
+      return `خدمة: ${found ? found.label : srvKey}`;
+    }
+    if (b.target_category_id) {
+      const cat = categories.find((c) => c.id === b.target_category_id);
+      return `قسم: ${cat ? cat.name_ar : b.target_category_id}`;
+    }
+    if (b.target_merchant_id) {
+      const mer = merchants.find((m) => m.id === b.target_merchant_id);
+      return `متجر: ${mer ? mer.business_name_ar : b.target_merchant_id}`;
+    }
+    if (tf === 'free_delivery') return 'فلتر: التوصيل المجاني';
+    if (tf === 'fresh') return 'فلتر: المنتجات الطازجة';
+    if (tf === 'groceries') return 'فلتر: المقاضي';
+    if (tf === 'for_you') return 'فلتر: الكل';
+    return 'فلتر: العروض والخصومات';
   };
 
   const merchantCategories = categories.filter((c) => !c.merchant_id && c.scope !== 'market');
@@ -789,62 +857,198 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                 required
                 value={newBanner.title_ar}
                 onChange={(e) => setNewBanner({ ...newBanner, title_ar: e.target.value })}
-                placeholder="عنوان البانر (مثال: توصيل مجاني لطلبات فوق 200 ج.م)"
+                placeholder="عنوان البانر (مثال: اطلب مشوارك الآن بأرخص سعر أو توصيل مجاني)"
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
               />
               <input
                 value={newBanner.subtitle_ar}
                 onChange={(e) => setNewBanner({ ...newBanner, subtitle_ar: e.target.value })}
-                placeholder="وصف مختصر للعرض..."
+                placeholder="وصف مختصر للعرض أو الخدمة..."
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
               />
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={newBanner.badge_ar}
+                  onChange={(e) => setNewBanner({ ...newBanner, badge_ar: e.target.value })}
+                  placeholder="الشارة (مثال: خدمة جديدة / عرض اطلبها)"
+                  className="px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                />
+                <input
+                  value={newBanner.cta_label}
+                  onChange={(e) => setNewBanner({ ...newBanner, cta_label: e.target.value })}
+                  placeholder="نص الزر (مثال: اطلب الخدمة الآن)"
+                  className="px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                />
+              </div>
+
+              {/* Destination Type Selector: Service / Filter / Category / Merchant */}
+              <div className="grid grid-cols-2 gap-2">
                 <select
                   value={newBanner.banner_type}
                   onChange={(e) => setNewBanner({ ...newBanner, banner_type: e.target.value as any })}
-                  className="px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                  className="px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white font-bold"
                 >
                   <option value="hero">بانر رئيسي (Hero)</option>
-                  <option value="strip">شريط عروض (Strip)</option>
+                  <option value="strip">شريط إعلاني (Strip)</option>
                 </select>
                 <select
-                  value={newBanner.target_filter}
-                  onChange={(e) => setNewBanner({ ...newBanner, target_filter: e.target.value })}
-                  className="px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                  value={newBanner.destination_type}
+                  onChange={(e) => {
+                    const nextDest = e.target.value as 'filter' | 'service' | 'category' | 'merchant';
+                    setNewBanner({
+                      ...newBanner,
+                      destination_type: nextDest,
+                      cta_label:
+                        nextDest === 'service' && (newBanner.cta_label === 'تسوّق الآن' || !newBanner.cta_label)
+                          ? 'اطلب الخدمة الآن'
+                          : nextDest !== 'service' && newBanner.cta_label === 'اطلب الخدمة الآن'
+                          ? 'تسوّق الآن'
+                          : newBanner.cta_label,
+                    });
+                  }}
+                  className="px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white font-bold text-[#A92224]"
                 >
-                  <option value="offers">العروض والخصومات</option>
-                  <option value="free_delivery">التوصيل المجاني</option>
-                  <option value="fresh">المنتجات الطازجة</option>
-                  <option value="groceries">المقاضي</option>
+                  <option value="service">وجهة: خدمة من خدمات اطلبها</option>
+                  <option value="filter">وجهة: عروض / فلتر منتجات</option>
+                  <option value="category">وجهة: قسم محدد</option>
+                  <option value="merchant">وجهة: متجر محدد</option>
                 </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="sm:col-span-2">
+                  {newBanner.destination_type === 'service' && (
+                    <select
+                      value={newBanner.target_service}
+                      onChange={(e) => setNewBanner({ ...newBanner, target_service: e.target.value })}
+                      className="w-full px-2.5 py-2 rounded-xl border border-[#A92224]/30 text-xs bg-white font-bold"
+                    >
+                      {OTLOBHA_BANNER_SERVICES.map((srv) => (
+                        <option key={srv.key} value={srv.key}>
+                          {srv.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  {newBanner.destination_type === 'filter' && (
+                    <select
+                      value={newBanner.target_filter}
+                      onChange={(e) => setNewBanner({ ...newBanner, target_filter: e.target.value })}
+                      className="w-full px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                    >
+                      <option value="offers">العروض والخصومات</option>
+                      <option value="free_delivery">التوصيل المجاني</option>
+                      <option value="fresh">المنتجات الطازجة</option>
+                      <option value="groceries">المقاضي</option>
+                    </select>
+                  )}
+
+                  {newBanner.destination_type === 'category' && (
+                    <select
+                      value={newBanner.target_category_id}
+                      onChange={(e) => setNewBanner({ ...newBanner, target_category_id: e.target.value })}
+                      className="w-full px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                    >
+                      <option value="">-- اختر القسم --</option>
+                      {merchantCategories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.full_path_ar || c.name_ar}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  {newBanner.destination_type === 'merchant' && (
+                    <select
+                      value={newBanner.target_merchant_id}
+                      onChange={(e) => setNewBanner({ ...newBanner, target_merchant_id: e.target.value })}
+                      className="w-full px-2.5 py-2 rounded-xl border border-slate-200 text-xs bg-white"
+                    >
+                      <option value="">-- اختر المتجر --</option>
+                      {merchants.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.business_name_ar}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
                 <button
                   type="submit"
-                  className="px-3 py-2 rounded-xl bg-[#A92224] text-white text-xs font-bold cursor-pointer"
+                  className="px-3 py-2 rounded-xl bg-[#A92224] text-white text-xs font-bold cursor-pointer hover:brightness-105"
                 >
                   إضافة بانر
                 </button>
               </div>
+
+              <input
+                value={newBanner.image_url}
+                onChange={(e) => setNewBanner({ ...newBanner, image_url: e.target.value })}
+                placeholder="رابط صورة اختيارية لخلفية البانر (URL)"
+                className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs bg-white"
+              />
             </form>
 
             <div className="space-y-2">
-              {banners.map((b) => (
-                <div key={b.id} className="rounded-2xl border border-slate-200 p-3 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-slate-900 text-sm">{b.title_ar}</div>
-                    <div className="text-xs text-slate-500">{b.subtitle_ar} · ({b.banner_type})</div>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      await api.deleteAdminStorefrontBanner(b.id);
-                      onToast('تم حذف البانر');
-                      await loadBannersAndDeals();
-                    }}
-                    className="p-2 rounded-xl text-red-600 hover:bg-red-50 cursor-pointer"
+              {banners.map((b) => {
+                const isActive = Boolean(b.is_active);
+                const isServiceTarget = Boolean(b.target_service || String(b.target_filter || '').startsWith('service:'));
+                return (
+                  <div
+                    key={b.id}
+                    className={`rounded-2xl border p-3 flex items-center justify-between gap-3 ${
+                      isActive ? 'border-slate-200 bg-white' : 'border-slate-200/70 bg-slate-50 opacity-65'
+                    }`}
                   >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-slate-900 text-sm">{b.title_ar}</span>
+                        <span
+                          className={`px-2 py-0.5 rounded-lg text-[10px] font-black ${
+                            isServiceTarget
+                              ? 'bg-[#FEF2F2] text-[#A92224]'
+                              : 'bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          {describeBannerDestination(b)}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {b.subtitle_ar || 'بدون وصف'} · ({b.banner_type === 'strip' ? 'شريط' : 'رئيسي'})
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await api.updateAdminStorefrontBanner(b.id, { is_active: !isActive });
+                          onToast(isActive ? 'تم إيقاف البانر مؤقتًا' : 'تم تفعيل البانر');
+                          await loadBannersAndDeals();
+                        }}
+                        className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold cursor-pointer ${
+                          isActive
+                            ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                            : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                        }`}
+                      >
+                        {isActive ? 'نشط' : 'متوقف'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await api.deleteAdminStorefrontBanner(b.id);
+                          onToast('تم حذف البانر');
+                          await loadBannersAndDeals();
+                        }}
+                        className="p-2 rounded-xl text-red-600 hover:bg-red-50 cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 

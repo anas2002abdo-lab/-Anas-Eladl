@@ -328,6 +328,7 @@ export interface StorefrontBannerRecord {
   image_url: string;
   cta_label: string;
   target_filter: string;
+  target_service?: string | null;
   target_category_id?: string | null;
   target_merchant_id?: string | null;
   accent_color: string;

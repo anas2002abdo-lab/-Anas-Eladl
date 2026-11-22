@@ -1030,7 +1030,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     });
   };
 
-  const handleOpenOtlobhaService = (srv: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order') => {
+  const handleOpenOtlobhaService = (
+    srv: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order' | 'stores' | 'hub'
+  ) => {
     if (srv === 'free_order') {
       setOrderChannel('free_text');
       setTab('cart');
@@ -2589,19 +2591,20 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
           </div>
         )}
 
-        {/* 1B. CATEGORIES TAB — Visual Storefront Categories Grid */}
+        {/* 1B. CATEGORIES TAB — Visual Square Root Categories + Inline Horizontal Subcategories & Products */}
         {tab === 'categories' && (
           <OtlobhaCategoriesView
             categories={storefrontCategories}
             zoneName={zones.find((z) => z.id === selectedZoneId)?.name_ar || 'المنزلة - الدقهلية'}
+            cartQtyMap={cart}
             onOpenSearch={() => setSearchOverlayOpen(true)}
-            onSelectCategory={(cat) => {
-              setStorefrontCategoryId(cat.id);
-              setStorefrontBrand('');
-              setStorefrontMerchantId('');
-              setStorefrontFilter('for_you');
-              setTab('home');
+            onOpenProduct={(pid, list) => {
+              setDetailFromStorefrontHome(false);
+              setDetailProductList(list);
+              setDetailProductId(pid);
             }}
+            onAddProduct={handleAddStorefrontCard}
+            onDecrementProduct={handleDecrementStorefrontProduct}
             onSelectGroup={(groupKey) => {
               setStorefrontCategoryId('');
               setStorefrontBrand('');

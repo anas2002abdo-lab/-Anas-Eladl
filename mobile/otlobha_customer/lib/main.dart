@@ -110,6 +110,8 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   Map<String, dynamic>? _pendingPushTap;
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final GlobalKey<StorefrontCategoriesScreenState> _categoriesKey =
+      GlobalKey<StorefrontCategoriesScreenState>();
   final List<int> _tabHistory = <int>[];
   DateTime? _lastBackPressAt;
 
@@ -155,6 +157,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         _storefrontMerchantId = '';
         _storefrontMerchantName = '';
       });
+      return;
+    }
+
+    // 2B. If inside Categories tab viewing inline subcategories/products, step back to Root Squares first
+    if (_index == 1 && _categoriesKey.currentState?.handleSystemBack() == true) {
       return;
     }
 
@@ -1453,15 +1460,16 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onRateCaptain: _showCaptainRatingDialog,
       ),
       StorefrontCategoriesScreen(
+        key: _categoriesKey,
+        api: api,
         categories: _storefrontCategories,
         zoneName: _currentZoneName(),
+        cart: _quickCart,
         onOpenSearch: () => _openSmartSearch(),
-        onSelectCategory: (cat) {
-          _selectStorefrontCategory(
-            (cat['id'] ?? '').toString(),
-            (cat['name_ar'] ?? '').toString(),
-          );
-        },
+        onAddProduct: _onQuickAdd,
+        onOpenCart: () => _switchTab(3),
+        onSelectBrand: _selectStorefrontBrand,
+        onSelectMerchant: _selectStorefrontMerchant,
         onSelectGroup: (groupKey) {
           setState(() {
             _clearStorefrontFilters();

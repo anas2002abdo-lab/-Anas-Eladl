@@ -2184,9 +2184,16 @@ export function registerMasterCatalogRoutes(app: Express): void {
     const limit = Math.min(40, Math.max(8, parseInt(String(req.query.limit || '24'), 10) || 24));
     const offset = (page - 1) * limit;
 
-    const banners = db
+    const banners = (db
       .prepare('SELECT * FROM storefront_banners WHERE is_active = 1 ORDER BY sort_order ASC, created_at DESC')
-      .all() as Array<Record<string, any>>;
+      .all() as Array<Record<string, any>>).map((b) => {
+      const tf = String(b.target_filter || '');
+      const targetService = tf.startsWith('service:') ? tf.slice('service:'.length).trim() : null;
+      return {
+        ...b,
+        target_service: targetService || null,
+      };
+    });
 
     const rawCategories = db
       .prepare(`
@@ -3254,8 +3261,18 @@ export function registerMasterCatalogRoutes(app: Express): void {
   // E. Admin Storefront Banners Management
   // -------------------------------------------------------------------------
 
+  const enrichBannerRow = (b: Record<string, any>) => {
+    const tf = String(b.target_filter || '');
+    const targetService = tf.startsWith('service:') ? tf.slice('service:'.length).trim() : null;
+    return {
+      ...b,
+      target_service: targetService || null,
+    };
+  };
+
   app.get('/api/admin/storefront-banners', requireAuth, requireRole(...ALL_ADMIN_ROLES), (_req, res) => {
-    const rows = db.prepare('SELECT * FROM storefront_banners ORDER BY sort_order ASC, created_at DESC').all();
+    const rows = (db.prepare('SELECT * FROM storefront_banners ORDER BY sort_order ASC, created_at DESC').all() as Array<Record<string, any>>)
+      .map(enrichBannerRow);
     res.json(rows);
   });
 
@@ -3263,6 +3280,14 @@ export function registerMasterCatalogRoutes(app: Express): void {
     if (!ensureAdminCatalogAccess(req, res)) return;
     const titleAr = String(req.body?.title_ar || '').trim();
     if (!titleAr) return res.status(400).json({ error: 'عنوان البانر مطلوب' });
+    const rawTargetService = String(req.body?.target_service || '').trim();
+    const rawTargetFilter = String(req.body?.target_filter || '').trim();
+    const resolvedTargetFilter = rawTargetService
+      ? `service:${rawTargetService}`
+      : (rawTargetFilter || 'offers');
+    const resolvedCategoryId = rawTargetService ? null : (req.body?.target_category_id || null);
+    const resolvedMerchantId = rawTargetService ? null : (req.body?.target_merchant_id || null);
+
     const id = uid('bnr');
     db.prepare(`
       INSERT INTO storefront_banners (
@@ -3276,10 +3301,10 @@ export function registerMasterCatalogRoutes(app: Express): void {
       String(req.body?.badge_ar || ''),
       String(req.body?.banner_type || 'hero'),
       String(req.body?.image_url || ''),
-      String(req.body?.cta_label || 'تسوّق الآن'),
-      String(req.body?.target_filter || 'offers'),
-      req.body?.target_category_id || null,
-      req.body?.target_merchant_id || null,
+      String(req.body?.cta_label || (rawTargetService ? 'اطلب الخدمة الآن' : 'تسوّق الآن')),
+      resolvedTargetFilter,
+      resolvedCategoryId,
+      resolvedMerchantId,
       String(req.body?.accent_color || '#A92224'),
       Number(req.body?.sort_order || 10)
     );
@@ -3291,10 +3316,18 @@ export function registerMasterCatalogRoutes(app: Express): void {
     const existing = db.prepare('SELECT * FROM storefront_banners WHERE id = ?').get(req.params.id) as Record<string, any> | undefined;
     if (!existing) return res.status(404).json({ error: 'البانر غير موجود' });
     const b = req.body || {};
+    const nextTargetFilter =
+      b.target_service !== undefined
+        ? (String(b.target_service || '').trim() ? `service:${String(b.target_service).trim()}` : String(b.target_filter || 'offers'))
+        : (b.target_filter ?? existing.target_filter);
+    const nextCategoryId = b.target_category_id !== undefined ? (b.target_category_id || null) : existing.target_category_id;
+    const nextMerchantId = b.target_merchant_id !== undefined ? (b.target_merchant_id || null) : existing.target_merchant_id;
+
     db.prepare(`
       UPDATE storefront_banners SET
         title_ar = ?, subtitle_ar = ?, badge_ar = ?, banner_type = ?, image_url = ?,
-        cta_label = ?, target_filter = ?, accent_color = ?, sort_order = ?, is_active = ?
+        cta_label = ?, target_filter = ?, target_category_id = ?, target_merchant_id = ?,
+        accent_color = ?, sort_order = ?, is_active = ?
       WHERE id = ?
     `).run(
       b.title_ar ?? existing.title_ar,
@@ -3303,7 +3336,9 @@ export function registerMasterCatalogRoutes(app: Express): void {
       b.banner_type ?? existing.banner_type,
       b.image_url ?? existing.image_url,
       b.cta_label ?? existing.cta_label,
-      b.target_filter ?? existing.target_filter,
+      nextTargetFilter,
+      nextCategoryId,
+      nextMerchantId,
       b.accent_color ?? existing.accent_color,
       b.sort_order !== undefined ? Number(b.sort_order) : existing.sort_order,
       b.is_active !== undefined ? (b.is_active ? 1 : 0) : existing.is_active,
