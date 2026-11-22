@@ -1441,13 +1441,21 @@ class OtlobhaCustomerApi {
     return _decode(res, endpointHint: '/api/storefront/products/$productId');
   }
 
-  Future<Map<String, dynamic>> askStorefrontAssistant(String prompt) async {
+  Future<Map<String, dynamic>> askStorefrontAssistant(
+    String message, {
+    List<Map<String, String>> history = const [],
+  }) async {
     final res = await _execute(
       () => http.post(
         _apiUri('/api/storefront/assistant'),
         headers: _headers(json: true, includeAuth: false),
-        body: jsonEncode({'prompt': prompt}),
+        body: jsonEncode({
+          'message': message,
+          'prompt': message,
+          if (history.isNotEmpty) 'history': history,
+        }),
       ),
+      timeout: const Duration(seconds: 35),
     );
     return _decode(res, endpointHint: '/api/storefront/assistant');
   }

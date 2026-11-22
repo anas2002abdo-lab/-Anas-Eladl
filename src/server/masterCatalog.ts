@@ -14,6 +14,11 @@ import {
   recomputeAllCategoryPaths,
   resolveOrCreateCategoryPath,
 } from './categoryHierarchy.ts';
+import {
+  GeminiAssistantError,
+  runOtlobhaGeminiAssistant,
+  type AssistantHistoryTurn,
+} from './geminiAssistant.ts';
 
 // ============================================================================
 // 1. Text, Brand & Size Normalization Engine (Arabic + English + Units)
@@ -2574,39 +2579,41 @@ export function registerMasterCatalogRoutes(app: Express): void {
     }
   );
 
-  // Otlobha Smart Shopping Assistant (real DB catalog & price comparison helper)
-  app.post('/api/storefront/assistant', (req: Request, res: Response) => {
-    const message = String(req.body?.message || '').trim();
+  // Otlobha Smart Shopping Assistant (Gemini AI + real DB catalog & price comparison helper)
+  app.post('/api/storefront/assistant', async (req: Request, res: Response) => {
+    const rawMessage = req.body?.message ?? req.body?.prompt ?? '';
+    const message = String(rawMessage).trim();
     if (!message) {
       return res.json({
-        reply_ar: 'أهلاً بك في مساعد اطلبها الذكي! اكتب اسم أي منتج أو مقاضي تحتاجها (مثل: أرخص نسكافيه، مقاضي الفطار، عروض اليوم) وسأبحث لك فورًا عن أقل سعر متاح بين المتاجر.',
+        reply_ar: 'أهلاً بك في مساعد اطلبها الذكي! اكتب أي سؤال أو اسم منتج أو خدمة تحتاجها (مثل: أرخص نسكافيه، مقاضي الفطار، عروض اليوم، أو طلب مشوار) وسأساعدك فورًا.',
         suggested_products: [],
-        quick_prompts: ['أرخص العروض اليوم', 'مقاضي الفطار والألبان', 'قهوة وشاي بأقل سعر', 'منظفات المنزل'],
+        suggested_service: '',
+        quick_prompts: ['أرخص العروض اليوم', 'مقاضي الفطار والألبان', 'قهوة وشاي بأقل سعر', 'إزاي أطلب طلب نصي حر؟'],
       });
     }
 
-    const norm = normalizeText(message);
-    const wantsOffers = norm.includes('عرض') || norm.includes('عروض') || norm.includes('خصم') || norm.includes('توفير');
-    const wantsCheapest = norm.includes('ارخص') || norm.includes('اقل سعر') || norm.includes('سعر');
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const history: AssistantHistoryTurn[] = rawHistory
+      .filter((h: any) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.text === 'string' && h.text.trim())
+      .slice(-10)
+      .map((h: any) => ({
+        role: h.role === 'user' ? 'user' : 'assistant',
+        text: String(h.text).trim().slice(0, 1200),
+      }));
 
-    const tokens = tokenizeCanonical(message).filter(
-      (t) => !['عايز', 'اريد', 'ابحث', 'هات', 'محتاج', 'ارخص', 'اقل', 'سعر', 'عروض', 'عرض', 'اليوم', 'بين', 'المتاجر'].includes(t)
-    );
-
-    let matchedRows: Array<Record<string, any>> = [];
-    if (tokens.length > 0) {
-      const likeClauses = tokens
-        .slice(0, 4)
-        .map(
-          () =>
-            "(p.name_ar LIKE ? OR p.name_en LIKE ? OR p.brand LIKE ? OR c.name_ar LIKE ? OR COALESCE(mp.canonical_name_ar, '') LIKE ?)"
-        );
+    const queryProductsByTokens = (tokens: string[], preferCheapest: boolean, limit = 12) => {
+      const cleanTokens = tokens.map((t) => String(t || '').trim()).filter((t) => t.length >= 2).slice(0, 6);
+      if (cleanTokens.length === 0) return [] as Array<Record<string, any>>;
+      const likeClauses = cleanTokens.map(
+        () =>
+          "(p.name_ar LIKE ? OR p.name_en LIKE ? OR p.brand LIKE ? OR c.name_ar LIKE ? OR COALESCE(mp.canonical_name_ar, '') LIKE ?)"
+      );
       const likeParams: string[] = [];
-      for (const t of tokens.slice(0, 4)) {
+      for (const t of cleanTokens) {
         const lk = `%${t}%`;
         likeParams.push(lk, lk, lk, lk, lk);
       }
-      matchedRows = db
+      return db
         .prepare(`
           SELECT
             p.*, m.business_name_ar AS merchant_name, m.merchant_type,
@@ -2618,42 +2625,111 @@ export function registerMasterCatalogRoutes(app: Express): void {
           LEFT JOIN categories c ON c.id = p.category_id
           LEFT JOIN master_products mp ON mp.id = p.master_product_id
           WHERE p.is_available = 1 AND (${likeClauses.join(' OR ')})
-          ORDER BY ${wantsCheapest ? 'COALESCE(p.sale_price, p.base_price) ASC' : 'p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC'}
-          LIMIT 8
+          ORDER BY ${preferCheapest ? 'COALESCE(p.sale_price, p.base_price) ASC' : 'p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC'}
+          LIMIT ?
         `)
-        .all(...likeParams) as Array<Record<string, any>>;
+        .all(...likeParams, limit) as Array<Record<string, any>>;
+    };
+
+    try {
+      const norm = normalizeText(message);
+      const wantsCheapest = norm.includes('ارخص') || norm.includes('اقل سعر') || norm.includes('سعر');
+      const stopWords = new Set([
+        'عايز', 'اريد', 'ابحث', 'هات', 'محتاج', 'ارخص', 'اقل', 'سعر', 'عروض', 'عرض',
+        'اليوم', 'النهاردة', 'النهارده', 'بين', 'المتاجر', 'ايه', 'ازاي', 'ممكن', 'لو', 'سمحت', 'عن', 'في', 'من',
+      ]);
+      const tokens = tokenizeCanonical(message).filter((t) => !stopWords.has(t));
+
+      let candidateRows = queryProductsByTokens(tokens, wantsCheapest, 14);
+      if (candidateRows.length < 6) {
+        const fallbackRows = db
+          .prepare(`
+            SELECT
+              p.*, m.business_name_ar AS merchant_name, m.merchant_type,
+              c.name_ar AS category_name, c.group_key AS category_group_key,
+              mp.canonical_name_ar AS master_name_ar, mp.brand AS master_brand,
+              mp.size_label AS master_size_label, mp.image_url AS master_image_url
+            FROM products p
+            JOIN merchants m ON m.id = p.merchant_id
+            LEFT JOIN categories c ON c.id = p.category_id
+            LEFT JOIN master_products mp ON mp.id = p.master_product_id
+            WHERE p.is_available = 1
+            ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC
+            LIMIT 12
+          `)
+          .all() as Array<Record<string, any>>;
+        const seen = new Set(candidateRows.map((r) => String(r.id)));
+        for (const row of fallbackRows) {
+          if (!seen.has(String(row.id))) {
+            candidateRows.push(row);
+            seen.add(String(row.id));
+          }
+        }
+      }
+
+      const enrichedCandidates = enrichStorefrontProducts(candidateRows);
+      const categoryRows = db
+        .prepare(`SELECT name_ar FROM categories WHERE COALESCE(is_active, 1) = 1 ORDER BY sort_order ASC LIMIT 30`)
+        .all() as Array<{ name_ar: string }>;
+      const merchantRows = db
+        .prepare(`SELECT business_name_ar FROM merchants WHERE verification_status = 'approved' ORDER BY orders_count DESC LIMIT 20`)
+        .all() as Array<{ business_name_ar: string }>;
+
+      const aiResult = await runOtlobhaGeminiAssistant({
+        message,
+        history,
+        catalogProducts: enrichedCandidates.map((p) => ({
+          id: p.id,
+          name_ar: p.name_ar,
+          brand: p.brand,
+          size_label: p.size_label,
+          category_name: p.category_name,
+          merchant_name: p.merchant_name,
+          effective_price: p.effective_price,
+          base_price: p.base_price,
+          is_offer: Boolean(p.is_offer),
+          stores_count: p.stores_count,
+        })),
+        categoryNames: categoryRows.map((c) => c.name_ar).filter(Boolean),
+        merchantNames: merchantRows.map((m) => m.business_name_ar).filter(Boolean),
+      });
+
+      // Resolve real suggested products from Gemini's selected IDs and/or search_keywords
+      let suggestedProducts = aiResult.suggested_product_ids
+        .map((id) => enrichedCandidates.find((p) => p.id === id))
+        .filter((p): p is NonNullable<typeof p> => Boolean(p));
+
+      if (suggestedProducts.length === 0 && aiResult.search_keywords.length > 0) {
+        const kwTokens = aiResult.search_keywords.flatMap((kw) => tokenizeCanonical(kw));
+        const kwRows = queryProductsByTokens(
+          kwTokens.length > 0 ? kwTokens : aiResult.search_keywords,
+          wantsCheapest,
+          8
+        );
+        suggestedProducts = enrichStorefrontProducts(kwRows);
+      }
+
+      return res.json({
+        reply_ar: aiResult.reply_ar,
+        suggested_products: suggestedProducts.slice(0, 8),
+        suggested_service: aiResult.suggested_service,
+        quick_prompts: aiResult.quick_prompts,
+        model: aiResult.model,
+      });
+    } catch (err) {
+      if (err instanceof GeminiAssistantError) {
+        console.error(`[OtlobhaAssistant] ${err.code} (${err.statusCode}): ${err.message}`);
+        return res.status(err.statusCode).json({
+          error: err.message,
+          error_code: err.code,
+        });
+      }
+      console.error('[OtlobhaAssistant] Unexpected error:', err);
+      return res.status(500).json({
+        error: 'حدث خطأ غير متوقع في المساعد الذكي. يرجى المحاولة مرة أخرى.',
+        error_code: 'INTERNAL_ERROR',
+      });
     }
-
-    if (matchedRows.length === 0 && (wantsOffers || wantsCheapest || norm.length > 0)) {
-      matchedRows = db
-        .prepare(`
-          SELECT
-            p.*, m.business_name_ar AS merchant_name, m.merchant_type,
-            c.name_ar AS category_name, c.group_key AS category_group_key,
-            mp.canonical_name_ar AS master_name_ar, mp.brand AS master_brand,
-            mp.size_label AS master_size_label, mp.image_url AS master_image_url
-          FROM products p
-          JOIN merchants m ON m.id = p.merchant_id
-          LEFT JOIN categories c ON c.id = p.category_id
-          LEFT JOIN master_products mp ON mp.id = p.master_product_id
-          WHERE p.is_available = 1
-          ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC
-          LIMIT 6
-        `)
-        .all() as Array<Record<string, any>>;
-    }
-
-    const products = enrichStorefrontProducts(matchedRows);
-    const replyAr =
-      products.length > 0
-        ? `وجدت لك ${products.length} خيارات متاحة ومرتّبة حسب أفضل سعر وتوفير. اضغط على أي منتج لمقارنة أسعاره بين المتاجر أو أضفه مباشرة للسلة:`
-        : 'لم أجد منتجات مطابقة تمامًا حالياً في المتاجر المتاحة. يمكنك تجربة البحث باسم أقصر أو استخدام «الطلب النصي الحر» وسنوفره لك فورًا!';
-
-    res.json({
-      reply_ar: replyAr,
-      suggested_products: products,
-      quick_prompts: ['أرخص العروض اليوم', 'ألبان وبيض', 'قهوة وشاي', 'منظفات المنزل'],
-    });
   });
 
   // -------------------------------------------------------------------------

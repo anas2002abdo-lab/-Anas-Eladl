@@ -920,10 +920,18 @@ export const api = {
   },
   getStorefrontProductDetails: (productId: string) =>
     request<any>(`/api/storefront/products/${encodeURIComponent(productId)}/details`),
-  askStorefrontAssistant: (message: string) =>
-    request<{ reply_ar: string; suggested_products: any[]; quick_prompts: string[] }>('/api/storefront/assistant', {
+  askStorefrontAssistant: (
+    message: string,
+    history?: Array<{ role: 'user' | 'assistant'; text: string }>
+  ) =>
+    request<{
+      reply_ar: string;
+      suggested_products: any[];
+      quick_prompts: string[];
+      suggested_service?: '' | 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order';
+    }>('/api/storefront/assistant', {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, history: history || [] }),
     }),
 
   // =========================================================================

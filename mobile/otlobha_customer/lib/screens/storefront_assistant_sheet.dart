@@ -6,11 +6,17 @@ class _AssistantChatMessage {
   final bool isUser;
   final String text;
   final List<Map<String, dynamic>> products;
+  final String suggestedService;
+  final bool isError;
+  final String? retryPrompt;
 
   _AssistantChatMessage({
     required this.isUser,
     required this.text,
     this.products = const [],
+    this.suggestedService = '',
+    this.isError = false,
+    this.retryPrompt,
   });
 }
 
@@ -83,11 +89,11 @@ class _StorefrontAssistantSheetBody extends StatefulWidget {
 }
 
 class _StorefrontAssistantSheetBodyState extends State<_StorefrontAssistantSheetBody> {
-  static const List<String> _quickPrompts = [
-    'اقترحلي عروض السوبر ماركت النهاردة',
-    'أرخص أسعار الزيت والسكر والمكرونة',
-    'منتجات فطار ومخبوزات طازجة',
-    'مشروبات وقهوة عليها خصم',
+  List<String> _quickPrompts = [
+    'أرخص العروض اليوم',
+    'مقاضي الفطار والألبان',
+    'إزاي أطلب دواء من الصيدلية؟',
+    'عايز أطلب طلب نصي حر',
   ];
 
   final TextEditingController _inputCtrl = TextEditingController();
@@ -95,7 +101,7 @@ class _StorefrontAssistantSheetBodyState extends State<_StorefrontAssistantSheet
   final List<_AssistantChatMessage> _messages = [
     _AssistantChatMessage(
       isUser: false,
-      text: 'أهلًا بك في مساعد اطلبها الذكي! اكتب اللي محتاجه (مثلاً: عروض اليوم، مقاضي البيت، أو أرخص سعر لمنتج معين) وهقترحلك أفضل المنتجات فورًا.',
+      text: 'أهلًا بك في مساعد اطلبها الذكي! اسألني عن أي منتج، مقارنة أسعار، مقاضي طبخة، أو أي خدمة من خدمات اطلبها وسأساعدك فورًا.',
     ),
   ];
 
@@ -120,41 +126,75 @@ class _StorefrontAssistantSheetBodyState extends State<_StorefrontAssistantSheet
     });
   }
 
-  Future<void> _sendPrompt([String? preset]) async {
+  Future<void> _sendPrompt([String? preset, bool isRetry = false]) async {
     final text = (preset ?? _inputCtrl.text).trim();
     if (text.isEmpty || _sending) return;
     if (preset == null) _inputCtrl.clear();
 
+    final history = _messages
+        .where((m) => !m.isError && m.text.trim().isNotEmpty)
+        .toList()
+        .reversed
+        .take(10)
+        .toList()
+        .reversed
+        .map((m) => {
+              'role': m.isUser ? 'user' : 'assistant',
+              'text': m.text,
+            })
+        .toList();
+
     setState(() {
-      _messages.add(_AssistantChatMessage(isUser: true, text: text));
+      if (isRetry) {
+        _messages.removeWhere((m) => m.isError);
+      } else {
+        _messages.add(_AssistantChatMessage(isUser: true, text: text));
+      }
       _sending = true;
     });
     _scrollToBottom();
 
     try {
-      final res = await widget.api.askStorefrontAssistant(text);
-      final reply = (res['reply_ar'] ?? res['reply'] ?? 'تم العثور على هذه المقترحات لك:').toString().trim();
+      final res = await widget.api.askStorefrontAssistant(text, history: history);
+      final reply = (res['reply_ar'] ?? res['reply'] ?? '').toString().trim();
       final rawProducts = (res['suggested_products'] as List?) ?? [];
       final products = rawProducts
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
+      final suggestedService = (res['suggested_service'] ?? '').toString().trim().toLowerCase();
+      final rawPrompts = (res['quick_prompts'] as List?) ?? [];
+      final nextPrompts = rawPrompts
+          .map((e) => e.toString().trim())
+          .where((s) => s.isNotEmpty)
+          .take(4)
+          .toList();
+
       if (!mounted) return;
       setState(() {
         _messages.add(_AssistantChatMessage(
           isUser: false,
           text: reply.isNotEmpty ? reply : 'تفضل أفضل الترشيحات المتاحة الآن:',
           products: products,
+          suggestedService: suggestedService,
         ));
+        if (nextPrompts.isNotEmpty) {
+          _quickPrompts = nextPrompts;
+        }
         _sending = false;
       });
       _scrollToBottom();
     } catch (e) {
       if (!mounted) return;
+      final cleanErr = e.toString().replaceFirst('Exception: ', '').trim();
       setState(() {
         _messages.add(_AssistantChatMessage(
           isUser: false,
-          text: 'تعذر الاتصال بالمساعد حاليًا. يمكنك المحاولة مرة أخرى أو استخدام البحث الذكي.',
+          text: cleanErr.isNotEmpty
+              ? cleanErr
+              : 'تعذر الاتصال بالمساعد حاليًا. يرجى المحاولة مرة أخرى.',
+          isError: true,
+          retryPrompt: text,
         ));
         _sending = false;
       });
@@ -361,23 +401,69 @@ class _StorefrontAssistantSheetBodyState extends State<_StorefrontAssistantSheet
                           margin: const EdgeInsets.only(bottom: 10),
                           padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
                           decoration: BoxDecoration(
-                            color: msg.isUser ? const Color(0xFFA92224) : Colors.white,
+                            color: msg.isUser
+                                ? const Color(0xFFA92224)
+                                : (msg.isError ? const Color(0xFFFEF2F2) : Colors.white),
                             borderRadius: BorderRadius.only(
                               topLeft: const Radius.circular(18),
                               topRight: const Radius.circular(18),
                               bottomLeft: Radius.circular(msg.isUser ? 18 : 6),
                               bottomRight: Radius.circular(msg.isUser ? 6 : 18),
                             ),
-                            border: msg.isUser ? null : Border.all(color: const Color(0xFFE2E8F0)),
+                            border: msg.isUser
+                                ? null
+                                : Border.all(
+                                    color: msg.isError ? const Color(0xFFFECACA) : const Color(0xFFE2E8F0),
+                                  ),
                           ),
-                          child: Text(
-                            msg.text,
-                            style: TextStyle(
-                              fontSize: 13,
-                              height: 1.45,
-                              fontWeight: FontWeight.w600,
-                              color: msg.isUser ? Colors.white : const Color(0xFF0F172A),
-                            ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                msg.text,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  height: 1.45,
+                                  fontWeight: FontWeight.w600,
+                                  color: msg.isUser
+                                      ? Colors.white
+                                      : (msg.isError ? const Color(0xFF991B1B) : const Color(0xFF0F172A)),
+                                ),
+                              ),
+                              if (msg.isError && msg.retryPrompt != null) ...[
+                                const SizedBox(height: 8),
+                                InkWell(
+                                  onTap: _sending ? null : () => _sendPrompt(msg.retryPrompt, true),
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFA92224),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.refresh_rounded, size: 14, color: Colors.white),
+                                        SizedBox(width: 4),
+                                        Text(
+                                          'إعادة المحاولة',
+                                          style: TextStyle(
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.w800,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              if (msg.suggestedService.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                _buildSuggestedServiceAction(msg.suggestedService),
+                              ],
+                            ],
                           ),
                         ),
                         if (msg.products.isNotEmpty) ...[
@@ -480,6 +566,41 @@ class _StorefrontAssistantSheetBodyState extends State<_StorefrontAssistantSheet
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSuggestedServiceAction(String serviceKey) {
+    final (label, icon, onTap) = switch (serviceKey) {
+      'free_order' => ('افتح الطلب النصي الحر', Icons.edit_note_rounded, widget.onOpenFreeOrder),
+      'pharmacy' => ('افتح قسم الصيدليات', Icons.medication_rounded, () => widget.onOpenService('pharmacy')),
+      'rides' => ('احجز مشوار الآن', Icons.directions_car_rounded, () => widget.onOpenService('rides_parcels')),
+      'parcels' => ('أرسل طرد الآن', Icons.inventory_2_rounded, () => widget.onOpenService('rides_parcels')),
+      'market' => ('تصفّح سوق اطلبها', Icons.shopping_bag_rounded, () => widget.onOpenService('market')),
+      _ => ('', Icons.auto_awesome_rounded, () {}),
+    };
+    if (label.isEmpty) return const SizedBox.shrink();
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        decoration: BoxDecoration(
+          color: const Color(0xFFA92224),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: Colors.white),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: Colors.white),
+            ),
+          ],
         ),
       ),
     );
