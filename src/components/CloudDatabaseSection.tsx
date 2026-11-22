@@ -130,10 +130,10 @@ export function CloudDatabaseSection({
             </div>
             <div>
               <h2 className="text-xl font-extrabold text-slate-900">
-                قاعدة البيانات السحابية الدائمة (Firebase Firestore)
+                النسخ الاحتياطي السحابي الخارجي والاستعادة (Firebase Firestore)
               </h2>
               <p className="text-sm text-slate-600 mt-1">
-                حفظ دائم ومزامنة تلقائية لحسابات العملاء، الطلبات، الطيارين وأرصدتهم، التجار وأرصدتهم، المنتجات والأقسام — مع استعادة تلقائية فورية بعد أي تحديث أو إعادة تشغيل.
+                أداة نسخ احتياطي يدوي مخصصة لأخذ نسخة احتياطية قبل التحديثات الكبرى أو استعادتها عند الحاجة فقط. يتم تنظيف السجلات المحذوفة تلقائيًا عند كل عملية نسخ احتياطي لضمان عدم عودتها.
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
                 <span className="inline-flex items-center gap-1 font-semibold text-emerald-700">
@@ -170,7 +170,7 @@ export function CloudDatabaseSection({
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-extrabold shadow-sm transition"
               >
                 <Cloud className="w-4 h-4" />
-                ربط حساب Google لتفعيل الحفظ الدائم
+                ربط حساب Google للنسخ الاحتياطي اليدوي
               </button>
             ) : (
               <>
@@ -193,15 +193,9 @@ export function CloudDatabaseSection({
 
         {firebaseUser && (
           <div className="mt-5 pt-5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
-            <label className="inline-flex items-center gap-2.5 text-sm font-bold text-slate-700 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={autoSyncEnabled}
-                onChange={(e) => onToggleAutoSync(e.target.checked)}
-                className="w-4 h-4 rounded accent-emerald-600"
-              />
-              تفعيل المزامنة التلقائية الفورية والاستعادة الذكية عند أي تحديث
-            </label>
+            <p className="text-xs font-bold text-slate-600">
+              النسخ الاحتياطي والاستعادة يعملان بشكل يدوي فقط عند الطلب، ولا يعملان تلقائيًا في الخلفية.
+            </p>
 
             <div className="flex flex-wrap items-center gap-2.5">
               <button
@@ -220,7 +214,7 @@ export function CloudDatabaseSection({
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-extrabold"
               >
                 <CloudUpload className="w-4 h-4" />
-                حفظ ومزامنة الكل إلى السحابة الآن
+                أخذ نسخة احتياطية الآن
               </button>
               <button
                 type="button"
@@ -229,7 +223,7 @@ export function CloudDatabaseSection({
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-extrabold"
               >
                 <CloudDownload className="w-4 h-4" />
-                استعادة كاملة من السحابة الآن
+                استعادة من النسخة الاحتياطية الآن
               </button>
             </div>
           </div>
@@ -257,9 +251,9 @@ export function CloudDatabaseSection({
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex items-start gap-3">
           <CloudOff className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
           <div className="text-sm text-amber-900 space-y-1">
-            <p className="font-extrabold">خطوة واحدة فقط لتفعيل الحفظ الدائم في السحابة:</p>
+            <p className="font-extrabold">نسخة احتياطية خارجية اختيارية عند التحديثات:</p>
             <p className="text-xs leading-relaxed">
-              اضغط على زر <strong>«ربط حساب Google لتفعيل الحفظ الدائم»</strong> أعلاه بحسابك المعتمد (<code>anas2002abdo@gmail.com</code>). بعد الربط لمرة واحدة، ستحفظ المنظومة تلقائياً كل الحسابات والأرصدة والطلبات والمنتجات في Firebase Firestore وتستعيدها تلقائياً بعد أي تحديث مستقبلي.
+              يمكنك ربط حساب Google المعتمد (<code>anas2002abdo@gmail.com</code>) لأخذ نسخة احتياطية يدوية إلى Firestore قبل أي تحديث كبير أو استعادتها عند الحاجة.
             </p>
           </div>
         </div>

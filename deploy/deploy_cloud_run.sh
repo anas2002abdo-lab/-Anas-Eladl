@@ -82,6 +82,12 @@ SECRET_BINDINGS="SMTP_PASS=otlobha-smtp-pass:latest,JWT_ACCESS_SECRET=otlobha-jw
 if gcloud secrets describe "otlobha-gemini-api-key" >/dev/null 2>&1; then
   SECRET_BINDINGS="${SECRET_BINDINGS},GEMINI_API_KEY=otlobha-gemini-api-key:latest"
 fi
+if gcloud secrets describe "otlobha-firebase-sa-json" >/dev/null 2>&1; then
+  gcloud secrets add-iam-policy-binding "otlobha-firebase-sa-json" \
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null 2>&1 || true
+  SECRET_BINDINGS="${SECRET_BINDINGS},FIREBASE_SERVICE_ACCOUNT_JSON=otlobha-firebase-sa-json:latest"
+fi
 
 # Non-sensitive runtime configuration ONLY (uses --update-env-vars so existing vars are preserved)
 ENV_VARS="NODE_ENV=production,DISABLE_VITE=1,OTLOBHA_DB_PATH=/tmp/otlobha-local/otlobha.db,OTLOBHA_GCS_PERSIST_DIR=/mnt/gcs-data,OTLOBHA_SQLITE_JOURNAL_MODE=WAL,OTLOBHA_SQLITE_SYNC_INTERVAL_MS=15000,OTLOBHA_REQUIRE_EXISTING_PERSISTED_DB=${REQUIRE_EXISTING_DB}"

@@ -75,20 +75,12 @@ class OtlobhaPushChannels {
       ];
 }
 
-const FirebaseOptions otlobhaFirebaseOptions = FirebaseOptions(
-  apiKey: 'AIzaSyC7N1cRgBNqZU0Hfm0UKHJnGXe0cIM8ibU',
-  appId: '1:681956982552:android:a3c27c08d02027531f286d',
-  messagingSenderId: '681956982552',
-  projectId: 'third-accumulator-bgtt6',
-  storageBucket: 'third-accumulator-bgtt6.firebasestorage.app',
-);
-
 /// Top-level background handler invoked by FCM when the app is in background or terminated.
 @pragma('vm:entry-point')
 Future<void> otlobhaCustomerBackgroundHandler(RemoteMessage message) async {
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp(options: otlobhaFirebaseOptions);
+      await Firebase.initializeApp();
     }
     // When message.notification != null, Android FCM SDK automatically displays the system tray notification
     // using android.notification.channel_id. For data-only messages, display it via local notifications.
@@ -102,6 +94,13 @@ Future<void> otlobhaCustomerBackgroundHandler(RemoteMessage message) async {
           iOS: DarwinInitializationSettings(),
         );
         await localPlugin.initialize(initSettings);
+        final androidPlugin = localPlugin
+            .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+        if (androidPlugin != null) {
+          for (final channel in OtlobhaPushChannels.all()) {
+            await androidPlugin.createNotificationChannel(channel);
+          }
+        }
         final channelId = message.data['channel_id']?.toString() ?? OtlobhaPushChannels.orders;
         await localPlugin.show(
           DateTime.now().millisecondsSinceEpoch.remainder(1000000),
@@ -112,7 +111,9 @@ Future<void> otlobhaCustomerBackgroundHandler(RemoteMessage message) async {
               channelId,
               'تحديثات اطلبها',
               importance: Importance.max,
-              priority: Priority.high,
+              priority: Priority.max,
+              playSound: true,
+              enableVibration: true,
               icon: '@mipmap/ic_launcher',
               styleInformation: BigTextStyleInformation(body),
             ),
@@ -325,7 +326,8 @@ class CustomerPushNotificationService {
   Future<void> _initFirebaseMessaging() async {
     try {
       if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp(options: otlobhaFirebaseOptions);
+        // Initialize from native Android google-services.json / iOS GoogleService-Info.plist
+        await Firebase.initializeApp();
       }
       _firebaseReady = Firebase.apps.isNotEmpty;
     } catch (e) {
@@ -333,7 +335,7 @@ class CustomerPushNotificationService {
         _firebaseReady = true;
       } else {
         _firebaseReady = false;
-        debugPrint('[CustomerPush] Firebase init error: $e');
+        debugPrint('[CustomerPush] Firebase init error (verify google-services.json): $e');
         return;
       }
     }
@@ -414,16 +416,25 @@ class CustomerPushNotificationService {
   Future<void> registerForAuthenticatedUser(OtlobhaCustomerApi api) async {
     _boundApi = api;
     await requestPermission();
+    if (!_firebaseReady) {
+      await _initFirebaseMessaging();
+    }
     if (!_firebaseReady || !api.hasTokens) return;
 
-    try {
-      final token = await FirebaseMessaging.instance.getToken();
-      if (token != null && token.isNotEmpty) {
-        _currentToken = token;
-        await _syncTokenToBackend(api, token);
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final token = await FirebaseMessaging.instance.getToken();
+        if (token != null && token.isNotEmpty) {
+          _currentToken = token;
+          await _syncTokenToBackend(api, token);
+          return;
+        }
+      } catch (e) {
+        debugPrint('[CustomerPush] Token fetch/register attempt ${attempt + 1} failed: $e');
       }
-    } catch (e) {
-      debugPrint('[CustomerPush] Token fetch/register failed: $e');
+      if (attempt < 2) {
+        await Future<void>.delayed(Duration(seconds: (attempt + 1) * 2));
+      }
     }
   }
 

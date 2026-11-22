@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -108,9 +109,97 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   StreamSubscription? _ridesSub;
   Map<String, dynamic>? _pendingPushTap;
 
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final List<int> _tabHistory = <int>[];
+  DateTime? _lastBackPressAt;
+
   static const String _prefGuestMode = 'otlobha_cust_is_guest';
   static const String _prefTabIndex = 'otlobha_cust_tab_index';
   static const String _prefServiceSubView = 'otlobha_cust_service_sub_view';
+
+  void _switchTab(int nextIndex, {String? serviceSubView, bool recordHistory = true}) {
+    final prevIndex = _index;
+    setState(() {
+      if (recordHistory && prevIndex != nextIndex) {
+        if (_tabHistory.isEmpty || _tabHistory.last != prevIndex) {
+          _tabHistory.add(prevIndex);
+          if (_tabHistory.length > 20) _tabHistory.removeAt(0);
+        }
+      }
+      if (serviceSubView != null) {
+        _serviceSubView = serviceSubView;
+      }
+      _index = nextIndex;
+    });
+    _persistNavState(tabIndex: nextIndex, subView: serviceSubView);
+  }
+
+  void _handleSystemBack() {
+    // 1. Close open Drawer first
+    if (_scaffoldKey.currentState?.isDrawerOpen == true) {
+      Navigator.of(context).pop();
+      return;
+    }
+
+    // 2. If currently on Home tab with any active filter/category/brand/merchant, clear it first
+    if (_index == 0 &&
+        (_storefrontCategoryId.isNotEmpty ||
+            _storefrontBrand.isNotEmpty ||
+            _storefrontMerchantId.isNotEmpty ||
+            _storefrontFilter != 'for_you')) {
+      setState(() {
+        _storefrontFilter = 'for_you';
+        _storefrontCategoryId = '';
+        _storefrontCategoryName = '';
+        _storefrontBrand = '';
+        _storefrontMerchantId = '';
+        _storefrontMerchantName = '';
+      });
+      return;
+    }
+
+    // 3. If inside Services tab sub-view (stores / pharmacy / rides_parcels / market), return to hub
+    if (_index == 2 && _serviceSubView != 'hub') {
+      setState(() => _serviceSubView = 'hub');
+      _persistNavState(subView: 'hub');
+      return;
+    }
+
+    // 4. Step back through previous visited tabs
+    while (_tabHistory.isNotEmpty) {
+      final prev = _tabHistory.removeLast();
+      if (prev != _index) {
+        setState(() => _index = prev);
+        _persistNavState(tabIndex: prev);
+        return;
+      }
+    }
+
+    // 5. Return to Home tab if currently on another tab
+    if (_index != 0) {
+      setState(() => _index = 0);
+      _persistNavState(tabIndex: 0);
+      return;
+    }
+
+    // 6. On Home root: double-back within 2 seconds exits the app cleanly
+    final now = DateTime.now();
+    if (_lastBackPressAt != null && now.difference(_lastBackPressAt!) <= const Duration(seconds: 2)) {
+      SystemNavigator.pop();
+      return;
+    }
+    _lastBackPressAt = now;
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('اضغط زر الرجوع مرة أخرى للخروج من التطبيق'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+    }
+  }
 
   @override
   void initState() {
@@ -132,6 +221,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _isAuthenticated && !_isGuest) {
       _silentSync();
+      if (CustomerPushNotificationService.instance.currentToken == null) {
+        CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+      }
     }
   }
 
@@ -1238,45 +1330,54 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   @override
   Widget build(BuildContext context) {
     if (_showAuthScreen || (!_isAuthenticated && !_isGuest)) {
-      return Directionality(
-        textDirection: TextDirection.rtl,
-        child: CustomerOtpLoginScreen(
-          api: api,
-          openedFromGuest: _isGuest,
-          onContinueAsGuest: _enterGuestMode,
-          onVerified: (user) {
-            final wasGuest = _isGuest;
-            final needsProfile = _checkNeedsProfileCompletion(user);
-            setState(() {
-              _isAuthenticated = true;
-              _isGuest = false;
-              _showAuthScreen = false;
-              _needsProfileCompletion = needsProfile;
-              _isEmailVerified = user['is_email_verified'] == true || user['is_email_verified'] == 1;
-              _verifyNotifShownForSession = false;
-              _currentUserSnapshot = Map<String, dynamic>.from(user);
-              _customerEmail = user['email']?.toString() ?? '';
-              _customerName = user['full_name']?.toString() ?? '';
-              _customerPhone = user['phone']?.toString() ?? '';
-              _addressLandmark = user['address_landmark']?.toString() ?? '';
-              final zoneId = user['default_zone_id']?.toString() ?? '';
-              if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
-              if (!wasGuest) _index = 0;
-            });
-            api.persistUserSnapshot(user);
-            _persistNavState(guest: false, tabIndex: _index);
-            if (!needsProfile) {
-              _connectRidesWs();
-              _loadData();
-              CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
-              _maybeTriggerEmailVerificationNotification();
-              if (_pendingPushTap != null) {
-                final pending = _pendingPushTap!;
-                _pendingPushTap = null;
-                WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+      return PopScope(
+        canPop: !_isGuest,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          if (_isGuest && _showAuthScreen) {
+            setState(() => _showAuthScreen = false);
+          }
+        },
+        child: Directionality(
+          textDirection: TextDirection.rtl,
+          child: CustomerOtpLoginScreen(
+            api: api,
+            openedFromGuest: _isGuest,
+            onContinueAsGuest: _enterGuestMode,
+            onVerified: (user) {
+              final wasGuest = _isGuest;
+              final needsProfile = _checkNeedsProfileCompletion(user);
+              setState(() {
+                _isAuthenticated = true;
+                _isGuest = false;
+                _showAuthScreen = false;
+                _needsProfileCompletion = needsProfile;
+                _isEmailVerified = user['is_email_verified'] == true || user['is_email_verified'] == 1;
+                _verifyNotifShownForSession = false;
+                _currentUserSnapshot = Map<String, dynamic>.from(user);
+                _customerEmail = user['email']?.toString() ?? '';
+                _customerName = user['full_name']?.toString() ?? '';
+                _customerPhone = user['phone']?.toString() ?? '';
+                _addressLandmark = user['address_landmark']?.toString() ?? '';
+                final zoneId = user['default_zone_id']?.toString() ?? '';
+                if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
+                if (!wasGuest) _index = 0;
+              });
+              api.persistUserSnapshot(user);
+              _persistNavState(guest: false, tabIndex: _index);
+              if (!needsProfile) {
+                _connectRidesWs();
+                _loadData();
+                CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+                _maybeTriggerEmailVerificationNotification();
+                if (_pendingPushTap != null) {
+                  final pending = _pendingPushTap!;
+                  _pendingPushTap = null;
+                  WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
+                }
               }
-            }
-          },
+            },
+          ),
         ),
       );
     }
@@ -1342,28 +1443,13 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         },
         onOpenSearch: () => _openSmartSearch(),
         onAddProduct: _onQuickAdd,
-        onOpenCart: () {
-          setState(() => _index = 3);
-          _persistNavState(tabIndex: 3);
-        },
+        onOpenCart: () => _switchTab(3),
         onOpenFreeOrderCart: () {
-          setState(() {
-            _orderChannel = 'free_text';
-            _index = 3;
-          });
-          _persistNavState(tabIndex: 3);
+          _orderChannel = 'free_text';
+          _switchTab(3);
         },
-        onOpenService: (sub) {
-          setState(() {
-            _serviceSubView = sub;
-            _index = 2;
-          });
-          _persistNavState(tabIndex: 2, subView: sub);
-        },
-        onOpenOffers: () {
-          setState(() => _index = 5);
-          _persistNavState(tabIndex: 5);
-        },
+        onOpenService: (sub) => _switchTab(2, serviceSubView: sub),
+        onOpenOffers: () => _switchTab(5),
         onRateCaptain: _showCaptainRatingDialog,
       ),
       StorefrontCategoriesScreen(
@@ -1391,20 +1477,17 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         cart: _quickCart,
         cartProductsCache: _cartProductsCache,
         onAddProduct: _onQuickAdd,
-        onOpenCart: () {
-          setState(() => _index = 3);
-          _persistNavState(tabIndex: 3);
-        },
+        onOpenCart: () => _switchTab(3),
         onRefresh: _loadData,
         activeSubView: _serviceSubView,
         onSelectSubView: (sub) {
           setState(() => _serviceSubView = sub);
           _persistNavState(subView: sub);
         },
-        onOpenFreeOrderCart: () => setState(() {
+        onOpenFreeOrderCart: () {
           _orderChannel = 'free_text';
-          _index = 3;
-        }),
+          _switchTab(3);
+        },
         customerName: _customerName,
         customerPhone: _customerPhone,
         selectedZoneId: _selectedZoneId,
@@ -1438,9 +1521,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         }),
         onOrderPlaced: () async {
           await _loadData();
-          if (mounted) setState(() => _index = 4);
+          if (mounted) _switchTab(4);
         },
-        onBrowseHome: () => setState(() => _index = 0),
+        onBrowseHome: () => _switchTab(0),
         isGuest: _isGuest,
         onRequireAuth: _openAuthFromGuest,
       ),
@@ -1478,10 +1561,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           await _silentSync();
         },
         onOpenNotifications: _openNotifications,
-        onOpenOffers: () {
-          setState(() => _index = 5);
-          _persistNavState(tabIndex: 5);
-        },
+        onOpenOffers: () => _switchTab(5),
         onOpenOrderChat: _openOrderChat,
         onOpenTripChat: _openTripChat,
         onRateCaptain: _showCaptainRatingDialog,
@@ -1496,10 +1576,17 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       ),
     ];
 
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        drawer: _buildCustomerDrawer(context),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleSystemBack();
+      },
+      child: Directionality(
+        textDirection: TextDirection.rtl,
+        child: Scaffold(
+          key: _scaffoldKey,
+          drawer: _buildCustomerDrawer(context),
         appBar: AppBar(
           automaticallyImplyLeading: false,
           flexibleSpace: Container(
@@ -1637,6 +1724,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               ),
         bottomNavigationBar: _buildCustomerBottomBar(cartTotalQty),
       ),
+      ),
     );
   }
 
@@ -1715,8 +1803,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('الأقسام الرئيسية والفرعية', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() => _index = 1);
-                _persistNavState(tabIndex: 1);
+                _switchTab(1);
               },
             ),
             ListTile(
@@ -1725,8 +1812,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('العروض والكوبونات', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() => _index = 5);
-                _persistNavState(tabIndex: 5);
+                _switchTab(5);
               },
             ),
             ListTile(
@@ -1735,11 +1821,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('مركز كل الخدمات', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() {
-                  _serviceSubView = 'hub';
-                  _index = 2;
-                });
-                _persistNavState(tabIndex: 2, subView: 'hub');
+                _switchTab(2, serviceSubView: 'hub');
               },
             ),
             ListTile(
@@ -1748,11 +1830,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('المتاجر والمطاعم المعتمدة', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() {
-                  _serviceSubView = 'stores';
-                  _index = 2;
-                });
-                _persistNavState(tabIndex: 2, subView: 'stores');
+                _switchTab(2, serviceSubView: 'stores');
               },
             ),
             ListTile(
@@ -1761,11 +1839,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('الصيدلية والروشتة', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() {
-                  _serviceSubView = 'pharmacy';
-                  _index = 2;
-                });
-                _persistNavState(tabIndex: 2, subView: 'pharmacy');
+                _switchTab(2, serviceSubView: 'pharmacy');
               },
             ),
             ListTile(
@@ -1774,11 +1848,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('مشوار أو طرد', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() {
-                  _serviceSubView = 'rides_parcels';
-                  _index = 2;
-                });
-                _persistNavState(tabIndex: 2, subView: 'rides_parcels');
+                _switchTab(2, serviceSubView: 'rides_parcels');
               },
             ),
             ListTile(
@@ -1787,11 +1857,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('سوق اطلبها', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() {
-                  _serviceSubView = 'market';
-                  _index = 2;
-                });
-                _persistNavState(tabIndex: 2, subView: 'market');
+                _switchTab(2, serviceSubView: 'market');
               },
             ),
             ListTile(
@@ -1800,10 +1866,8 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               title: const Text('طلب نصي حر', style: TextStyle(fontWeight: FontWeight.w600)),
               onTap: () {
                 Navigator.pop(context);
-                setState(() {
-                  _orderChannel = 'free_text';
-                  _index = 3;
-                });
+                _orderChannel = 'free_text';
+                _switchTab(3);
               },
             ),
             const Divider(),
@@ -1902,10 +1966,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       final active = _index == idx;
       return Expanded(
         child: InkWell(
-          onTap: () {
-            setState(() => _index = idx);
-            _persistNavState(tabIndex: idx);
-          },
+          onTap: () => _switchTab(idx),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Column(

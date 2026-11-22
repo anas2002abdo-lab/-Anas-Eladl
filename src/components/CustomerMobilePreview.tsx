@@ -324,6 +324,149 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings | null>(null);
   const autoOpenedCaptainChatIdsRef = useRef<Set<string>>(new Set());
   const prevOrderStatusMapRef = useRef<Record<string, string>>({});
+  const customerTabHistoryRef = useRef<BottomTab[]>([]);
+  const prevCustomerTabRef = useRef<BottomTab>('home');
+  const customerBackGuardActiveRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (prevCustomerTabRef.current !== tab) {
+      const prev = prevCustomerTabRef.current;
+      if (customerTabHistoryRef.current[customerTabHistoryRef.current.length - 1] !== prev) {
+        customerTabHistoryRef.current = [...customerTabHistoryRef.current.slice(-9), prev];
+      }
+      prevCustomerTabRef.current = tab;
+    }
+  }, [tab]);
+
+  const hasCustomerBackStep = Boolean(
+    detailProductId ||
+      searchOverlayOpen ||
+      assistantModalOpen ||
+      showSupportModal ||
+      showLiveTracking ||
+      showCheckoutMap ||
+      activeChatOrderId ||
+      activeChatTripId ||
+      showInbox ||
+      showSideDrawer ||
+      (showAuthScreen && isGuest) ||
+      (tab === 'services' && serviceView !== 'hub') ||
+      (tab === 'home' &&
+        (storefrontFilter !== 'for_you' ||
+          Boolean(storefrontCategoryId) ||
+          Boolean(storefrontBrand) ||
+          Boolean(storefrontMerchantId) ||
+          Boolean(homeSearch.trim()))) ||
+      tab !== 'home'
+  );
+
+  const customerBackActionRef = useRef<() => boolean>(() => false);
+  customerBackActionRef.current = () => {
+    if (detailProductId) {
+      setDetailProductId(null);
+      return true;
+    }
+    if (searchOverlayOpen) {
+      setSearchOverlayOpen(false);
+      return true;
+    }
+    if (assistantModalOpen) {
+      setAssistantModalOpen(false);
+      return true;
+    }
+    if (showSupportModal) {
+      setShowSupportModal(false);
+      return true;
+    }
+    if (showLiveTracking) {
+      setShowLiveTracking(false);
+      return true;
+    }
+    if (showCheckoutMap) {
+      setShowCheckoutMap(false);
+      return true;
+    }
+    if (activeChatOrderId) {
+      setActiveChatOrderId(null);
+      return true;
+    }
+    if (activeChatTripId) {
+      setActiveChatTripId(null);
+      return true;
+    }
+    if (showInbox) {
+      setShowInbox(false);
+      return true;
+    }
+    if (showSideDrawer) {
+      setShowSideDrawer(false);
+      return true;
+    }
+    if (showAuthScreen && isGuest) {
+      setShowAuthScreen(false);
+      return true;
+    }
+    if (tab === 'services' && serviceView !== 'hub') {
+      setServiceView('hub');
+      return true;
+    }
+    if (
+      tab === 'home' &&
+      (storefrontFilter !== 'for_you' ||
+        storefrontCategoryId ||
+        storefrontBrand ||
+        storefrontMerchantId ||
+        homeSearch.trim())
+    ) {
+      setStorefrontFilter('for_you');
+      setStorefrontCategoryId('');
+      setStorefrontBrand('');
+      setStorefrontMerchantId('');
+      setHomeSearch('');
+      return true;
+    }
+    if (customerTabHistoryRef.current.length > 0) {
+      const nextStack = [...customerTabHistoryRef.current];
+      const prevTab = nextStack.pop()!;
+      customerTabHistoryRef.current = nextStack;
+      prevCustomerTabRef.current = prevTab;
+      setTab(prevTab);
+      return true;
+    }
+    if (tab !== 'home') {
+      prevCustomerTabRef.current = 'home';
+      setTab('home');
+      return true;
+    }
+    return false;
+  };
+
+  const [customerBackPopSeq, setCustomerBackPopSeq] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (hasCustomerBackStep && !customerBackGuardActiveRef.current) {
+      try {
+        window.history.pushState({ otlobhaMobileBackGuard: 'customer' }, '');
+        customerBackGuardActiveRef.current = true;
+      } catch {
+        // ignore sandboxed history restrictions
+      }
+    }
+  }, [hasCustomerBackStep, customerBackPopSeq]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPopState = () => {
+      customerBackGuardActiveRef.current = false;
+      const handled = customerBackActionRef.current();
+      if (handled) {
+        setCustomerBackPopSeq((n) => n + 1);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const loadBootstrap = async (isAuthed = Boolean(customerSession)) => {
     const [boot, allOrders, notifs] = await Promise.all([

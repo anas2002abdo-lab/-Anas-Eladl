@@ -189,6 +189,25 @@ async function batchUpsertCollection(
   return written;
 }
 
+async function batchDeleteDocIds(colName: string, docIds: string[]): Promise<number> {
+  if (docIds.length === 0) return 0;
+  let deleted = 0;
+  for (let i = 0; i < docIds.length; i += MAX_BATCH_OPS) {
+    const chunk = docIds.slice(i, i + MAX_BATCH_OPS);
+    const batch = writeBatch(firestoreDb);
+    for (const docId of chunk) {
+      batch.delete(doc(firestoreDb, colName, docId));
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, colName);
+    }
+    deleted += chunk.length;
+  }
+  return deleted;
+}
+
 // Strict blueprint-synchronized mappers (SQLite row -> Firestore document)
 
 function mapCustomer(row: Record<string, unknown>) {
@@ -525,28 +544,44 @@ export async function pushAllToCloudVault(
   let synced = 0;
 
   for (const col of collectionsToSync) {
-    if (col.docs.length === 0) continue;
-    onProgress?.({
-      phase: 'pushing',
-      message: `جاري حفظ ${col.label} (${col.docs.length}) في السحابة...`,
-      processed: synced,
-      total: grandTotal,
-    });
-    const baseSynced = synced;
-    await batchUpsertCollection(col.name, user, col.docs, undefined, (w) => {
+    const existingIds = await fetchExistingDocIds(col.name, user);
+    const currentIds = new Set(col.docs.map((d) => d.id));
+    const staleIds = Array.from(existingIds).filter((id) => !currentIds.has(id));
+
+    if (col.docs.length > 0) {
       onProgress?.({
         phase: 'pushing',
-        message: `جاري حفظ ${col.label} (${w}/${col.docs.length})...`,
-        processed: baseSynced + w,
+        message: `جاري حفظ ${col.label} (${col.docs.length}) في النسخة الاحتياطية السحابية...`,
+        processed: synced,
         total: grandTotal,
       });
-    });
-    synced += col.docs.length;
+      const baseSynced = synced;
+      await batchUpsertCollection(col.name, user, col.docs, existingIds, (w) => {
+        onProgress?.({
+          phase: 'pushing',
+          message: `جاري حفظ ${col.label} (${w}/${col.docs.length})...`,
+          processed: baseSynced + w,
+          total: grandTotal,
+        });
+      });
+      synced += col.docs.length;
+    }
+
+    if (staleIds.length > 0) {
+      onProgress?.({
+        phase: 'pushing',
+        message: `جاري تنظيف السجلات المحذوفة من ${col.label} (${staleIds.length})...`,
+        processed: synced,
+        total: grandTotal,
+      });
+      await batchDeleteDocIds(col.name, staleIds);
+    }
   }
 
-  // Paginated products sync so even 10,000+ products sync smoothly without blocking UI
+  // Paginated products backup + prune deleted product docs so deleted items never resurrect on restore
+  const existingProductIds = await fetchExistingDocIds('products', user);
+  const currentProductIds = new Set<string>();
   if (productsTotal > 0) {
-    const existingProductIds = await fetchExistingDocIds('products', user);
     let page = 1;
     let hasMore = true;
     let syncedProducts = 0;
@@ -557,6 +592,7 @@ export async function pushAllToCloudVault(
         total: number;
       }>(`/api/admin/cloud-sync/export?collection=products&page=${page}&limit=350`);
       const mapped = (pageRes.items || []).map(mapProduct);
+      for (const m of mapped) currentProductIds.add(m.id);
       if (mapped.length > 0) {
         const baseSynced = synced;
         await batchUpsertCollection('products', user, mapped, existingProductIds, (w) => {
@@ -573,6 +609,16 @@ export async function pushAllToCloudVault(
       hasMore = Boolean(pageRes.has_more) && mapped.length > 0;
       page += 1;
     }
+  }
+  const staleProductIds = Array.from(existingProductIds).filter((id) => !currentProductIds.has(id));
+  if (staleProductIds.length > 0) {
+    onProgress?.({
+      phase: 'pushing',
+      message: `جاري إزالة المنتجات المحذوفة من النسخة الاحتياطية (${staleProductIds.length})...`,
+      processed: synced,
+      total: grandTotal,
+    });
+    await batchDeleteDocIds('products', staleProductIds);
   }
 
   // Update master vault_meta/main document

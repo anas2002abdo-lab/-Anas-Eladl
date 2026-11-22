@@ -49,10 +49,13 @@ const SYNONYM_MAP: Record<string, string> = {
   lipton: 'lipton',
   العروسه: 'elarosa',
   العروسة: 'elarosa',
+  عروسه: 'elarosa',
+  عروسة: 'elarosa',
   جهينه: 'juhayna',
   جهينة: 'juhayna',
   juhayna: 'juhayna',
   المراعي: 'almarai',
+  مراعي: 'almarai',
   almarai: 'almarai',
   نادك: 'nadec',
   nadec: 'nadec',
@@ -61,6 +64,14 @@ const SYNONYM_MAP: Record<string, string> = {
   cocacola: 'cocacola',
   بيبسي: 'pepsi',
   pepsi: 'pepsi',
+  سبرايت: 'sprite',
+  sprite: 'sprite',
+  فانتا: 'fanta',
+  fanta: 'fanta',
+  ميرندا: 'mirinda',
+  mirinda: 'mirinda',
+  شويبس: 'schweppes',
+  schweppes: 'schweppes',
   نوتيلا: 'nutella',
   nutella: 'nutella',
   ديتول: 'dettol',
@@ -69,18 +80,74 @@ const SYNONYM_MAP: Record<string, string> = {
   clorox: 'clorox',
   بامبرز: 'pampers',
   pampers: 'pampers',
+  مولفيكس: 'molfix',
+  molfix: 'molfix',
   اندومي: 'indomie',
   indomie: 'indomie',
   شيبسي: 'chipsy',
   chipsy: 'chipsy',
   ليز: 'lays',
   lays: 'lays',
+  تايجر: 'tiger',
+  tiger: 'tiger',
+  دوريتوس: 'doritos',
+  doritos: 'doritos',
+  شيتوس: 'cheetos',
+  cheetos: 'cheetos',
   اوريو: 'oreo',
   oreo: 'oreo',
+  مولتو: 'molto',
+  molto: 'molto',
+  هوهوز: 'hohos',
+  hohos: 'hohos',
+  توينكيز: 'twinkies',
+  twinkies: 'twinkies',
+  جلاكسي: 'galaxy',
+  جالكسي: 'galaxy',
+  galaxy: 'galaxy',
+  كادبوري: 'cadbury',
+  cadbury: 'cadbury',
   دوف: 'dove',
   dove: 'dove',
   لايفبوي: 'lifebuoy',
   lifebuoy: 'lifebuoy',
+  الملكه: 'elmaleka',
+  الملقة: 'elmaleka',
+  ملكه: 'elmaleka',
+  الضحي: 'eldoha',
+  ضحي: 'eldoha',
+  دومتي: 'domty',
+  domty: 'domty',
+  عبورلاند: 'obourland',
+  عبور: 'obourland',
+  لامار: 'lamar',
+  lamar: 'lamar',
+  بخيره: 'bekhero',
+  كريستال: 'crystal',
+  crystal: 'crystal',
+  عافيه: 'afia',
+  afia: 'afia',
+  روابي: 'rawabi',
+  جنه: 'ganna',
+  فيرن: 'fern',
+  اوكسي: 'oxy',
+  oxy: 'oxy',
+  تايد: 'tide',
+  tide: 'tide',
+  بريل: 'pril',
+  pril: 'pril',
+  نيدو: 'nido',
+  nido: 'nido',
+  دانون: 'danone',
+  danone: 'danone',
+  كيري: 'kiri',
+  kiri: 'kiri',
+  بريزيدن: 'president',
+  بريزيدون: 'president',
+  president: 'president',
+  حلواني: 'halwani',
+  اطياب: 'atyab',
+  كوكي: 'koki',
   // Common grocery nouns
   قهوه: 'coffee',
   coffee: 'coffee',
@@ -93,31 +160,185 @@ const SYNONYM_MAP: Record<string, string> = {
   sugar: 'sugar',
   زيت: 'oil',
   oil: 'oil',
+  سمن: 'ghee',
+  سمنه: 'ghee',
+  ghee: 'ghee',
+  زبده: 'butter',
+  زبد: 'butter',
+  butter: 'butter',
   ارز: 'rice',
   رز: 'rice',
   rice: 'rice',
   مكرونه: 'pasta',
   معكرونه: 'pasta',
   pasta: 'pasta',
+  دقيق: 'flour',
+  طحين: 'flour',
+  flour: 'flour',
   جبنه: 'cheese',
   جبن: 'cheese',
   cheese: 'cheese',
+  زبادي: 'yogurt',
+  yogurt: 'yogurt',
   دجاج: 'chicken',
   فراخ: 'chicken',
   chicken: 'chicken',
+  لحمه: 'beef',
+  لحم: 'beef',
+  beef: 'beef',
   تونه: 'tuna',
   tuna: 'tuna',
   عسل: 'honey',
   honey: 'honey',
   شوكولاته: 'chocolate',
   شيكولاته: 'chocolate',
+  شوكلاته: 'chocolate',
   chocolate: 'chocolate',
   مياه: 'water',
   ماء: 'water',
+  ميه: 'water',
   water: 'water',
   عصير: 'juice',
   juice: 'juice',
+  بسكويت: 'biscuit',
+  بسكوت: 'biscuit',
+  biscuit: 'biscuit',
+  صلصه: 'sauce',
+  كاتشب: 'ketchup',
+  ketchup: 'ketchup',
+  مايونيز: 'mayo',
+  mayo: 'mayo',
+  فراوله: 'strawberry',
+  strawberry: 'strawberry',
+  مانجو: 'mango',
+  مانجه: 'mango',
+  mango: 'mango',
+  برتقال: 'orange',
+  orange: 'orange',
+  تفاح: 'apple',
+  apple: 'apple',
+  ليمون: 'lemon',
+  lemon: 'lemon',
+  نعناع: 'mint',
+  mint: 'mint',
+  جوافه: 'guava',
+  guava: 'guava',
+  خوخ: 'peach',
+  peach: 'peach',
+  اناناس: 'pineapple',
+  pineapple: 'pineapple',
+  فانيليا: 'vanilla',
+  فانيلا: 'vanilla',
+  vanilla: 'vanilla',
+  كراميل: 'caramel',
+  caramel: 'caramel',
+  بندق: 'hazelnut',
+  hazelnut: 'hazelnut',
+  موز: 'banana',
+  banana: 'banana',
+  توت: 'berry',
+  berry: 'berry',
+  كاكاو: 'cocoa',
+  cocoa: 'cocoa',
+  حار: 'spicy',
+  شطه: 'spicy',
+  سبايسي: 'spicy',
+  spicy: 'spicy',
+  دايت: 'diet',
+  diet: 'diet',
+  لايت: 'light',
+  light: 'light',
+  زيرو: 'zero',
+  zero: 'zero',
 };
+
+const VARIANT_GUARD_TOKENS = new Set([
+  // Flavors
+  'strawberry',
+  'mango',
+  'chocolate',
+  'vanilla',
+  'orange',
+  'apple',
+  'lemon',
+  'mint',
+  'guava',
+  'peach',
+  'pineapple',
+  'caramel',
+  'hazelnut',
+  'banana',
+  'berry',
+  'cocoa',
+  'spicy',
+  'ملح',
+  'مملح',
+  'خل',
+  'طماطم',
+  'ketchup',
+  'كباب',
+  'شواء',
+  'باربكيو',
+  'جبن',
+  'cheese',
+  'خضار',
+  'قرفه',
+  'هيل',
+  'حبهان',
+  'كمون',
+  'فلفل',
+  'زيتون',
+  'بسطرمه',
+  'رومي',
+  'شيدر',
+  'فيتا',
+  'اسطنبولي',
+  'براميلي',
+  'موتزاريلا',
+  'قشطه',
+  // Dietary / variant types
+  'diet',
+  'light',
+  'zero',
+  'classic',
+  'gold',
+  'خالي',
+  'كامل',
+  'نصف',
+  'محلي',
+  'بدون',
+  'ساده',
+  'محوج',
+  'فاتح',
+  'وسط',
+  'غامق',
+  // Relative sizes & colors (prevent merging Small vs Large or Red vs Green)
+  'كبير',
+  'كبيره',
+  'صغير',
+  'صغيره',
+  'عائلي',
+  'اقتصادي',
+  'جامبو',
+  'ميني',
+  'large',
+  'small',
+  'medium',
+  'family',
+  'mini',
+  'jumbo',
+  'احمر',
+  'اخضر',
+  'ازرق',
+  'اسود',
+  'ابيض',
+  'اصفر',
+  'red',
+  'green',
+  'blue',
+  'black',
+  'white',
+]);
 
 const STOP_WORDS = new Set([
   'من',
@@ -307,12 +528,30 @@ export function tokenizeCanonical(text: string): string[] {
   const tokens: string[] = [];
   for (const t of rawTokens) {
     if (STOP_WORDS.has(t)) continue;
-    const mapped = SYNONYM_MAP[t] || t;
+    let mapped = SYNONYM_MAP[t];
+    if (!mapped && t.startsWith('ال') && t.length >= 5) {
+      const stripped = t.slice(2);
+      if (STOP_WORDS.has(stripped)) continue;
+      mapped = SYNONYM_MAP[stripped] || stripped;
+    } else if (!mapped) {
+      mapped = t;
+    }
     if (mapped.length >= 2 || /^\d+$/.test(mapped)) {
       tokens.push(mapped);
     }
   }
   return Array.from(new Set(tokens));
+}
+
+function hasVariantOrFlavorConflict(tokensA: string[], tokensB: string[]): boolean {
+  const setA = new Set(tokensA.filter((t) => VARIANT_GUARD_TOKENS.has(t)));
+  const setB = new Set(tokensB.filter((t) => VARIANT_GUARD_TOKENS.has(t)));
+  if (setA.size === 0 && setB.size === 0) return false;
+  if (setA.size !== setB.size) return true;
+  for (const t of setA) {
+    if (!setB.has(t)) return true;
+  }
+  return false;
 }
 
 export function buildNormalizedKey(input: {
@@ -506,13 +745,32 @@ export function matchMasterProducts(input: {
     }
     if (brandConflict) continue;
 
+    // Strict flavor/variant boundary: NEVER auto-merge different flavors, colors, or relative sizes (e.g., فراولة vs مانجو, دايت vs عادي, كبير vs صغير)
+    const variantConflict = hasVariantOrFlavorConflict(inputTokens, rowTokens);
+    if (variantConflict) {
+      continue;
+    }
+
     // Composite similarity score
     let score = Math.round((jaccard * 0.65 + overlap * 0.35) * 100);
     const reasons: string[] = [];
 
-    if (row.normalized_key && row.normalized_key === normalizedKey && normalizedKey !== '__nosize') {
+    const rowKey =
+      row.normalized_key ||
+      buildNormalizedKey({
+        name_ar: row.canonical_name_ar,
+        name_en: row.canonical_name_en,
+        brand: row.brand,
+        size_value: rowSize?.canonicalValue ?? null,
+        size_unit: rowSize?.canonicalUnit ?? null,
+        size_label: row.size_label || rowSize?.displayLabel || '',
+      });
+    const bothNoSize = !inputSize && !rowSize;
+    const keyExactMatch = Boolean(rowKey && normalizedKey && rowKey === normalizedKey && normalizedKey !== '__nosize');
+
+    if (keyExactMatch) {
       score = Math.max(score, 96);
-      reasons.push('تطابق تام للاسم والعلامة والحجم');
+      reasons.push(bothNoSize ? 'تطابق تام للاسم والعلامة التجارية' : 'تطابق تام للاسم والعلامة والحجم');
     } else if (jaccard >= 0.75 || (overlap >= 0.85 && inputTokens.length >= 2)) {
       reasons.push('تطابق عالٍ في الاسم التجاري');
     } else if (score >= 45) {
@@ -532,10 +790,15 @@ export function matchMasterProducts(input: {
       score = Math.max(0, score - 10);
     }
 
-    // Exact match requires: identical size (or both explicitly have no size AND very high key match) + high text score
+    // Exact match:
+    // 1. Both have identical explicit sizes + strong text match (or exact normalized key)
+    // 2. Both have NO explicit size + exact normalized key OR very high bidirectional token agreement
+    // Note: if ONE has an explicit size and the other does NOT, NEVER auto-merge as exact (only possible match).
     const isExact =
-      (sizeCheck === 'identical' && (score >= 86 || (jaccard >= 0.7 && overlap >= 0.85))) ||
-      (row.normalized_key && row.normalized_key === normalizedKey && sizeCheck === 'identical');
+      (sizeCheck === 'identical' && (keyExactMatch || score >= 84 || (jaccard >= 0.68 && overlap >= 0.85))) ||
+      (bothNoSize &&
+        inputTokens.length >= 1 &&
+        (keyExactMatch || (jaccard >= 0.82 && overlap >= 0.9) || (score >= 88 && jaccard >= 0.72)));
 
     if (isExact) {
       const cand: MasterProductCandidate = {
@@ -996,6 +1259,7 @@ export function reconcileAllExistingProductsToMasterCatalog(): {
   reconciled: number;
   linked_existing: number;
   new_masters: number;
+  merged_duplicates: number;
 } {
   const allProducts = db.prepare(`
     SELECT id, product_code, merchant_id, category_id, master_product_id,
@@ -1007,19 +1271,39 @@ export function reconcileAllExistingProductsToMasterCatalog(): {
   let reconciled = 0;
   let linkedExisting = 0;
   let newMasters = 0;
+  let mergedDuplicates = 0;
 
   const updateStmt = db.prepare('UPDATE products SET master_product_id = ? WHERE id = ?');
 
   db.transaction(() => {
+    // Pass 1: Ensure every product points to an active (non-merged) master product
     for (const prod of allProducts) {
       const existingMasterId = prod.master_product_id ? String(prod.master_product_id).trim() : '';
-      let isValid = false;
+      let validActiveId: string | null = null;
       if (existingMasterId) {
-        const check = db.prepare('SELECT id FROM master_products WHERE id = ?').get(existingMasterId);
-        if (check) isValid = true;
+        const check = db
+          .prepare('SELECT id, approval_status, merged_into_id FROM master_products WHERE id = ?')
+          .get(existingMasterId) as { id: string; approval_status?: string; merged_into_id?: string | null } | undefined;
+        if (check) {
+          if (check.merged_into_id) {
+            updateStmt.run(String(check.merged_into_id), prod.id);
+            reconciled++;
+            linkedExisting++;
+            validActiveId = String(check.merged_into_id);
+          } else {
+            validActiveId = check.id;
+          }
+        }
       }
 
-      if (!isValid) {
+      if (!validActiveId) {
+        const parsedSize = extractSize({
+          size_value: prod.size_value,
+          size_unit: prod.size_unit,
+          size_label: prod.size_label,
+          name_ar: prod.name_ar,
+          name_en: prod.name_en,
+        });
         const res = ensureMasterProductForListing({
           id: prod.id,
           name_ar: prod.name_ar,
@@ -1027,9 +1311,9 @@ export function reconcileAllExistingProductsToMasterCatalog(): {
           brand: prod.brand,
           category_id: prod.category_id,
           barcode: prod.barcode,
-          size_value: prod.size_value,
-          size_unit: prod.size_unit,
-          size_label: prod.size_label,
+          size_value: parsedSize?.canonicalValue ?? prod.size_value,
+          size_unit: parsedSize?.canonicalUnit ?? prod.size_unit,
+          size_label: prod.size_label || parsedSize?.displayLabel || '',
           image_url: prod.image_url,
           description: prod.description,
           merchant_id: prod.merchant_id,
@@ -1041,6 +1325,122 @@ export function reconcileAllExistingProductsToMasterCatalog(): {
         else linkedExisting++;
       }
     }
+
+    // Pass 2: Recompute normalized_key on all approved master_products and safely merge exact duplicates
+    const activeMasters = db
+      .prepare(`
+        SELECT mp.*,
+          (SELECT COUNT(*) FROM products p WHERE p.master_product_id = mp.id) AS listing_count
+        FROM master_products mp
+        WHERE mp.approval_status = 'approved' AND mp.merged_into_id IS NULL
+        ORDER BY listing_count DESC, mp.created_at ASC
+      `)
+      .all() as Array<Record<string, any>>;
+
+    const updateKeyStmt = db.prepare('UPDATE master_products SET normalized_key = ? WHERE id = ?');
+    const canonicalByGroup = new Map<string, Record<string, any>>();
+    const canonicalByBarcode = new Map<string, Record<string, any>>();
+    const moveProductsStmt = db.prepare(
+      "UPDATE products SET master_product_id = ?, updated_at = datetime('now') WHERE master_product_id = ?"
+    );
+    const moveDealsStmt = db.prepare('UPDATE product_deals SET master_product_id = ? WHERE master_product_id = ?');
+    const markMergedStmt = db.prepare(
+      "UPDATE master_products SET approval_status = 'merged', merged_into_id = ?, updated_at = datetime('now') WHERE id = ?"
+    );
+
+    for (const mp of activeMasters) {
+      const parsedSize = extractSize({
+        size_value: mp.size_value,
+        size_unit: mp.size_unit,
+        size_label: mp.size_label,
+        name_ar: mp.canonical_name_ar,
+        name_en: mp.canonical_name_en,
+      });
+      const freshKey = buildNormalizedKey({
+        name_ar: mp.canonical_name_ar,
+        name_en: mp.canonical_name_en,
+        brand: mp.brand,
+        size_value: parsedSize?.canonicalValue ?? null,
+        size_unit: parsedSize?.canonicalUnit ?? null,
+        size_label: mp.size_label || parsedSize?.displayLabel || '',
+      });
+      if (freshKey && freshKey !== mp.normalized_key) {
+        updateKeyStmt.run(freshKey, mp.id);
+        mp.normalized_key = freshKey;
+      }
+
+      const cleanBarcode = String(mp.barcode || '').trim().toLowerCase();
+      let targetCanonical: Record<string, any> | undefined;
+
+      if (cleanBarcode && canonicalByBarcode.has(cleanBarcode)) {
+        const bcTarget = canonicalByBarcode.get(cleanBarcode)!;
+        const bcSize = extractSize({
+          size_value: bcTarget.size_value,
+          size_unit: bcTarget.size_unit,
+          size_label: bcTarget.size_label,
+          name_ar: bcTarget.canonical_name_ar,
+          name_en: bcTarget.canonical_name_en,
+        });
+        if (areSizesCompatible(parsedSize, bcSize) !== 'conflict') {
+          targetCanonical = bcTarget;
+        }
+      }
+
+      if (!targetCanonical && freshKey && freshKey !== '__nosize' && canonicalByGroup.has(freshKey)) {
+        const keyTarget = canonicalByGroup.get(freshKey)!;
+        const keyTokens = tokenizeCanonical(
+          `${keyTarget.brand || ''} ${keyTarget.canonical_name_ar || ''} ${keyTarget.canonical_name_en || ''}`
+        );
+        const mpTokens = tokenizeCanonical(`${mp.brand || ''} ${mp.canonical_name_ar || ''} ${mp.canonical_name_en || ''}`);
+        if (!hasVariantOrFlavorConflict(mpTokens, keyTokens)) {
+          targetCanonical = keyTarget;
+        }
+      }
+
+      if (targetCanonical && targetCanonical.id !== mp.id) {
+        // Fill missing metadata on canonical master without overwriting existing rich data
+        const metaUpdates: string[] = [];
+        const metaParams: unknown[] = [];
+        if (!targetCanonical.image_url && mp.image_url) {
+          metaUpdates.push('image_url = ?');
+          metaParams.push(mp.image_url);
+          targetCanonical.image_url = mp.image_url;
+        }
+        if (!targetCanonical.barcode && mp.barcode) {
+          metaUpdates.push('barcode = ?');
+          metaParams.push(mp.barcode);
+          targetCanonical.barcode = mp.barcode;
+        }
+        if (!targetCanonical.brand && mp.brand) {
+          metaUpdates.push('brand = ?');
+          metaParams.push(mp.brand);
+          targetCanonical.brand = mp.brand;
+        }
+        if (!targetCanonical.description && mp.description) {
+          metaUpdates.push('description = ?');
+          metaParams.push(mp.description);
+          targetCanonical.description = mp.description;
+        }
+        if (metaUpdates.length > 0) {
+          metaParams.push(targetCanonical.id);
+          db.prepare(`UPDATE master_products SET ${metaUpdates.join(', ')}, updated_at = datetime('now') WHERE id = ?`).run(
+            ...metaParams
+          );
+        }
+
+        moveProductsStmt.run(targetCanonical.id, mp.id);
+        moveDealsStmt.run(targetCanonical.id, mp.id);
+        markMergedStmt.run(targetCanonical.id, mp.id);
+        mergedDuplicates++;
+      } else {
+        if (freshKey && freshKey !== '__nosize' && !canonicalByGroup.has(freshKey)) {
+          canonicalByGroup.set(freshKey, mp);
+        }
+        if (cleanBarcode && !canonicalByBarcode.has(cleanBarcode)) {
+          canonicalByBarcode.set(cleanBarcode, mp);
+        }
+      }
+    }
   })();
 
   return {
@@ -1048,6 +1448,7 @@ export function reconcileAllExistingProductsToMasterCatalog(): {
     reconciled,
     linked_existing: linkedExisting,
     new_masters: newMasters,
+    merged_duplicates: mergedDuplicates,
   };
 }
 

@@ -140,6 +140,7 @@ export HAS_GOOGLE_SERVICES
 
 # 2. Patch Android Gradle files and verify Google Services plugin is active
 python3 - <<'PYEOF'
+import json
 import os
 import re
 import sys
@@ -370,4 +371,80 @@ if has_gs and not plugin_applied:
         file=sys.stderr,
     )
     sys.exit(1)
+
+# --- Validate mobilesdk_app_id hex format in google-services.json ---
+gs_path = Path("android/app/google-services.json")
+if has_gs and gs_path.exists():
+    try:
+        gs_data = json.loads(gs_path.read_text(encoding="utf-8"))
+        for entry in gs_data.get("client", []):
+            app_id = entry.get("client_info", {}).get("mobilesdk_app_id", "")
+            if app_id and not re.match(r"^\d+:\d+:android:[0-9a-fA-F]+$", str(app_id)):
+                print(
+                    f"::error::Invalid mobilesdk_app_id format in {gs_path} (contains non-hex characters). "
+                    "Re-download google-services.json directly from Firebase Console.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+# --- 3. Patch android/app/src/main/AndroidManifest.xml for reliable Background FCM Push ---
+manifest_path = Path("android/app/src/main/AndroidManifest.xml")
+if manifest_path.exists():
+    m_text = manifest_path.read_text(encoding="utf-8")
+    expected_pkg = os.environ.get("EXPECTED_PKG", "").strip().lower()
+    cwd_name = Path.cwd().name.lower()
+    is_captain_app = "captain" in expected_pkg or "captain" in cwd_name
+    default_channel = "otlobha_dispatch_channel" if is_captain_app else "otlobha_orders_channel"
+
+    required_permissions = [
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE",
+        "android.permission.WAKE_LOCK",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+    ]
+    perm_lines = []
+    for perm in required_permissions:
+        if perm not in m_text:
+            perm_lines.append(f'    <uses-permission android:name="{perm}"/>')
+    if perm_lines:
+        m_text, _ = re.subn(
+            r"(<application\b)",
+            "\n".join(perm_lines) + r"\n    \1",
+            m_text,
+            count=1,
+        )
+
+    meta_additions = []
+    if "com.google.firebase.messaging.default_notification_channel_id" not in m_text:
+        meta_additions.append(
+            f'        <meta-data\n'
+            f'            android:name="com.google.firebase.messaging.default_notification_channel_id"\n'
+            f'            android:value="{default_channel}" />'
+        )
+    if "com.google.firebase.messaging.default_notification_icon" not in m_text:
+        meta_additions.append(
+            '        <meta-data\n'
+            '            android:name="com.google.firebase.messaging.default_notification_icon"\n'
+            '            android:resource="@mipmap/ic_launcher" />'
+        )
+    if meta_additions and "</application>" in m_text:
+        m_text = m_text.replace("</application>", "\n" + "\n".join(meta_additions) + "\n    </application>", 1)
+
+    if "FLUTTER_NOTIFICATION_CLICK" not in m_text and "</activity>" in m_text:
+        click_filter = (
+            '            <intent-filter>\n'
+            '                <action android:name="FLUTTER_NOTIFICATION_CLICK" />\n'
+            '                <category android:name="android.intent.category.DEFAULT" />\n'
+            '            </intent-filter>\n'
+            '        </activity>'
+        )
+        m_text = m_text.replace("</activity>", click_filter, 1)
+
+    manifest_path.write_text(m_text, encoding="utf-8")
+    print(f"[FCM Android Setup] Patched AndroidManifest.xml with POST_NOTIFICATIONS, WAKE_LOCK, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
 PYEOF

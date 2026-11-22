@@ -60,14 +60,33 @@ export type CustomMulticastTransport = (
   channelId: PushChannelId
 ) => Promise<MulticastSendResult>;
 
+const FCM_ADMIN_APP_NAME = 'otlobha-fcm';
 let initializedApp: App | null = null;
 let initAttempted = false;
 let initSource: 'service_account_json' | 'fcm_env_vars' | 'google_application_credentials' | 'application_default' | 'none' = 'none';
 let initProjectId: string | null = null;
+let lastFcmError: { code: string; message: string; at: string } | null = null;
 let customTransportForTests: CustomMulticastTransport | null = null;
+const pendingPushPromises = new Set<Promise<unknown>>();
 
 export function setPushTransportForTest(transport: CustomMulticastTransport | null): void {
   customTransportForTests = transport;
+}
+
+export async function awaitPendingPushNotifications(timeoutMs = 3500): Promise<void> {
+  if (pendingPushPromises.size === 0) return;
+  const snapshot = Array.from(pendingPushPromises);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      Promise.allSettled(snapshot),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function parseServiceAccountFromEnv(): {
@@ -126,19 +145,22 @@ function ensureFirebaseAdmin(): App | null {
   if (initAttempted) return null;
   initAttempted = true;
 
-  const existingApps = getApps();
-  if (existingApps.length > 0 && existingApps[0]) {
-    initializedApp = existingApps[0];
+  const existingNamed = getApps().find((a) => a.name === FCM_ADMIN_APP_NAME);
+  if (existingNamed) {
+    initializedApp = existingNamed;
     return initializedApp;
   }
 
   const parsed = parseServiceAccountFromEnv();
   if (parsed) {
     try {
-      initializedApp = initializeApp({
-        credential: cert(parsed.serviceAccount),
-        projectId: parsed.projectId,
-      });
+      initializedApp = initializeApp(
+        {
+          credential: cert(parsed.serviceAccount),
+          projectId: parsed.projectId,
+        },
+        FCM_ADMIN_APP_NAME
+      );
       initSource = parsed.source;
       initProjectId = parsed.projectId;
       console.log(`[FCM] Firebase Admin SDK initialized via ${initSource} (project: ${initProjectId})`);
@@ -151,14 +173,17 @@ function ensureFirebaseAdmin(): App | null {
 
   const gac = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
   const fallbackProjectId =
-    String(process.env.FCM_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '').trim() ||
+    String(process.env.FCM_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '').trim() ||
     'third-accumulator-bgtt6';
 
   try {
-    initializedApp = initializeApp({
-      credential: applicationDefault(),
-      projectId: fallbackProjectId,
-    });
+    initializedApp = initializeApp(
+      {
+        credential: applicationDefault(),
+        projectId: fallbackProjectId,
+      },
+      FCM_ADMIN_APP_NAME
+    );
     initSource = gac ? 'google_application_credentials' : 'application_default';
     initProjectId = fallbackProjectId;
     console.log(`[FCM] Firebase Admin SDK initialized via ${initSource} (project: ${initProjectId})`);
@@ -173,10 +198,55 @@ function ensureFirebaseAdmin(): App | null {
   return null;
 }
 
+export async function probeFcmAuth(): Promise<{
+  ok: boolean;
+  code?: string;
+  message: string;
+}> {
+  const app = ensureFirebaseAdmin();
+  if (!app) {
+    return {
+      ok: false,
+      code: 'fcm_not_configured',
+      message: 'لم يتم تهيئة Firebase Admin SDK على الخادم (أضف FIREBASE_SERVICE_ACCOUNT_JSON).',
+    };
+  }
+  try {
+    await getMessaging(app).send(
+      {
+        token: 'probe_invalid_token_check_auth_only',
+        notification: { title: 'probe', body: 'probe' },
+      },
+      true
+    );
+    return { ok: true, message: 'اتصال Firebase Cloud Messaging مفعل ويعمل بنجاح.' };
+  } catch (err: any) {
+    const code = String(err?.code || 'unknown');
+    const msg = String(err?.message || err);
+    if (
+      code === 'messaging/invalid-argument' ||
+      code === 'messaging/registration-token-not-registered' ||
+      code === 'messaging/invalid-registration-token'
+    ) {
+      return { ok: true, code, message: 'صلاحيات Firebase Cloud Messaging (FCM v1) مفعلة وتعمل بنجاح.' };
+    }
+    lastFcmError = { code, message: msg, at: new Date().toISOString() };
+    return {
+      ok: false,
+      code,
+      message:
+        code === 'messaging/mismatched-credential' || msg.includes('cloudmessaging.messages.create')
+          ? `صلاحية إرسال إشعارات FCM غير مفعلة على الخادم (${code}): يرجى إضافة FIREBASE_SERVICE_ACCOUNT_JSON من مشروع Firebase الصحيح أو منح صلاحية Firebase Cloud Messaging API Admin لحساب خدمة Cloud Run.`
+          : `فشل التحقق من FCM (${code}): ${msg}`,
+    };
+  }
+}
+
 export function getFcmStatus(): {
   configured: boolean;
   source: string;
   project_id: string | null;
+  last_error: { code: string; message: string; at: string } | null;
   registered_devices: {
     total: number;
     customer: number;
@@ -202,6 +272,7 @@ export function getFcmStatus(): {
     configured: Boolean(app || customTransportForTests),
     source: customTransportForTests ? 'test_transport' : initSource,
     project_id: initProjectId,
+    last_error: lastFcmError,
     registered_devices: { total, customer, captain },
   };
 }
@@ -211,7 +282,10 @@ export function resolveChannelId(category?: string, deepLink?: string, targetApp
   const cat = String(category || '').toLowerCase();
   if (dl.includes('chat')) return 'otlobha_chat_channel';
   if (cat === 'promo' || dl === 'offers' || dl === 'promo') return 'otlobha_admin_channel';
-  if (targetApp === 'captain' && (dl === 'orders' || dl === 'order' || dl === 'trip' || dl === 'rides' || dl === 'parcels')) {
+  if (
+    targetApp === 'captain' &&
+    (cat === 'operational' || dl === 'orders' || dl === 'order' || dl === 'trip' || dl === 'rides' || dl === 'parcels')
+  ) {
     return 'otlobha_dispatch_channel';
   }
   if (
@@ -349,10 +423,12 @@ export function getActiveTokensForAudience(params: {
   targetApp: string;
   recipientId?: string | null;
   targetZone?: string | null;
+  category?: string | null;
 }): string[] {
   const app = String(params.targetApp || 'customer').toLowerCase();
   const recipientId = params.recipientId ? String(params.recipientId).trim() : '';
   const zone = params.targetZone && params.targetZone !== 'all' ? String(params.targetZone).trim() : '';
+  const isOperational = String(params.category || '').toLowerCase() === 'operational';
 
   if (recipientId) {
     const roles: PushUserRole[] =
@@ -370,22 +446,33 @@ export function getActiveTokensForAudience(params: {
   const tokens = new Set<string>();
 
   if (app === 'captain' || app === 'all') {
-    const rows = zone
-      ? (db
-          .prepare(
-            `SELECT DISTINCT t.fcm_token
-             FROM push_device_tokens t
-             JOIN captains c ON c.id = t.user_id
-             WHERE t.is_active = 1 AND t.user_role = 'captain' AND c.zone_name = ?`
-          )
-          .all(zone) as Array<{ fcm_token: string }>)
-      : (db
-          .prepare(
-            `SELECT DISTINCT fcm_token FROM push_device_tokens
-             WHERE is_active = 1 AND user_role = 'captain'`
-          )
-          .all() as Array<{ fcm_token: string }>);
-    for (const r of rows) tokens.add(r.fcm_token);
+    if (zone && !isOperational) {
+      const zoneRows = db
+        .prepare(
+          `SELECT DISTINCT t.fcm_token
+           FROM push_device_tokens t
+           JOIN captains c ON c.id = t.user_id
+           WHERE t.is_active = 1 AND t.user_role = 'captain'
+             AND (c.zone_name = ? OR c.zone_name LIKE ?)`
+        )
+        .all(zone, `%${zone}%`) as Array<{ fcm_token: string }>;
+      for (const r of zoneRows) tokens.add(r.fcm_token);
+    }
+
+    // For operational order/trip dispatch (or when zone-filtered captain query yields 0 tokens),
+    // broadcast to all approved captains with registered tokens so no new order alert is silently dropped due to zone naming differences.
+    if (isOperational || !zone || tokens.size === 0) {
+      const rows = db
+        .prepare(
+          `SELECT DISTINCT t.fcm_token
+           FROM push_device_tokens t
+           LEFT JOIN captains c ON c.id = t.user_id
+           WHERE t.is_active = 1 AND t.user_role = 'captain'
+             AND (c.id IS NULL OR c.verification_status = 'approved')`
+        )
+        .all() as Array<{ fcm_token: string }>;
+      for (const r of rows) tokens.add(r.fcm_token);
+    }
   }
 
   if (app === 'customer' || app === 'all') {
@@ -494,10 +581,14 @@ export async function sendPushToTokens(
           data: dataMap,
           android: {
             priority: 'high',
+            ttl: 3600 * 1000,
             notification: {
               channelId,
               sound: 'default',
+              defaultSound: true,
               defaultVibrateTimings: true,
+              visibility: 'public',
+              priority: 'max',
               clickAction: 'FLUTTER_NOTIFICATION_CLICK',
               tag: payload.orderId
                 ? `order_${payload.orderId}`
@@ -536,8 +627,17 @@ export async function sendPushToTokens(
 
       const staleTokens: string[] = [];
       batchResult.responses.forEach((resp, idx) => {
-        if (!resp.success && resp.errorCode && INVALID_TOKEN_CODES.has(resp.errorCode)) {
-          staleTokens.push(chunk[idx]);
+        if (!resp.success) {
+          if (resp.errorCode && INVALID_TOKEN_CODES.has(resp.errorCode)) {
+            staleTokens.push(chunk[idx]);
+          } else if (resp.errorCode || resp.errorMessage) {
+            lastFcmError = {
+              code: String(resp.errorCode || 'fcm_send_failed'),
+              message: String(resp.errorMessage || 'FCM delivery failed'),
+              at: new Date().toISOString(),
+            };
+            console.error(`[FCM] Delivery error (${lastFcmError.code}): ${lastFcmError.message}`);
+          }
         }
       });
 
@@ -552,8 +652,11 @@ export async function sendPushToTokens(
           }
         })();
       }
-    } catch (err) {
-      console.error('[FCM] Batch multicast send error:', err instanceof Error ? err.message : err);
+    } catch (err: any) {
+      const code = String(err?.code || 'fcm_batch_error');
+      const msg = err instanceof Error ? err.message : String(err);
+      lastFcmError = { code, message: msg, at: new Date().toISOString() };
+      console.error(`[FCM] Batch multicast send error (${code}):`, msg);
       failedCount += chunk.length;
     }
   }
@@ -635,6 +738,7 @@ export async function createAndSendNotification(params: {
           targetApp: appTarget,
           recipientId: params.recipientId,
           targetZone: zoneTarget,
+          category,
         });
 
   const audienceCount =
@@ -707,14 +811,18 @@ export async function createAndSendNotification(params: {
 }
 
 /**
- * Fire-and-forget helper for transactional endpoints (orders, trips, KYC)
- * so push delivery never blocks or fails the primary HTTP response.
+ * Queues a system push notification and tracks the in-flight promise so Cloud Run
+ * does not throttle CPU and kill the FCM HTTPS request before delivery completes.
  */
 export function enqueueSystemPushNotification(
   params: Parameters<typeof createAndSendNotification>[0]
 ): void {
-  createAndSendNotification(params).catch((err) => {
+  const task = createAndSendNotification(params).catch((err) => {
     console.error('[FCM] System event push error:', err instanceof Error ? err.message : err);
+  });
+  pendingPushPromises.add(task);
+  task.finally(() => {
+    pendingPushPromises.delete(task);
   });
 }
 

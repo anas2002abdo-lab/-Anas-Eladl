@@ -75,20 +75,12 @@ class CaptainPushChannels {
       ];
 }
 
-const FirebaseOptions otlobhaFirebaseOptions = FirebaseOptions(
-  apiKey: 'AIzaSyC7N1cRgBNqZU0Hfm0UKHJnGXe0cIM8ibU',
-  appId: '1:681956982552:android:b4d38e19e13138642g397e',
-  messagingSenderId: '681956982552',
-  projectId: 'third-accumulator-bgtt6',
-  storageBucket: 'third-accumulator-bgtt6.firebasestorage.app',
-);
-
 /// Top-level background handler invoked by FCM when the captain app is in background or terminated.
 @pragma('vm:entry-point')
 Future<void> otlobhaCaptainBackgroundHandler(RemoteMessage message) async {
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp(options: otlobhaFirebaseOptions);
+      await Firebase.initializeApp();
     }
     if (message.notification == null && message.data.isNotEmpty) {
       final title = message.data['title_ar']?.toString() ?? message.data['title']?.toString() ?? '';
@@ -100,6 +92,13 @@ Future<void> otlobhaCaptainBackgroundHandler(RemoteMessage message) async {
           iOS: DarwinInitializationSettings(),
         );
         await localPlugin.initialize(initSettings);
+        final androidPlugin = localPlugin
+            .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+        if (androidPlugin != null) {
+          for (final channel in CaptainPushChannels.all()) {
+            await androidPlugin.createNotificationChannel(channel);
+          }
+        }
         final channelId = message.data['channel_id']?.toString() ?? CaptainPushChannels.dispatch;
         await localPlugin.show(
           DateTime.now().millisecondsSinceEpoch.remainder(1000000),
@@ -111,6 +110,8 @@ Future<void> otlobhaCaptainBackgroundHandler(RemoteMessage message) async {
               'تنبيهات اطلبها كابتن',
               importance: Importance.max,
               priority: Priority.max,
+              playSound: true,
+              enableVibration: true,
               icon: '@mipmap/ic_launcher',
               styleInformation: BigTextStyleInformation(body),
             ),
@@ -132,8 +133,11 @@ class CaptainPushNotificationService {
   static const String _prefDeviceIdKey = 'otlobha_captain_push_device_id_v1';
   static const String _prefSoundKey = 'otlobha_captain_push_sound_v1';
   static const String _prefVibrationKey = 'otlobha_captain_push_vibration_v1';
+  static const String _prefShownIdsKey = 'otlobha_captain_shown_local_notif_ids_v1';
 
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+  final List<String> _shownNotificationIdsOrder = <String>[];
+  final Set<String> _shownNotificationIds = <String>{};
   bool _initialized = false;
   bool _firebaseReady = false;
   bool _permissionGranted = false;
@@ -188,9 +192,41 @@ class CaptainPushNotificationService {
         await prefs.setString(_prefDeviceIdKey, savedId);
       }
       _deviceId = savedId;
+      final savedShown = prefs.getStringList(_prefShownIdsKey) ?? const <String>[];
+      _shownNotificationIdsOrder
+        ..clear()
+        ..addAll(savedShown);
+      _shownNotificationIds
+        ..clear()
+        ..addAll(savedShown);
     } catch (e) {
       debugPrint('[CaptainPush] Preferences unavailable: $e');
     }
+  }
+
+  Future<void> _markNotificationIdShown(String notifId) async {
+    final cleanId = notifId.trim();
+    if (cleanId.isEmpty) return;
+    if (_shownNotificationIds.add(cleanId)) {
+      _shownNotificationIdsOrder.add(cleanId);
+      while (_shownNotificationIdsOrder.length > 150) {
+        final removed = _shownNotificationIdsOrder.removeAt(0);
+        _shownNotificationIds.remove(removed);
+      }
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setStringList(_prefShownIdsKey, _shownNotificationIdsOrder);
+      } catch (_) {}
+    }
+  }
+
+  int _stableNotificationIntId(String key) {
+    var hash = 0;
+    for (final codeUnit in key.codeUnits) {
+      hash = ((hash * 31) + codeUnit) & 0x7fffffff;
+    }
+    if (hash == 0) return 200001;
+    return hash;
   }
 
   Future<void> setSoundEnabled(bool enabled) async {
@@ -262,7 +298,8 @@ class CaptainPushNotificationService {
   Future<void> _initFirebaseMessaging() async {
     try {
       if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp(options: otlobhaFirebaseOptions);
+        // Initialize from native Android google-services.json / iOS GoogleService-Info.plist
+        await Firebase.initializeApp();
       }
       _firebaseReady = Firebase.apps.isNotEmpty;
     } catch (e) {
@@ -270,7 +307,7 @@ class CaptainPushNotificationService {
         _firebaseReady = true;
       } else {
         _firebaseReady = false;
-        debugPrint('[CaptainPush] Firebase init error: $e');
+        debugPrint('[CaptainPush] Firebase init error (verify google-services.json): $e');
         return;
       }
     }
@@ -349,16 +386,25 @@ class CaptainPushNotificationService {
   Future<void> registerForAuthenticatedCaptain(OtlobhaCaptainApi api) async {
     _boundApi = api;
     await requestPermission();
+    if (!_firebaseReady) {
+      await _initFirebaseMessaging();
+    }
     if (!_firebaseReady || !api.hasTokens) return;
 
-    try {
-      final token = await FirebaseMessaging.instance.getToken();
-      if (token != null && token.isNotEmpty) {
-        _currentToken = token;
-        await _syncTokenToBackend(api, token);
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final token = await FirebaseMessaging.instance.getToken();
+        if (token != null && token.isNotEmpty) {
+          _currentToken = token;
+          await _syncTokenToBackend(api, token);
+          return;
+        }
+      } catch (e) {
+        debugPrint('[CaptainPush] Token fetch/register attempt ${attempt + 1} failed: $e');
       }
-    } catch (e) {
-      debugPrint('[CaptainPush] Token fetch/register failed: $e');
+      if (attempt < 2) {
+        await Future<void>.delayed(Duration(seconds: (attempt + 1) * 2));
+      }
     }
   }
 
@@ -389,13 +435,20 @@ class CaptainPushNotificationService {
     final body = message.notification?.body ?? data['body_ar']?.toString() ?? '';
     if (title.isEmpty && body.isEmpty) return;
 
+    final notifId = (data['notification_id'] ?? data['id'] ?? '').toString().trim();
+    if (notifId.isNotEmpty) {
+      await _markNotificationIdShown(notifId);
+    }
+
     final requestedChannel = data['channel_id']?.toString() ?? CaptainPushChannels.dispatch;
     final useSilent = !_soundEnabled && !_vibrationEnabled;
     final effectiveChannel = useSilent ? CaptainPushChannels.silent : requestedChannel;
 
     try {
       await _localNotifications.show(
-        DateTime.now().millisecondsSinceEpoch.remainder(1000000),
+        notifId.isNotEmpty
+            ? _stableNotificationIntId(notifId)
+            : DateTime.now().millisecondsSinceEpoch.remainder(1000000),
         title,
         body,
         NotificationDetails(
@@ -420,6 +473,77 @@ class CaptainPushNotificationService {
       );
     } catch (e) {
       debugPrint('[CaptainPush] Foreground local show failed: $e');
+    }
+  }
+
+  /// Displays a real Android heads-up alert from a live WebSocket or backend notification record.
+  Future<void> showSystemNotificationFromRecord(Map<String, dynamic> record) async {
+    final id = (record['id'] ?? record['notification_id'] ?? '').toString().trim();
+    if (id.isNotEmpty && _shownNotificationIds.contains(id)) return;
+
+    final title = (record['title_ar'] ?? record['title'] ?? 'اطلبها كابتن').toString().trim();
+    final body = (record['body_ar'] ?? record['body'] ?? '').toString().trim();
+    if (title.isEmpty && body.isEmpty) return;
+
+    if (id.isNotEmpty) {
+      await _markNotificationIdShown(id);
+    }
+
+    final deepLink = (record['deep_link'] ?? 'orders').toString();
+    final requestedChannel = (record['channel_id'] ?? '').toString().isNotEmpty
+        ? record['channel_id'].toString()
+        : (deepLink.contains('chat') ? CaptainPushChannels.chat : CaptainPushChannels.dispatch);
+    final useSilent = !_soundEnabled && !_vibrationEnabled;
+    final effectiveChannel = useSilent ? CaptainPushChannels.silent : requestedChannel;
+
+    try {
+      await _localNotifications.show(
+        id.isNotEmpty
+            ? _stableNotificationIntId(id)
+            : DateTime.now().millisecondsSinceEpoch.remainder(1000000),
+        title,
+        body,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            effectiveChannel,
+            _channelDisplayName(effectiveChannel),
+            importance: Importance.max,
+            priority: Priority.max,
+            playSound: _soundEnabled,
+            enableVibration: _vibrationEnabled,
+            vibrationPattern: _vibrationEnabled ? Int64List.fromList([0, 400, 180, 400]) : null,
+            icon: '@mipmap/ic_launcher',
+            styleInformation: BigTextStyleInformation(body),
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: _soundEnabled,
+          ),
+        ),
+        payload: jsonEncode(<String, dynamic>{
+          'notification_id': id,
+          'deep_link': deepLink,
+          'order_id': record['order_id']?.toString() ?? '',
+          'trip_id': record['trip_id']?.toString() ?? '',
+          'title_ar': title,
+          'body_ar': body,
+        }),
+      );
+    } catch (e) {
+      debugPrint('[CaptainPush] Local notification record show failed: $e');
+    }
+  }
+
+  Future<void> syncUnreadNotificationsToStatusBar(List<dynamic> notifications) async {
+    final unread = notifications
+        .whereType<Map>()
+        .map((n) => Map<String, dynamic>.from(n))
+        .where((n) => n['is_read'] != true && n['is_read'] != 1)
+        .take(5)
+        .toList();
+    for (final item in unread) {
+      await showSystemNotificationFromRecord(item);
     }
   }
 

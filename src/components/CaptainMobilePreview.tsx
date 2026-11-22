@@ -198,6 +198,99 @@ export const CaptainMobilePreview: React.FC<Props> = ({ lang, captains, orders, 
     }
   }, [activeCaptain?.id]);
 
+  const captainTabHistoryRef = React.useRef<CaptainTab[]>([]);
+  const prevCaptainTabRef = React.useRef<CaptainTab>('home');
+  const captainBackGuardActiveRef = React.useRef<boolean>(false);
+
+  useEffect(() => {
+    if (prevCaptainTabRef.current !== tab) {
+      const prev = prevCaptainTabRef.current;
+      if (captainTabHistoryRef.current[captainTabHistoryRef.current.length - 1] !== prev) {
+        captainTabHistoryRef.current = [...captainTabHistoryRef.current.slice(-9), prev];
+      }
+      prevCaptainTabRef.current = tab;
+    }
+  }, [tab]);
+
+  const hasCaptainBackStep = Boolean(
+    activeChatOrderId ||
+      activeChatTripId ||
+      showInbox ||
+      showSettings ||
+      showRegister ||
+      (tab === 'orders' && orderFilter !== 'all_today') ||
+      tab !== 'home'
+  );
+
+  const captainBackActionRef = React.useRef<() => boolean>(() => false);
+  captainBackActionRef.current = () => {
+    if (activeChatOrderId) {
+      setActiveChatOrderId(null);
+      return true;
+    }
+    if (activeChatTripId) {
+      setActiveChatTripId(null);
+      return true;
+    }
+    if (showInbox) {
+      setShowInbox(false);
+      return true;
+    }
+    if (showSettings) {
+      setShowSettings(false);
+      return true;
+    }
+    if (showRegister) {
+      setShowRegister(false);
+      return true;
+    }
+    if (tab === 'orders' && orderFilter !== 'all_today') {
+      setOrderFilter('all_today');
+      return true;
+    }
+    if (captainTabHistoryRef.current.length > 0) {
+      const nextStack = [...captainTabHistoryRef.current];
+      const prevTab = nextStack.pop()!;
+      captainTabHistoryRef.current = nextStack;
+      prevCaptainTabRef.current = prevTab;
+      setTab(prevTab);
+      return true;
+    }
+    if (tab !== 'home') {
+      prevCaptainTabRef.current = 'home';
+      setTab('home');
+      return true;
+    }
+    return false;
+  };
+
+  const [captainBackPopSeq, setCaptainBackPopSeq] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (hasCaptainBackStep && !captainBackGuardActiveRef.current) {
+      try {
+        window.history.pushState({ otlobhaMobileBackGuard: 'captain' }, '');
+        captainBackGuardActiveRef.current = true;
+      } catch {
+        // ignore sandboxed history restrictions
+      }
+    }
+  }, [hasCaptainBackStep, captainBackPopSeq]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onPopState = () => {
+      captainBackGuardActiveRef.current = false;
+      const handled = captainBackActionRef.current();
+      if (handled) {
+        setCaptainBackPopSeq((n) => n + 1);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
   useEffect(() => {
     if (loggedCaptainId && activeCaptain) {
       loadCaptainData(loggedCaptainId).catch(() => {});

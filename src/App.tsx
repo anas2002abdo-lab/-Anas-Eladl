@@ -110,13 +110,7 @@ export default function App() {
   const [firebaseAuthReady, setFirebaseAuthReady] = useState(false);
   const [serverSyncStatus, setServerSyncStatus] = useState<ServerSyncStatus | null>(null);
   const [cloudVaultMeta, setCloudVaultMeta] = useState<CloudVaultMeta | null>(null);
-  const [autoCloudSync, setAutoCloudSync] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('otlobha_auto_cloud_sync') !== '0';
-    } catch {
-      return true;
-    }
-  });
+  const [autoCloudSync, setAutoCloudSync] = useState<boolean>(false);
   const [cloudProgress, setCloudProgress] = useState<CloudSyncProgress>({
     phase: 'idle',
     message: '',
@@ -124,7 +118,6 @@ export default function App() {
     total: 0,
   });
   const cloudSyncBusyRef = useRef(false);
-  const autoRestoredBootRef = useRef<string | null>(null);
 
   const isAr = lang === 'ar';
 
@@ -301,59 +294,11 @@ export default function App() {
     notify('تم فصل ربط الخزنة السحابية');
   };
 
-  // Automatic recovery after any update/restart + background incremental push watchdog
+  // Manual Cloud Backup status fetch (only when admin opens the Cloud Backup tab; no automatic background push/restore)
   useEffect(() => {
-    if (!adminUser || !firebaseAuthReady) return;
-    let cancelled = false;
-
-    const runCheckAndSync = async (isInitial: boolean) => {
-      if (cancelled || cloudSyncBusyRef.current) return;
-      const res = await refreshCloudSyncStatus(firebaseUser);
-      if (cancelled || !res || !firebaseUser || !autoCloudSync) return;
-
-      const { srv, meta } = res;
-      const cloudCoreTotal = meta
-        ? meta.customersCount +
-          meta.ordersCount +
-          meta.tripsCount +
-          meta.deliveriesCount +
-          meta.captainsCount +
-          meta.merchantsCount +
-          meta.categoriesCount +
-          meta.productsCount +
-          meta.walletsCount
-        : 0;
-
-      // Auto-restore immediately if container restarted/updated cleanly while cloud vault has persisted data
-      if (
-        meta &&
-        cloudCoreTotal > 0 &&
-        (srv.is_fresh_empty || (srv.total_core_records === 0 && !srv.restored_from_cloud_at)) &&
-        autoRestoredBootRef.current !== srv.server_boot_at
-      ) {
-        autoRestoredBootRef.current = srv.server_boot_at;
-        await handleCloudRestoreNow(false);
-        return;
-      }
-
-      // Auto-push whenever local DB has real data and either cloud is empty or new mutations occurred
-      const needsInitialBackup = !meta && srv.total_core_records > 0;
-      const needsDeltaBackup = srv.has_unsynced_changes && srv.total_core_records > 0;
-      if ((isInitial && needsInitialBackup) || needsDeltaBackup) {
-        await handleCloudPushNow(true);
-      }
-    };
-
-    void runCheckAndSync(true);
-    const interval = window.setInterval(() => {
-      void runCheckAndSync(false);
-    }, 15000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [adminUser, firebaseUser, firebaseAuthReady, autoCloudSync]);
+    if (!adminUser || !firebaseAuthReady || activeTab !== 'cloud_db') return;
+    void refreshCloudSyncStatus(firebaseUser);
+  }, [adminUser, firebaseUser, firebaseAuthReady, activeTab]);
 
   useEffect(() => {
     if (portalMode === 'admin' && adminUserRef.current && (activeTab === 'captains' || activeTab === 'overview' || activeTab === 'orders')) {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -67,8 +68,11 @@ class CaptainShell extends StatefulWidget {
   State<CaptainShell> createState() => _CaptainShellState();
 }
 
-class _CaptainShellState extends State<CaptainShell> {
+class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver {
   final OtlobhaCaptainApi api = OtlobhaCaptainApi();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final List<int> _tabHistory = <int>[];
+  DateTime? _lastBackPressAt;
   int _index = 0; // 0: الرئيسية | 1: أوردرات اليوم | 2: نقطة البيع POS | 3: التسوية | 4: الملف الشخصي
   String _ordersInitialFilter = 'all';
   String? _activeCaptainId;
@@ -87,9 +91,71 @@ class _CaptainShellState extends State<CaptainShell> {
 
   static const String _prefTabIndex = 'otlobha_cap_tab_index';
 
+  void _switchTab(int nextIndex, {String? ordersFilter, bool recordHistory = true}) {
+    final prevIndex = _index;
+    setState(() {
+      if (recordHistory && prevIndex != nextIndex) {
+        if (_tabHistory.isEmpty || _tabHistory.last != prevIndex) {
+          _tabHistory.add(prevIndex);
+          if (_tabHistory.length > 20) _tabHistory.removeAt(0);
+        }
+      }
+      if (ordersFilter != null) {
+        _ordersInitialFilter = ordersFilter;
+      }
+      _index = nextIndex;
+    });
+    _persistTabIndex(nextIndex);
+  }
+
+  void _handleSystemBack() {
+    if (_scaffoldKey.currentState?.isDrawerOpen == true) {
+      Navigator.of(context).pop();
+      return;
+    }
+
+    if (_index == 1 && _ordersInitialFilter != 'all') {
+      setState(() => _ordersInitialFilter = 'all');
+      return;
+    }
+
+    while (_tabHistory.isNotEmpty) {
+      final prev = _tabHistory.removeLast();
+      if (prev != _index) {
+        setState(() => _index = prev);
+        _persistTabIndex(prev);
+        return;
+      }
+    }
+
+    if (_index != 0) {
+      setState(() => _index = 0);
+      _persistTabIndex(0);
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastBackPressAt != null && now.difference(_lastBackPressAt!) <= const Duration(seconds: 2)) {
+      SystemNavigator.pop();
+      return;
+    }
+    _lastBackPressAt = now;
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('اضغط زر الرجوع مرة أخرى للخروج من التطبيق'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     CaptainPushNotificationService.instance.initialize(
       onNotificationTap: _handlePushNotificationTap,
       onForegroundNotification: () {
@@ -99,6 +165,16 @@ class _CaptainShellState extends State<CaptainShell> {
     _restorePersistedSession();
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) => _silentSync());
     _gpsTimer = Timer.periodic(const Duration(seconds: 20), (_) => _pushCaptainGps());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _activeCaptainId != null && api.hasTokens) {
+      _silentSync();
+      if (CaptainPushNotificationService.instance.currentToken == null) {
+        CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+      }
+    }
   }
 
   Future<void> _persistTabIndex(int idx) async {
@@ -240,6 +316,7 @@ class _CaptainShellState extends State<CaptainShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     _gpsTimer?.cancel();
     _ridesSub?.cancel();
@@ -260,12 +337,21 @@ class _CaptainShellState extends State<CaptainShell> {
         try {
           final payload = jsonDecode(raw.toString()) as Map<String, dynamic>;
           final type = payload['type']?.toString();
+          if (type == 'notification:new' && payload['notification'] is Map) {
+            final notifMap = Map<String, dynamic>.from(payload['notification'] as Map);
+            CaptainPushNotificationService.instance.showSystemNotificationFromRecord(notifMap);
+            _silentSync();
+            return;
+          }
           if (type == 'trip:created' ||
               type == 'trip:accepted' ||
               type == 'trip:status' ||
               type == 'trip:fare_updated' ||
               type == 'trip:completed' ||
               type == 'trip:cancelled' ||
+              type == 'order:created' ||
+              type == 'order:status' ||
+              type == 'order:assigned' ||
               type == 'rating:submitted') {
             _silentSync();
           }
@@ -315,6 +401,7 @@ class _CaptainShellState extends State<CaptainShell> {
         if (prevApproved != nextApproved) {
           _connectRidesWs();
         }
+        CaptainPushNotificationService.instance.syncUnreadNotificationsToStatusBar(notifs);
       }
     } catch (_) {}
   }
@@ -571,10 +658,17 @@ class _CaptainShellState extends State<CaptainShell> {
                 o['status'] != 'cancelled')
             .length;
 
-    return Directionality(
-      textDirection: TextDirection.rtl,
-      child: Scaffold(
-        appBar: AppBar(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleSystemBack();
+      },
+      child: Directionality(
+        textDirection: TextDirection.rtl,
+        child: Scaffold(
+          key: _scaffoldKey,
+          appBar: AppBar(
           flexibleSpace: Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -640,11 +734,8 @@ class _CaptainShellState extends State<CaptainShell> {
                         parcels: _parcels,
                         trips: _trips,
                         onRefresh: _loadAll,
-                        onOpenOrdersTab: (filter) => setState(() {
-                          _ordersInitialFilter = filter;
-                          _index = 1;
-                        }),
-                        onOpenSettlementTab: () => setState(() => _index = 3),
+                        onOpenOrdersTab: (filter) => _switchTab(1, ordersFilter: filter),
+                        onOpenSettlementTab: () => _switchTab(3),
                       ),
                       CaptainOrdersScreen(
                         api: api,
@@ -681,10 +772,7 @@ class _CaptainShellState extends State<CaptainShell> {
                   ),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _index,
-          onDestinationSelected: (i) {
-            setState(() => _index = i);
-            _persistTabIndex(i);
-          },
+          onDestinationSelected: (i) => _switchTab(i),
           destinations: [
             NavigationDestination(
               icon: Badge(
@@ -721,6 +809,7 @@ class _CaptainShellState extends State<CaptainShell> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

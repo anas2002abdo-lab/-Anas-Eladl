@@ -33,6 +33,23 @@ export function isProductsFtsReady(): boolean {
   return productsFtsEnabled;
 }
 
+export function rebuildProductsFtsIndex(): void {
+  if (!productsFtsEnabled) return;
+  try {
+    const rebuildTx = db.transaction(() => {
+      db.exec('DELETE FROM products_fts');
+      db.exec(`
+        INSERT INTO products_fts(product_id, name_ar, name_en, product_code, description)
+        SELECT id, COALESCE(name_ar, ''), COALESCE(name_en, ''), COALESCE(product_code, ''), COALESCE(description, '')
+        FROM products
+      `);
+    });
+    rebuildTx();
+  } catch (err) {
+    console.warn('[DB] FTS5 rebuild warning:', err instanceof Error ? err.message : err);
+  }
+}
+
 export function buildFtsMatchQuery(rawQuery: string): string | null {
   const cleaned = rawQuery
     .trim()
@@ -222,7 +239,7 @@ export function initDatabase(): void {
       order_number TEXT UNIQUE NOT NULL,
       customer_name TEXT NOT NULL,
       customer_phone TEXT NOT NULL,
-      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      merchant_id TEXT,
       merchant_name TEXT NOT NULL,
       merchant_type TEXT NOT NULL,
       captain_id TEXT REFERENCES captains(id),
@@ -637,6 +654,79 @@ export function initDatabase(): void {
   if (!orderCols.some((c) => c.name === 'captain_picked_up_at')) {
     db.exec('ALTER TABLE orders ADD COLUMN captain_picked_up_at TEXT');
   }
+
+  // Non-destructive one-time migration: remove restrictive FK on orders.merchant_id so historical orders survive permanent merchant deletion
+  const ordersTableDdl = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orders'")
+    .get() as { sql?: string } | undefined;
+  if (ordersTableDdl?.sql && /REFERENCES\s+merchants\s*\(\s*id\s*\)/i.test(ordersTableDdl.sql)) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      const migrateOrdersTx = db.transaction(() => {
+        db.exec(`
+          CREATE TABLE orders_migrated (
+            id TEXT PRIMARY KEY,
+            order_number TEXT UNIQUE NOT NULL,
+            customer_name TEXT NOT NULL,
+            customer_phone TEXT NOT NULL,
+            merchant_id TEXT,
+            merchant_name TEXT NOT NULL,
+            merchant_type TEXT NOT NULL,
+            captain_id TEXT REFERENCES captains(id),
+            captain_name TEXT,
+            zone_name TEXT NOT NULL,
+            address_landmark TEXT NOT NULL,
+            order_channel TEXT NOT NULL,
+            free_order_text TEXT,
+            is_express INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            subtotal REAL NOT NULL DEFAULT 0,
+            delivery_fee REAL NOT NULL DEFAULT 0,
+            discount_amount REAL NOT NULL DEFAULT 0,
+            total_amount REAL NOT NULL DEFAULT 0,
+            payment_method TEXT NOT NULL DEFAULT 'cash',
+            prescription_status TEXT,
+            prescription_image_url TEXT,
+            delivery_proof_image_url TEXT,
+            pharmacist_notes TEXT,
+            substitution_note TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            customer_lat REAL,
+            customer_lng REAL,
+            customer_id TEXT,
+            items_json TEXT NOT NULL DEFAULT '[]',
+            rejection_reason TEXT,
+            ready_at TEXT,
+            order_group_id TEXT,
+            order_group_number TEXT,
+            captain_picked_up_at TEXT
+          );
+          INSERT INTO orders_migrated (
+            id, order_number, customer_name, customer_phone, merchant_id, merchant_name, merchant_type,
+            captain_id, captain_name, zone_name, address_landmark, order_channel, free_order_text,
+            is_express, status, subtotal, delivery_fee, discount_amount, total_amount, payment_method,
+            prescription_status, prescription_image_url, delivery_proof_image_url, pharmacist_notes,
+            substitution_note, created_at, customer_lat, customer_lng, customer_id, items_json,
+            rejection_reason, ready_at, order_group_id, order_group_number, captain_picked_up_at
+          )
+          SELECT
+            id, order_number, customer_name, customer_phone, merchant_id, merchant_name, merchant_type,
+            captain_id, captain_name, zone_name, address_landmark, order_channel, free_order_text,
+            is_express, status, subtotal, delivery_fee, discount_amount, total_amount, payment_method,
+            prescription_status, prescription_image_url, delivery_proof_image_url, pharmacist_notes,
+            substitution_note, created_at, customer_lat, customer_lng, customer_id, items_json,
+            rejection_reason, ready_at, order_group_id, order_group_number, captain_picked_up_at
+          FROM orders;
+          DROP TABLE orders;
+          ALTER TABLE orders_migrated RENAME TO orders;
+        `);
+      });
+      migrateOrdersTx();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+  }
+
   db.exec('CREATE INDEX IF NOT EXISTS idx_orders_group_id ON orders(order_group_id);');
 
   db.exec(`

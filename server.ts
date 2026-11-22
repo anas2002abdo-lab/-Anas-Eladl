@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+import './src/server/loadEnv.ts';
 import express from 'express';
 import crypto from 'crypto';
 import http from 'http';
@@ -16,6 +16,7 @@ import {
   initDatabase,
   isProductsFtsReady,
   postDoubleEntryLedger,
+  rebuildProductsFtsIndex,
   recordAuditLog,
   sha256Otp,
   uid,
@@ -23,6 +24,14 @@ import {
 } from './src/server/db.ts';
 import { startSqlitePersistSync, type SqlitePersistController } from './src/server/sqlitePersist.ts';
 import { registerCloudSyncRoutes } from './src/server/cloudSyncRoutes.ts';
+import {
+  CloudSqlUnavailableError,
+  ensureHydratedFromCloudSql,
+  flushCloudSqlBeforeShutdown,
+  syncChangesToCloudSql,
+} from './src/server/cloudSqlPersistence.ts';
+import { isCloudSqlConfigured } from './src/db/index.ts';
+import { getOrCreateUser } from './src/db/users.ts';
 import {
   registerMasterCatalogRoutes,
   extractSize,
@@ -58,9 +67,11 @@ import {
 } from './src/server/auth.ts';
 import { calculateFinancialModel, calculateServicePrice, haversineKm, runSmartDispatch } from './src/server/engines.ts';
 import {
+  awaitPendingPushNotifications,
   createAndSendNotification,
   enqueueSystemPushNotification,
   getFcmStatus,
+  probeFcmAuth,
   registerDeviceToken,
   setNotificationCreatedListener,
   unregisterDeviceToken,
@@ -70,27 +81,57 @@ import {
 import { normalizeEmail } from './src/shared/email.ts';
 import type { FinancialModelInput } from './src/shared/types.ts';
 
-dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 validateAuthConfiguration();
 initDatabase();
 ensureBootstrapSuperAdmin();
-try {
-  const recon = reconcileAllExistingProductsToMasterCatalog();
-  if (recon.reconciled > 0 || recon.new_masters > 0) {
-    console.log(
-      `[MasterCatalog] Startup reconciliation complete: total=${recon.total}, reconciled=${recon.reconciled}, new_masters=${recon.new_masters}, linked_existing=${recon.linked_existing}`
-    );
+if (!isCloudSqlConfigured()) {
+  try {
+    const recon = reconcileAllExistingProductsToMasterCatalog();
+    if (recon.reconciled > 0 || recon.new_masters > 0) {
+      console.log(
+        `[MasterCatalog] Startup reconciliation complete: total=${recon.total}, reconciled=${recon.reconciled}, new_masters=${recon.new_masters}, linked_existing=${recon.linked_existing}`
+      );
+    }
+  } catch (err) {
+    console.error('[MasterCatalog] Startup reconciliation error:', err);
   }
-} catch (err) {
-  console.error('[MasterCatalog] Startup reconciliation error:', err);
 }
 
 const app = express();
 app.set('trust proxy', 1);
 
 let sqlitePersistRef: SqlitePersistController | null = null;
-app.use('/api', (req, res, next) => {
-  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') {
+let postHydrationReconciled = false;
+
+app.use('/api', async (req, res, next) => {
+  // 1. Lazy Cloud SQL hydration gate (runs once on first real API request; fail-safe 503 if unreachable)
+  if (req.path !== '/health' && isCloudSqlConfigured()) {
+    try {
+      await ensureHydratedFromCloudSql(db, rebuildProductsFtsIndex);
+      if (!postHydrationReconciled) {
+        postHydrationReconciled = true;
+        try {
+          const recon = reconcileAllExistingProductsToMasterCatalog();
+          if (recon.reconciled > 0 || recon.new_masters > 0) {
+            await syncChangesToCloudSql(db, 'startup:master_catalog_reconcile');
+          }
+        } catch (reconErr) {
+          console.error('[MasterCatalog] Post-hydration reconciliation error:', reconErr);
+        }
+      }
+    } catch (err) {
+      const msg =
+        err instanceof CloudSqlUnavailableError
+          ? err.message
+          : 'الخدمة في وضع الصيانة المؤقتة لحماية البيانات، يرجى المحاولة بعد لحظات.';
+      return res.status(503).json({ error: msg });
+    }
+  }
+
+  const isMutating =
+    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE';
+
+  if (isMutating) {
     res.on('finish', () => {
       if (res.statusCode < 400) {
         sqlitePersistRef?.scheduleFlush(`api:${req.method}`, 1200);
@@ -98,35 +139,96 @@ app.use('/api', (req, res, next) => {
     });
   }
 
-  // Zero-dependency async Gzip compression for /api JSON payloads >= 1 KB (cuts mobile transfer size by ~85%)
+  // 2. Awaited Cloud SQL write-through + optional async Gzip compression for /api JSON payloads >= 1 KB
   const acceptEnc = String(req.headers['accept-encoding'] || '').toLowerCase();
-  if (acceptEnc.includes('gzip')) {
-    const origJson = res.json.bind(res);
-    res.json = ((body: unknown) => {
-      if (res.headersSent) return res;
-      let rawStr: string;
-      try {
-        rawStr = JSON.stringify(body);
-      } catch {
-        return origJson(body);
+  const wantsGzip = acceptEnc.includes('gzip');
+  const origJson = res.json.bind(res);
+  const origSend = res.send.bind(res);
+  let cloudSqlFlushStarted = false;
+
+  const sendJsonPayload = (body: unknown) => {
+    if (res.headersSent) return;
+    if (!wantsGzip) {
+      origJson(body);
+      return;
+    }
+    let rawStr: string;
+    try {
+      rawStr = JSON.stringify(body);
+    } catch {
+      origJson(body);
+      return;
+    }
+    if (!rawStr || rawStr.length < 1024) {
+      origJson(body);
+      return;
+    }
+    res.setHeader('Vary', 'Accept-Encoding');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    zlib.gzip(Buffer.from(rawStr, 'utf8'), { level: 6 }, (err, compressed) => {
+      if (res.headersSent) return;
+      if (err) {
+        origSend(rawStr);
+        return;
       }
-      if (!rawStr || rawStr.length < 1024) {
-        return origJson(body);
-      }
-      res.setHeader('Vary', 'Accept-Encoding');
-      res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      zlib.gzip(Buffer.from(rawStr, 'utf8'), { level: 6 }, (err, compressed) => {
-        if (res.headersSent) return;
-        if (err) {
-          res.send(rawStr);
-          return;
-        }
-        res.setHeader('Content-Encoding', 'gzip');
-        res.setHeader('Content-Length', String(compressed.length));
-        res.end(compressed);
-      });
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Content-Length', String(compressed.length));
+      res.end(compressed);
+    });
+  };
+
+  res.json = ((body: unknown) => {
+    if (res.headersSent) return res;
+    if (isMutating && res.statusCode < 400 && !cloudSqlFlushStarted) {
+      cloudSqlFlushStarted = true;
+      const persistTask = isCloudSqlConfigured()
+        ? syncChangesToCloudSql(db, `api:${req.method}:${req.path}`)
+        : Promise.resolve();
+      persistTask
+        .then(() => awaitPendingPushNotifications(3500).catch(() => {}))
+        .then(() => {
+          sendJsonPayload(body);
+        })
+        .catch((err) => {
+          if (res.headersSent) return;
+          const msg =
+            err instanceof CloudSqlUnavailableError
+              ? err.message
+              : 'تعذر حفظ التغييرات في قاعدة البيانات الرئيسية مؤقتًا، يرجى المحاولة مرة أخرى.';
+          res.status(503);
+          origJson({ error: msg });
+        });
       return res;
-    }) as typeof res.json;
+    }
+    sendJsonPayload(body);
+    return res;
+  }) as typeof res.json;
+
+  if (isMutating) {
+    res.send = ((body?: unknown) => {
+      if (res.headersSent || cloudSqlFlushStarted || res.statusCode >= 400) {
+        return origSend(body);
+      }
+      cloudSqlFlushStarted = true;
+      const persistTask = isCloudSqlConfigured()
+        ? syncChangesToCloudSql(db, `api:${req.method}:${req.path}`)
+        : Promise.resolve();
+      persistTask
+        .then(() => awaitPendingPushNotifications(3500).catch(() => {}))
+        .then(() => {
+          if (!res.headersSent) origSend(body);
+        })
+        .catch((err) => {
+          if (res.headersSent) return;
+          const msg =
+            err instanceof CloudSqlUnavailableError
+              ? err.message
+              : 'تعذر حفظ التغييرات في قاعدة البيانات الرئيسية مؤقتًا، يرجى المحاولة مرة أخرى.';
+          res.status(503);
+          origJson({ error: msg });
+        });
+      return res;
+    }) as typeof res.send;
   }
 
   next();
@@ -1981,9 +2083,24 @@ app.delete('/api/merchants/:id', requireAuth, requirePermission('merchants.verif
     .all(id, 'merchant') as Array<{ id: string }>;
 
   const delTx = db.transaction(() => {
-    db.prepare('DELETE FROM order_stores WHERE merchant_id = ?').run(id);
-    db.prepare('DELETE FROM order_chat_messages WHERE order_id IN (SELECT id FROM orders WHERE merchant_id = ?)').run(id);
-    db.prepare('DELETE FROM orders WHERE merchant_id = ?').run(id);
+    // Preserve historical orders, order_stores, order_chat_messages, ledger_entries, and shared master_products
+    db.prepare('DELETE FROM product_deals WHERE merchant_id = ?').run(id);
+    db.prepare('DELETE FROM product_matching_requests WHERE merchant_id = ?').run(id);
+    db.prepare(
+      'UPDATE product_matching_requests SET category_id = NULL WHERE category_id IN (SELECT id FROM categories WHERE merchant_id = ?)'
+    ).run(id);
+    db.prepare(
+      'UPDATE master_products SET category_id = NULL WHERE category_id IN (SELECT id FROM categories WHERE merchant_id = ?)'
+    ).run(id);
+    db.prepare(
+      'UPDATE storefront_banners SET target_merchant_id = NULL WHERE target_merchant_id = ?'
+    ).run(id);
+    db.prepare(
+      'UPDATE storefront_banners SET target_category_id = NULL WHERE target_category_id IN (SELECT id FROM categories WHERE merchant_id = ?)'
+    ).run(id);
+    db.prepare(
+      'UPDATE categories SET parent_id = NULL WHERE parent_id IN (SELECT id FROM categories WHERE merchant_id = ?)'
+    ).run(id);
     db.prepare(
       'DELETE FROM products WHERE merchant_id = ? OR category_id IN (SELECT id FROM categories WHERE merchant_id = ?)'
     ).run(id, id);
@@ -2001,7 +2118,7 @@ app.delete('/api/merchants/:id', requireAuth, requirePermission('merchants.verif
       action: 'MERCHANT_DELETED',
       entity_type: 'merchants',
       entity_id: id,
-      details: `حذف المتجر / التاجر نهائيًا من المنصة: ${bizName} (${id})`,
+      details: `حذف المتجر / التاجر نهائيًا مع الإبقاء على سجلات الطلبات السابقة والكتالوج المركزي: ${bizName} (${id})`,
     });
   });
 
@@ -4313,16 +4430,40 @@ app.get('/api/products', (req, res) => {
     };
   };
 
+  const shouldGroupByMaster =
+    !isAdminAuth(auth) &&
+    auth?.role !== 'merchant' &&
+    (!merchantId || merchantId === 'all') &&
+    req.query.ungrouped !== '1' &&
+    req.query.ungrouped !== 'true';
+
+  const selectColumnsSql = `
+    SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name,
+           COALESCE(NULLIF(c.full_path_ar, ''), c.name_ar || ';') as category_path,
+           c.is_offers_section as category_is_offers
+  `;
+
+  const buildSelectQuery = (fromSql: string) =>
+    shouldGroupByMaster
+      ? `SELECT * FROM (
+           ${selectColumnsSql},
+           ROW_NUMBER() OVER (
+             PARTITION BY COALESCE(p.master_product_id, p.id)
+             ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC, p.updated_at DESC
+           ) AS rn
+           ${fromSql}
+         ) sub
+         WHERE sub.rn = 1
+         ORDER BY sub.is_offer DESC, sub.updated_at DESC
+         LIMIT ? OFFSET ?`
+      : `${selectColumnsSql}
+         ${fromSql}
+         ORDER BY p.is_offer DESC, p.updated_at DESC
+         LIMIT ? OFFSET ?`;
+
   let rows: Array<Record<string, unknown>> = [];
   try {
-    rows = db
-      .prepare(
-        `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, COALESCE(NULLIF(c.full_path_ar, ''), c.name_ar || ';') as category_path, c.is_offers_section as category_is_offers
-         ${baseFromSql}
-         ORDER BY p.is_offer DESC, p.updated_at DESC
-         LIMIT ? OFFSET ?`
-      )
-      .all(...params, limit, offset) as Array<Record<string, unknown>>;
+    rows = db.prepare(buildSelectQuery(baseFromSql)).all(...params, limit, offset) as Array<Record<string, unknown>>;
   } catch (queryErr) {
     if (usedFts && rawQuery) {
       // Graceful fallback to LIKE if an unusual punctuation query causes an FTS5 syntax error
@@ -4332,31 +4473,63 @@ app.get('/api/products', (req, res) => {
       const like = `%${rawQuery}%`;
       clauses.push('(p.name_ar LIKE ? OR p.name_en LIKE ? OR p.product_code LIKE ? OR p.description LIKE ? OR c.name_ar LIKE ?)');
       params.push(like, like, like, like, like);
-      const fallbackWhere = `WHERE ${clauses.join(' AND ')}`;
-      rows = db
-        .prepare(
-          `SELECT p.*, m.business_name_ar as merchant_name, c.name_ar as category_name, c.is_offers_section as category_is_offers
-           FROM products p
-           JOIN merchants m ON m.id = p.merchant_id
-           JOIN categories c ON c.id = p.category_id
-           ${fallbackWhere}
-           ORDER BY p.is_offer DESC, p.updated_at DESC
-           LIMIT ? OFFSET ?`
-        )
-        .all(...params, limit, offset) as Array<Record<string, unknown>>;
+      const fallbackFrom = `
+        FROM products p
+        JOIN merchants m ON m.id = p.merchant_id
+        JOIN categories c ON c.id = p.category_id
+        WHERE ${clauses.join(' AND ')}
+      `;
+      rows = db.prepare(buildSelectQuery(fallbackFrom)).all(...params, limit, offset) as Array<Record<string, unknown>>;
     } else {
       throw queryErr;
     }
   }
 
-  const mapped = rows.map(mapProductRow);
+  // Enrich grouped customer products with multi-store count & lowest price
+  const storeStatsByMaster = new Map<string, { stores_count: number; lowest_store_price: number }>();
+  if (shouldGroupByMaster && rows.length > 0) {
+    const mIds = Array.from(new Set(rows.map((r) => String(r.master_product_id || '')).filter(Boolean)));
+    if (mIds.length > 0) {
+      const ph = mIds.map(() => '?').join(',');
+      const agg = db
+        .prepare(
+          `SELECT master_product_id, COUNT(*) AS stores_count, MIN(COALESCE(sale_price, base_price)) AS lowest_price
+           FROM products
+           WHERE master_product_id IN (${ph}) AND is_available = 1
+           GROUP BY master_product_id`
+        )
+        .all(...mIds) as Array<{ master_product_id: string; stores_count: number; lowest_price: number }>;
+      for (const a of agg) {
+        storeStatsByMaster.set(a.master_product_id, {
+          stores_count: Number(a.stores_count || 1),
+          lowest_store_price: Number(a.lowest_price || 0),
+        });
+      }
+    }
+  }
+
+  const mapped = rows.map((r) => {
+    const base = mapProductRow(r);
+    if (shouldGroupByMaster && r.master_product_id) {
+      const stats = storeStatsByMaster.get(String(r.master_product_id));
+      if (stats) {
+        return {
+          ...base,
+          stores_count: stats.stores_count,
+          lowest_store_price: stats.lowest_store_price,
+        };
+      }
+    }
+    return base;
+  });
 
   if (paginated) {
     const finalWhere = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const countExpr = shouldGroupByMaster ? 'COUNT(DISTINCT COALESCE(p.master_product_id, p.id))' : 'COUNT(*)';
     const total = (
       db
         .prepare(
-          `SELECT COUNT(*) as c
+          `SELECT ${countExpr} as c
            FROM products p
            JOIN merchants m ON m.id = p.merchant_id
            JOIN categories c ON c.id = p.category_id
@@ -4630,12 +4803,14 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
   const insertProdStmt = db.prepare(`
     INSERT INTO products (
       id, product_code, merchant_id, category_id, master_product_id, name_ar, name_en, description, image_url,
+      size_label, size_value, size_unit,
       base_price, sale_price, stock_quantity, low_stock_threshold, requires_prescription, addons_text, is_offer, is_available
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, NULL, 25, 5, 0, '', ?, 1)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, NULL, 25, 5, 0, '', ?, 1)
   `);
   const updateProdStmt = db.prepare(`
     UPDATE products SET
-      category_id = ?, name_ar = ?, name_en = ?, base_price = ?,
+      category_id = ?, master_product_id = ?, name_ar = ?, name_en = ?,
+      size_label = ?, size_value = ?, size_unit = ?, base_price = ?,
       image_url = CASE WHEN TRIM(?) != '' THEN ? ELSE image_url END,
       is_offer = CASE WHEN ? = 1 THEN 1 ELSE is_offer END,
       updated_at = datetime('now')
@@ -4673,10 +4848,18 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
         }
       }
 
+      const parsedSize = extractSize({ name_ar: nameAr, name_en: nameAr });
+      const sizeLabelVal = parsedSize?.displayLabel || '';
+      const sizeValueVal = parsedSize?.canonicalValue ?? null;
+      const sizeUnitVal = parsedSize?.canonicalUnit ?? '';
+
       const masterLink = ensureMasterProductForListing({
         name_ar: nameAr,
         name_en: nameAr,
         category_id: categoryId,
+        size_value: sizeValueVal,
+        size_unit: sizeUnitVal,
+        size_label: sizeLabelVal,
         image_url: rawImage,
         merchant_id: effectiveMerchantId,
       });
@@ -4691,14 +4874,42 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
             if (errors.length < 100) errors.push(`صف ${rowNum} (${rawCode}): كود المنتج مملوك لمتجر آخر ولا يمكن تعديله`);
             return;
           }
-          updateProdStmt.run(categoryId, nameAr, nameAr, parsedPrice, rawImage, rawImage, categoryIsOffers, existingProd.id, effectiveMerchantId);
+          updateProdStmt.run(
+            categoryId,
+            finalMasterId,
+            nameAr,
+            nameAr,
+            sizeLabelVal,
+            sizeValueVal,
+            sizeUnitVal,
+            parsedPrice,
+            rawImage,
+            rawImage,
+            categoryIsOffers,
+            existingProd.id,
+            effectiveMerchantId
+          );
           updated += 1;
           return;
         }
         const newProdId = uid('prd');
         existingCodes.add(codeKey);
         prodCodeMap.set(codeKey, { id: newProdId, merchant_id: effectiveMerchantId });
-        insertProdStmt.run(newProdId, rawCode, effectiveMerchantId, categoryId, finalMasterId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
+        insertProdStmt.run(
+          newProdId,
+          rawCode,
+          effectiveMerchantId,
+          categoryId,
+          finalMasterId,
+          nameAr,
+          nameAr,
+          rawImage,
+          sizeLabelVal,
+          sizeValueVal,
+          sizeUnitVal,
+          parsedPrice,
+          categoryIsOffers
+        );
         created += 1;
         return;
       }
@@ -4706,7 +4917,21 @@ app.post('/api/products/import-excel', requireAuth, requireRole('merchant', ...A
       const generatedCode = nextGeneratedCode();
       const newProdId = uid('prd');
       prodCodeMap.set(generatedCode.toUpperCase(), { id: newProdId, merchant_id: effectiveMerchantId });
-      insertProdStmt.run(newProdId, generatedCode, effectiveMerchantId, categoryId, finalMasterId, nameAr, nameAr, rawImage, parsedPrice, categoryIsOffers);
+      insertProdStmt.run(
+        newProdId,
+        generatedCode,
+        effectiveMerchantId,
+        categoryId,
+        finalMasterId,
+        nameAr,
+        nameAr,
+        rawImage,
+        sizeLabelVal,
+        sizeValueVal,
+        sizeUnitVal,
+        parsedPrice,
+        categoryIsOffers
+      );
       created += 1;
     });
   });
@@ -6905,8 +7130,13 @@ app.get('/api/admin/customers/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES)
 });
 
 // 12. Push Notifications & Broadcast Campaigns (Customer App, Captain App, Merchant Portal)
-app.get('/api/notifications/fcm-status', requireAuth, requireRole(...ALL_ADMIN_ROLES), (_req, res) => {
-  res.json(getFcmStatus());
+app.get('/api/notifications/fcm-status', requireAuth, requireRole(...ALL_ADMIN_ROLES), async (req, res) => {
+  const status = getFcmStatus();
+  if (req.query.probe === '1' || req.query.probe === 'true') {
+    const probe = await probeFcmAuth();
+    return res.json({ ...status, auth_probe: probe });
+  }
+  res.json(status);
 });
 
 app.post('/api/mobile/push/register', requireAuth, requireRole('customer', 'captain'), (req, res) => {
@@ -8758,6 +8988,9 @@ const handleCustomerGoogleAuth = async (req: express.Request, res: express.Respo
   }
 
   const normalizedEmail = normalizeEmail(identity.email) || identity.email.toLowerCase();
+  if (isCloudSqlConfigured() && identity.uid) {
+    await getOrCreateUser(identity.uid, normalizedEmail).catch(() => {});
+  }
   let customerRow = db
     .prepare('SELECT * FROM customers WHERE google_uid = ? OR LOWER(email) = LOWER(?) LIMIT 1')
     .get(identity.uid, normalizedEmail) as Record<string, unknown> | undefined;
@@ -12629,6 +12862,11 @@ export class ErrorOverlay extends HTMLElement {}
       });
     } catch {
       // ignore close errors
+    }
+    try {
+      await flushCloudSqlBeforeShutdown(db);
+    } catch {
+      // already logged inside flushCloudSqlBeforeShutdown
     }
     try {
       await sqlitePersist.flushNow(`shutdown:${signal}`, { force: true, createRollingBackup: false });

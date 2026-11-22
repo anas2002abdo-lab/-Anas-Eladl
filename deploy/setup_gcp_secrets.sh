@@ -34,7 +34,8 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   storage.googleapis.com \
-  secretmanager.googleapis.com
+  secretmanager.googleapis.com \
+  fcm.googleapis.com
 
 echo "==> 2/4 Creating dedicated least-privilege runtime Service Account..."
 if ! gcloud iam service-accounts describe "$RUNTIME_SA_EMAIL" >/dev/null 2>&1; then
@@ -72,6 +73,11 @@ rm -f "$LIFECYCLE_JSON"
 gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
   --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
   --role="roles/storage.objectAdmin" >/dev/null
+
+# Allow the Cloud Run runtime SA to send Firebase Cloud Messaging notifications
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role="roles/firebasecloudmessaging.admin" >/dev/null 2>&1 || true
 
 echo "==> 4/4 Creating/Updating secrets in Google Secret Manager..."
 
@@ -130,6 +136,17 @@ upsert_secret "otlobha-super-admin-password" "$SUPER_ADMIN_PASSWORD"
 
 if [ -n "${GEMINI_API_KEY:-}" ]; then
   upsert_secret "otlobha-gemini-api-key" "$GEMINI_API_KEY"
+fi
+
+if [ -n "${FIREBASE_SA_JSON_PATH:-}" ] && [ -f "${FIREBASE_SA_JSON_PATH}" ]; then
+  if ! gcloud secrets describe "otlobha-firebase-sa-json" >/dev/null 2>&1; then
+    gcloud secrets create "otlobha-firebase-sa-json" --replication-policy="automatic" >/dev/null
+  fi
+  gcloud secrets versions add "otlobha-firebase-sa-json" --data-file="${FIREBASE_SA_JSON_PATH}" >/dev/null
+  gcloud secrets add-iam-policy-binding "otlobha-firebase-sa-json" \
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+  echo "   [OK] Stored secret 'otlobha-firebase-sa-json' and granted accessor role to runtime SA."
 fi
 
 echo ""

@@ -1,6 +1,7 @@
 import type { Express, NextFunction, Request, Response } from 'express';
-import { db, isProductsFtsReady } from './db.ts';
+import { db, rebuildProductsFtsIndex } from './db.ts';
 import { requireStrictAdminAuth } from './auth.ts';
+import { reconcileAllExistingProductsToMasterCatalog } from './masterCatalog.ts';
 
 const CORE_TABLES = [
   'customers',
@@ -75,25 +76,6 @@ function getAllCounts(): Record<string, number> {
   return counts;
 }
 
-function rebuildProductsFtsIndex(): void {
-  if (!isProductsFtsReady()) return;
-  try {
-    db.exec(`
-      DELETE FROM products_fts;
-      INSERT INTO products_fts(rowid, name_ar, name_en, description, addons_text, merchant_name)
-      SELECT p.rowid,
-             COALESCE(p.name_ar, ''),
-             COALESCE(p.name_en, ''),
-             COALESCE(p.description, ''),
-             COALESCE(p.addons_text, ''),
-             COALESCE(m.business_name_ar, '')
-      FROM products p
-      LEFT JOIN merchants m ON m.id = p.merchant_id;
-    `);
-  } catch (err) {
-    console.warn('[CloudSync] FTS5 rebuild warning:', err instanceof Error ? err.message : err);
-  }
-}
 
 function upsertRowsIntoTable(tableName: string, rows: Array<Record<string, unknown>>): number {
   if (!ALLOWED_RESTORE_TABLES.has(tableName) || !Array.isArray(rows) || rows.length === 0) {
@@ -316,8 +298,14 @@ export function registerCloudSyncRoutes(app: Express): void {
       db.pragma('foreign_keys = ON');
     }
 
+    let catalogReconcile: ReturnType<typeof reconcileAllExistingProductsToMasterCatalog> | null = null;
     if (body.finalize) {
       rebuildProductsFtsIndex();
+      try {
+        catalogReconcile = reconcileAllExistingProductsToMasterCatalog();
+      } catch (err) {
+        console.warn('[CloudSync] Post-restore master catalog reconcile warning:', err);
+      }
       restoredFromCloudAt = new Date().toISOString();
       lastCloudSyncAt = restoredFromCloudAt;
       lastSyncedMutationVersion = mutationVersion;
@@ -326,6 +314,7 @@ export function registerCloudSyncRoutes(app: Express): void {
     res.json({
       ok: true,
       restored_counts: restoredCounts,
+      catalog_reconcile: catalogReconcile,
       counts: getAllCounts(),
       restored_from_cloud_at: restoredFromCloudAt,
     });
