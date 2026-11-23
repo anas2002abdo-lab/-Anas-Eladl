@@ -552,6 +552,7 @@ fallback_api_base = os.environ.get("BG_API_BASE_URL", "").strip().rstrip("/") or
 
 poll_engine_kt = f"""package {pkg_name}
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -801,6 +802,7 @@ object OtlobhaBgPollEngine {{
         }}
     }}
 
+    @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     private fun postSystemNotification(
         appCtx: Context,
@@ -921,6 +923,7 @@ object OtlobhaBgPollEngine {{
 
 push_service_kt = f"""package {pkg_name}
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -982,6 +985,7 @@ class OtlobhaBgPushService : Service() {{
         super.onDestroy()
     }}
 
+    @SuppressLint("ForegroundServiceType", "NewApi", "MissingPermission")
     @Suppress("DEPRECATION")
     private fun startForegroundSilently() {{
         try {{
@@ -1037,7 +1041,7 @@ class OtlobhaBgPushService : Service() {{
             // If Android 12+ blocks foreground start from background, stop safely and rely on AlarmReceiver/JobService
             try {{
                 stopSelf()
-            }} catch (_: Throwable) {{
+            }} catch (ignored: Throwable) {{
             }}
         }}
     }}
@@ -1173,6 +1177,7 @@ class OtlobhaBgJobService : JobService() {{
 
 scheduler_kt = f"""package {pkg_name}
 
+import android.annotation.SuppressLint
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.app.job.JobInfo
@@ -1227,6 +1232,7 @@ object OtlobhaBgScheduler {{
         }}
     }}
 
+    @SuppressLint("ScheduleExactAlarm", "MissingPermission")
     fun scheduleFastAlarm(context: Context, step: Int) {{
         try {{
             val appCtx = context.applicationContext
