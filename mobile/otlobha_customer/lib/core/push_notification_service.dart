@@ -225,7 +225,7 @@ class CustomerPushNotificationService {
   }
 
   Future<void> _initNativeBackgroundBridge() async {
-    if (kIsWeb) return;
+    if (kIsWeb || !Platform.isAndroid) return;
     try {
       _bgChannel.setMethodCallHandler((MethodCall call) async {
         if (call.method == 'onBackgroundNotificationTap') {
@@ -258,7 +258,7 @@ class CustomerPushNotificationService {
   }
 
   Future<void> scheduleNativeBackgroundSync({bool fastCheck = false}) async {
-    if (kIsWeb) return;
+    if (kIsWeb || !Platform.isAndroid) return;
     try {
       await _bgChannel.invokeMethod<void>('scheduleBackgroundSync', <String, dynamic>{
         'fast_check': fastCheck,
@@ -392,6 +392,7 @@ class CustomerPushNotificationService {
   }
 
   Future<void> _initLocalNotifications() async {
+    if (!kIsWeb && !Platform.isAndroid && !Platform.isIOS) return;
     try {
       const initSettings = InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
@@ -442,6 +443,7 @@ class CustomerPushNotificationService {
   }
 
   Future<void> _initFirebaseMessaging() async {
+    if (!kIsWeb && !Platform.isAndroid && !Platform.isIOS) return;
     try {
       if (Firebase.apps.isEmpty) {
         // Initialize from native Android google-services.json / iOS GoogleService-Info.plist

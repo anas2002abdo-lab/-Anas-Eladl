@@ -500,7 +500,6 @@ if legacy_worker.exists():
 
 job_service_kt = f"""package {pkg_name}
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -551,12 +550,12 @@ class OtlobhaBgJobService : JobService() {{
                 if (!cancelled && step in 1..8) {{
                     OtlobhaBgScheduler.scheduleNextFastCheck(applicationContext, step + 1)
                 }}
-            }} catch (_: Throwable) {{
+            }} catch (e: Throwable) {{
                 // Never crash background process
             }} finally {{
                 try {{
                     jobFinished(jobParams, false)
-                }} catch (_: Throwable) {{
+                }} catch (e: Throwable) {{
                 }}
             }}
         }}
@@ -588,8 +587,9 @@ class OtlobhaBgJobService : JobService() {{
         if (responseBody == null && accessToken.isNotEmpty()) {{
             responseBody = fetchPoll(apiBase, "")
         }}
-        if (!responseBody.isNullOrEmpty()) {{
-            processNotifications(responseBody, prefs)
+        val finalBody = responseBody
+        if (!finalBody.isNullOrEmpty()) {{
+            processNotifications(finalBody, prefs)
         }}
     }}
 
@@ -597,7 +597,7 @@ class OtlobhaBgJobService : JobService() {{
         var conn: HttpURLConnection? = null
         return try {{
             val url = URL("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10")
-            conn = (url.openConnection() as HttpURLConnection).apply {{
+            val connection = (url.openConnection() as HttpURLConnection).apply {{
                 requestMethod = "GET"
                 connectTimeout = 10000
                 readTimeout = 12000
@@ -606,17 +606,18 @@ class OtlobhaBgJobService : JobService() {{
                     setRequestProperty("Authorization", "Bearer $accessToken")
                 }}
             }}
-            if (conn.responseCode in 200..299) {{
-                BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
+            conn = connection
+            if (connection.responseCode in 200..299) {{
+                BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
             }} else {{
                 null
             }}
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
             null
         }} finally {{
             try {{
                 conn?.disconnect()
-            }} catch (_: Throwable) {{
+            }} catch (e: Throwable) {{
             }}
         }}
     }}
@@ -629,7 +630,7 @@ class OtlobhaBgJobService : JobService() {{
         var conn: HttpURLConnection? = null
         return try {{
             val url = URL("$apiBase/api/auth/refresh")
-            conn = (url.openConnection() as HttpURLConnection).apply {{
+            val connection = (url.openConnection() as HttpURLConnection).apply {{
                 requestMethod = "POST"
                 doOutput = true
                 connectTimeout = 10000
@@ -637,14 +638,15 @@ class OtlobhaBgJobService : JobService() {{
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
             }}
+            conn = connection
             val body = JSONObject().put("refresh_token", refreshToken).toString()
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use {{ it.write(body) }}
-            if (conn.responseCode in 200..299) {{
-                val text = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use {{ it.write(body) }}
+            if (connection.responseCode in 200..299) {{
+                val text = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
                 val json = JSONObject(text)
                 val tokens = json.optJSONObject("tokens")
-                val nextAccess = tokens?.optString("access_token")?.trim() ?: ""
-                val nextRefresh = tokens?.optString("refresh_token")?.trim() ?: ""
+                val nextAccess = tokens?.optString("access_token", "")?.trim() ?: ""
+                val nextRefresh = tokens?.optString("refresh_token", "")?.trim() ?: ""
                 if (nextAccess.isNotEmpty()) {{
                     val ed = prefs.edit().putString(KEY_ACCESS_TOKEN, nextAccess)
                     if (nextRefresh.isNotEmpty()) {{
@@ -654,12 +656,12 @@ class OtlobhaBgJobService : JobService() {{
                     nextAccess
                 }} else null
             }} else null
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
             null
         }} finally {{
             try {{
                 conn?.disconnect()
-            }} catch (_: Throwable) {{
+            }} catch (e: Throwable) {{
             }}
         }}
     }}
@@ -740,7 +742,7 @@ class OtlobhaBgJobService : JobService() {{
     ): Boolean {{
         return try {{
             if (Build.VERSION.SDK_INT >= 33) {{
-                val perm = applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                val perm = applicationContext.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
                 if (perm != PackageManager.PERMISSION_GRANTED) {{
                     return false
                 }}
@@ -807,7 +809,7 @@ class OtlobhaBgJobService : JobService() {{
 
             nm.notify(intId, builder.build())
             true
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
             false
         }}
     }}
@@ -840,7 +842,8 @@ object OtlobhaBgScheduler {{
             val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
             val component = ComponentName(appCtx, OtlobhaBgJobService::class.java)
 
-            val alreadyScheduled = scheduler.allPendingJobs?.any {{ it.id == PERIODIC_JOB_ID }} == true
+            val pendingJobs = scheduler.allPendingJobs ?: emptyList()
+            val alreadyScheduled = pendingJobs.any {{ it.id == PERIODIC_JOB_ID }}
             if (!alreadyScheduled) {{
                 val periodic = JobInfo.Builder(PERIODIC_JOB_ID, component)
                     .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
@@ -862,7 +865,7 @@ object OtlobhaBgScheduler {{
                     .build()
                 scheduler.schedule(fastJob)
             }}
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
             // Never crash app on OEM job scheduler limits
         }}
     }}
@@ -882,7 +885,7 @@ object OtlobhaBgScheduler {{
                 .setExtras(extras)
                 .build()
             scheduler.schedule(job)
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 }}
@@ -901,7 +904,7 @@ class OtlobhaBootReceiver : BroadcastReceiver() {{
             if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {{
                 OtlobhaBgScheduler.ensureScheduled(context.applicationContext, fastCheck = false)
             }}
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 }}
@@ -925,7 +928,7 @@ class MainActivity : FlutterActivity() {{
         super.onCreate(savedInstanceState)
         try {{
             capturePayloadFromIntent(intent, notifyFlutter = false)
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 
@@ -934,7 +937,7 @@ class MainActivity : FlutterActivity() {{
         try {{
             setIntent(intent)
             capturePayloadFromIntent(intent, notifyFlutter = true)
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 
@@ -942,7 +945,7 @@ class MainActivity : FlutterActivity() {{
         super.onStop()
         try {{
             OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 
@@ -973,26 +976,27 @@ class MainActivity : FlutterActivity() {{
                         }}
                         else -> result.notImplemented()
                     }}
-                }} catch (_: Throwable) {{
+                }} catch (e: Throwable) {{
                     result.success(null)
                 }}
             }}
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 
     private fun capturePayloadFromIntent(intent: Intent?, notifyFlutter: Boolean) {{
         try {{
-            val payload = intent?.getStringExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
+            val safeIntent = intent ?: return
+            val payload = safeIntent.getStringExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
             if (!payload.isNullOrEmpty()) {{
-                intent.removeExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
+                safeIntent.removeExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
                 if (notifyFlutter && bgChannel != null) {{
                     bgChannel?.invokeMethod("onBackgroundNotificationTap", payload)
                 }} else {{
                     pendingBgPayload = payload
                 }}
             }}
-        }} catch (_: Throwable) {{
+        }} catch (e: Throwable) {{
         }}
     }}
 }}
