@@ -25,13 +25,12 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp();
+      await Firebase.initializeApp().timeout(const Duration(seconds: 3));
     }
     FirebaseMessaging.onBackgroundMessage(otlobhaCaptainBackgroundHandler);
   } catch (e) {
     debugPrint('[CaptainMain] Firebase pre-init skipped: $e');
   }
-  await CaptainPushNotificationService.instance.initialize();
   runApp(const OtlobhaCaptainApp());
 }
 
@@ -166,13 +165,24 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    CaptainPushNotificationService.instance.initialize(
-      onNotificationTap: _handlePushNotificationTap,
-      onForegroundNotification: () {
-        if (_activeCaptainId != null) _silentSync();
-      },
-    );
     _restorePersistedSession();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        CaptainPushNotificationService.instance
+            .initialize(
+              onNotificationTap: _handlePushNotificationTap,
+              onForegroundNotification: () {
+                if (_activeCaptainId != null) _silentSync();
+              },
+            )
+            .then((_) {
+          if (mounted) {
+            unawaited(CaptainPushNotificationService.instance.requestPermission());
+          }
+        }),
+      );
+    });
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) => _silentSync());
     _gpsTimer = Timer.periodic(const Duration(seconds: 20), (_) => _pushCaptainGps());
   }

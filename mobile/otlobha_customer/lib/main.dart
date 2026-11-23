@@ -31,13 +31,12 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp();
+      await Firebase.initializeApp().timeout(const Duration(seconds: 3));
     }
     FirebaseMessaging.onBackgroundMessage(otlobhaCustomerBackgroundHandler);
   } catch (e) {
     debugPrint('[CustomerMain] Firebase pre-init skipped: $e');
   }
-  await CustomerPushNotificationService.instance.initialize();
   runApp(const OtlobhaCustomerApp());
 }
 
@@ -240,13 +239,24 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    CustomerPushNotificationService.instance.initialize(
-      onNotificationTap: _handlePushNotificationTap,
-      onForegroundNotification: () {
-        if (_isAuthenticated && !_isGuest) _silentSync();
-      },
-    );
     _restoreSavedNavigationAndSession();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        CustomerPushNotificationService.instance
+            .initialize(
+              onNotificationTap: _handlePushNotificationTap,
+              onForegroundNotification: () {
+                if (_isAuthenticated && !_isGuest) _silentSync();
+              },
+            )
+            .then((_) {
+          if (mounted) {
+            unawaited(CustomerPushNotificationService.instance.requestPermission());
+          }
+        }),
+      );
+    });
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       if (_isAuthenticated && !_isGuest) _silentSync();
     });

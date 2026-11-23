@@ -173,6 +173,7 @@ class CaptainPushNotificationService {
   StreamSubscription<RemoteMessage>? _onMessageSub;
   StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
   StreamSubscription<String>? _onTokenRefreshSub;
+  Future<bool>? _permissionRequestFuture;
 
   bool get isFirebaseReady => _firebaseReady;
   bool get isPermissionGranted => _permissionGranted;
@@ -195,11 +196,18 @@ class CaptainPushNotificationService {
     }
     _initialized = true;
 
-    await _loadPreferences();
-    await _initNativeBackgroundBridge();
-    await _initLocalNotifications();
-    await _initFirebaseMessaging();
-    unawaited(requestPermission());
+    try {
+      await _loadPreferences();
+    } catch (_) {}
+    try {
+      await _initNativeBackgroundBridge();
+    } catch (_) {}
+    try {
+      await _initLocalNotifications();
+    } catch (_) {}
+    try {
+      await _initFirebaseMessaging();
+    } catch (_) {}
     unawaited(scheduleNativeBackgroundSync(fastCheck: false));
     _flushPendingTap();
   }
@@ -221,7 +229,9 @@ class CaptainPushNotificationService {
         }
       });
 
-      final initialPayload = await _bgChannel.invokeMethod<String>('consumeInitialNotification');
+      final initialPayload = await _bgChannel
+          .invokeMethod<String>('consumeInitialNotification')
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
       if (initialPayload != null && initialPayload.trim().isNotEmpty) {
         try {
           final decoded = jsonDecode(initialPayload);
@@ -240,7 +250,7 @@ class CaptainPushNotificationService {
         'fast_check': fastCheck,
         'api_base_url': OtlobhaCaptainApi.normalizeBaseUrl(OtlobhaCaptainApi.baseUrl),
         'app': 'captain',
-      });
+      }).timeout(const Duration(seconds: 3));
     } catch (_) {}
   }
 
@@ -402,7 +412,7 @@ class CaptainPushNotificationService {
     try {
       if (Firebase.apps.isEmpty) {
         // Initialize from native Android google-services.json / iOS GoogleService-Info.plist
-        await Firebase.initializeApp();
+        await Firebase.initializeApp().timeout(const Duration(seconds: 3));
       }
       _firebaseReady = Firebase.apps.isNotEmpty;
     } catch (e) {
@@ -419,13 +429,17 @@ class CaptainPushNotificationService {
 
     try {
       FirebaseMessaging.onBackgroundMessage(otlobhaCaptainBackgroundHandler);
-      await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
-        alert: true,
-        badge: true,
-        sound: true,
-      );
+      await FirebaseMessaging.instance
+          .setForegroundNotificationPresentationOptions(
+            alert: true,
+            badge: true,
+            sound: true,
+          )
+          .timeout(const Duration(seconds: 3));
 
-      final initialMsg = await FirebaseMessaging.instance.getInitialMessage();
+      final initialMsg = await FirebaseMessaging.instance
+          .getInitialMessage()
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
       if (initialMsg != null) {
         _pendingTapData = _extractMessageData(initialMsg);
       }
@@ -490,20 +504,37 @@ class CaptainPushNotificationService {
     }
   }
 
-  Future<bool> requestPermission() async {
-    bool granted = false;
-    try {
-      final androidPlugin = _localNotifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-      if (androidPlugin != null) {
-        final androidGranted = await androidPlugin.requestNotificationsPermission();
-        if (androidGranted != null) granted = androidGranted;
+  Future<bool> requestPermission() {
+    final existing = _permissionRequestFuture;
+    if (existing != null) return existing;
+    final future = _requestPermissionInternal();
+    _permissionRequestFuture = future;
+    future.whenComplete(() {
+      if (identical(_permissionRequestFuture, future)) {
+        _permissionRequestFuture = null;
       }
-    } catch (e) {
-      debugPrint('[CaptainPush] Android permission request error: $e');
+    });
+    return future;
+  }
+
+  Future<bool> _requestPermissionInternal() async {
+    bool granted = false;
+    bool handledOnAndroid = false;
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final androidPlugin = _localNotifications
+            .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+        if (androidPlugin != null) {
+          handledOnAndroid = true;
+          final androidGranted = await androidPlugin.requestNotificationsPermission();
+          if (androidGranted != null) granted = androidGranted;
+        }
+      } catch (e) {
+        debugPrint('[CaptainPush] Android permission request error: $e');
+      }
     }
 
-    if (_firebaseReady) {
+    if (_firebaseReady && !handledOnAndroid) {
       try {
         final settings = await FirebaseMessaging.instance.requestPermission(
           alert: true,

@@ -286,7 +286,7 @@ if app_kts.exists():
         text,
     )
 
-    # Ensure desugar_jdk_libs and AndroidX WorkManager dependencies exist
+    # Ensure desugar_jdk_libs dependency exists
     if "desugar_jdk_libs" not in text:
         if re.search(r"dependencies\s*\{", text):
             text = re.sub(
@@ -298,20 +298,9 @@ if app_kts.exists():
         else:
             text += '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
 
-    if "work-runtime-ktx" not in text:
-        if re.search(r"dependencies\s*\{", text):
-            text = re.sub(
-                r"(dependencies\s*\{)",
-                r'\1\n    implementation("androidx.work:work-runtime-ktx:2.9.1")',
-                text,
-                count=1,
-            )
-        else:
-            text += '\n\ndependencies {\n    implementation("androidx.work:work-runtime-ktx:2.9.1")\n}\n'
-
     app_kts.write_text(text, encoding="utf-8")
     plugin_applied = "com.google.gms.google-services" in text
-    print("[FCM Android Setup] Patched android/app/build.gradle.kts (desugaring + workmanager + minSdk + google-services).")
+    print("[FCM Android Setup] Patched android/app/build.gradle.kts (desugaring + minSdk + google-services).")
 
 elif app_groovy.exists():
     text = app_groovy.read_text(encoding="utf-8")
@@ -366,20 +355,9 @@ elif app_groovy.exists():
         else:
             text += "\n\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
 
-    if "work-runtime-ktx" not in text:
-        if re.search(r"dependencies\s*\{", text):
-            text = re.sub(
-                r"(dependencies\s*\{)",
-                r"\1\n    implementation 'androidx.work:work-runtime-ktx:2.9.1'",
-                text,
-                count=1,
-            )
-        else:
-            text += "\n\ndependencies {\n    implementation 'androidx.work:work-runtime-ktx:2.9.1'\n}\n"
-
     app_groovy.write_text(text, encoding="utf-8")
     plugin_applied = "com.google.gms.google-services" in text
-    print("[FCM Android Setup] Patched android/app/build.gradle (desugaring + workmanager + minSdk + google-services).")
+    print("[FCM Android Setup] Patched android/app/build.gradle (desugaring + minSdk + google-services).")
 else:
     print(
         "::error::Neither android/app/build.gradle.kts nor android/app/build.gradle was found.",
@@ -467,12 +445,16 @@ if manifest_path.exists():
         )
         m_text = m_text.replace("</activity>", click_filter, 1)
 
-    if "OtlobhaBootReceiver" not in m_text and "</application>" in m_text:
-        receiver_xml = (
+    if "OtlobhaBgJobService" not in m_text and "</application>" in m_text:
+        bg_components_xml = (
+            '        <service\n'
+            '            android:name=".OtlobhaBgJobService"\n'
+            '            android:permission="android.permission.BIND_JOB_SERVICE"\n'
+            '            android:exported="false" />\n'
             '        <receiver\n'
             '            android:name=".OtlobhaBootReceiver"\n'
             '            android:enabled="true"\n'
-            '            android:exported="true">\n'
+            '            android:exported="false">\n'
             '            <intent-filter>\n'
             '                <action android:name="android.intent.action.BOOT_COMPLETED" />\n'
             '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />\n'
@@ -480,12 +462,12 @@ if manifest_path.exists():
             '        </receiver>\n'
             '    </application>'
         )
-        m_text = m_text.replace("</application>", receiver_xml, 1)
+        m_text = m_text.replace("</application>", bg_components_xml, 1)
 
     manifest_path.write_text(m_text, encoding="utf-8")
-    print(f"[FCM Android Setup] Patched AndroidManifest.xml with POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED, BootReceiver, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
+    print(f"[FCM Android Setup] Patched AndroidManifest.xml with POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED, JobService, BootReceiver, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
 
-# --- 4. Generate Native Android Background Notification Engine (WorkManager + BootReceiver + MainActivity Bridge) ---
+# --- 4. Generate Zero-Dependency Native Android Background Notification Engine (OS JobScheduler + BootReceiver + MainActivity Bridge) ---
 expected_pkg_raw = os.environ.get("EXPECTED_PKG", "").strip()
 cwd_name_lower = Path.cwd().name.lower()
 is_captain = "captain" in expected_pkg_raw.lower() or "captain" in cwd_name_lower
@@ -511,18 +493,25 @@ else:
     pkg_dir.mkdir(parents=True, exist_ok=True)
     main_kt_path = pkg_dir / "MainActivity.kt"
 
-worker_kt = f"""package {pkg_name}
+# Remove any legacy WorkManager worker file if present from previous builds
+legacy_worker = pkg_dir / "OtlobhaBgNotificationWorker.kt"
+if legacy_worker.exists():
+    legacy_worker.unlink()
 
+job_service_kt = f"""package {pkg_name}
+
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.job.JobParameters
+import android.app.job.JobService
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.os.Build
-import androidx.core.app.NotificationCompat
-import androidx.work.Worker
-import androidx.work.WorkerParameters
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -530,10 +519,7 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 
-class OtlobhaBgNotificationWorker(
-    appContext: Context,
-    workerParams: WorkerParameters
-) : Worker(appContext, workerParams) {{
+class OtlobhaBgJobService : JobService() {{
 
     companion object {{
         const val PREFS_NAME = "FlutterSharedPreferences"
@@ -550,40 +536,61 @@ class OtlobhaBgNotificationWorker(
         const val FALLBACK_API_BASE = "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"
     }}
 
-    override fun doWork(): Result {{
-        try {{
-            val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val rawBase = prefs.getString(KEY_API_BASE, null)?.trim()
-            val apiBase = if (!rawBase.isNullOrEmpty()) rawBase.trimEnd('/') else FALLBACK_API_BASE
-            var accessToken = prefs.getString(KEY_ACCESS_TOKEN, null)?.trim() ?: ""
-            val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
+    @Volatile
+    private var cancelled = false
 
-            var responseBody = fetchPoll(apiBase, accessToken)
-            if (responseBody == null && refreshToken.isNotEmpty()) {{
-                val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
-                if (!refreshed.isNullOrEmpty()) {{
-                    accessToken = refreshed
-                    responseBody = fetchPoll(apiBase, accessToken)
+    override fun onStartJob(params: JobParameters?): Boolean {{
+        cancelled = false
+        val jobParams = params ?: return false
+        val workerThread = Thread {{
+            try {{
+                if (!cancelled) {{
+                    runPollOnce()
+                }}
+                val step = jobParams.extras.getInt("step", 0)
+                if (!cancelled && step in 1..8) {{
+                    OtlobhaBgScheduler.scheduleNextFastCheck(applicationContext, step + 1)
+                }}
+            }} catch (_: Throwable) {{
+                // Never crash background process
+            }} finally {{
+                try {{
+                    jobFinished(jobParams, false)
+                }} catch (_: Throwable) {{
                 }}
             }}
-            if (responseBody == null && accessToken.isNotEmpty()) {{
-                // Fallback to unauthenticated broadcast poll so general alerts still arrive
-                responseBody = fetchPoll(apiBase, "")
-            }}
-
-            if (!responseBody.isNullOrEmpty()) {{
-                processNotifications(responseBody, prefs)
-            }}
-
-            val chainFast = inputData.getBoolean("chain_fast", false)
-            val step = inputData.getInt("step", 0)
-            if (chainFast && step in 1..8) {{
-                OtlobhaBgScheduler.scheduleNextFastCheck(applicationContext, step + 1)
-            }}
-        }} catch (_: Exception) {{
-            // Ignore transient background network errors; WorkManager periodic task will retry
         }}
-        return Result.success()
+        workerThread.isDaemon = true
+        workerThread.start()
+        return true
+    }}
+
+    override fun onStopJob(params: JobParameters?): Boolean {{
+        cancelled = true
+        return false
+    }}
+
+    private fun runPollOnce() {{
+        val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val rawBase = prefs.getString(KEY_API_BASE, null)?.trim()
+        val apiBase = if (!rawBase.isNullOrEmpty()) rawBase.trimEnd('/') else FALLBACK_API_BASE
+        var accessToken = prefs.getString(KEY_ACCESS_TOKEN, null)?.trim() ?: ""
+        val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
+
+        var responseBody = fetchPoll(apiBase, accessToken)
+        if (responseBody == null && refreshToken.isNotEmpty()) {{
+            val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
+            if (!refreshed.isNullOrEmpty()) {{
+                accessToken = refreshed
+                responseBody = fetchPoll(apiBase, accessToken)
+            }}
+        }}
+        if (responseBody == null && accessToken.isNotEmpty()) {{
+            responseBody = fetchPoll(apiBase, "")
+        }}
+        if (!responseBody.isNullOrEmpty()) {{
+            processNotifications(responseBody, prefs)
+        }}
     }}
 
     private fun fetchPoll(apiBase: String, accessToken: String): String? {{
@@ -599,23 +606,25 @@ class OtlobhaBgNotificationWorker(
                     setRequestProperty("Authorization", "Bearer $accessToken")
                 }}
             }}
-            val code = conn.responseCode
-            if (code in 200..299) {{
+            if (conn.responseCode in 200..299) {{
                 BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
             }} else {{
                 null
             }}
-        }} catch (_: Exception) {{
+        }} catch (_: Throwable) {{
             null
         }} finally {{
-            conn?.disconnect()
+            try {{
+                conn?.disconnect()
+            }} catch (_: Throwable) {{
+            }}
         }}
     }}
 
     private fun tryRefreshToken(
         apiBase: String,
         refreshToken: String,
-        prefs: android.content.SharedPreferences
+        prefs: SharedPreferences
     ): String? {{
         var conn: HttpURLConnection? = null
         return try {{
@@ -645,14 +654,17 @@ class OtlobhaBgNotificationWorker(
                     nextAccess
                 }} else null
             }} else null
-        }} catch (_: Exception) {{
+        }} catch (_: Throwable) {{
             null
         }} finally {{
-            conn?.disconnect()
+            try {{
+                conn?.disconnect()
+            }} catch (_: Throwable) {{
+            }}
         }}
     }}
 
-    private fun processNotifications(responseBody: String, prefs: android.content.SharedPreferences) {{
+    private fun processNotifications(responseBody: String, prefs: SharedPreferences) {{
         val root = JSONObject(responseBody)
         val arr = root.optJSONArray("notifications") ?: return
         if (arr.length() == 0) return
@@ -675,7 +687,6 @@ class OtlobhaBgNotificationWorker(
 
         if (pending.isEmpty()) return
 
-        // Post oldest first so the newest notification appears at the top of the notification tray
         for (item in pending.reversed()) {{
             val id = item.optString("id", "").trim()
             val title = item.optString("title_ar", "").trim().ifEmpty {{ DEFAULT_TITLE }}
@@ -704,9 +715,8 @@ class OtlobhaBgNotificationWorker(
                 if (email.isNotEmpty()) put("email", email)
             }}
 
-            postSystemNotification(id, title, body, channelId, payloadJson.toString(), soundEnabled, vibEnabled)
-
-            if (id.isNotEmpty() && shownSet.add(id)) {{
+            val posted = postSystemNotification(id, title, body, channelId, payloadJson.toString(), soundEnabled, vibEnabled)
+            if (posted && id.isNotEmpty() && shownSet.add(id)) {{
                 shownOrder.add(id)
                 while (shownOrder.size > 150) {{
                     val removed = shownOrder.removeAt(0)
@@ -718,6 +728,7 @@ class OtlobhaBgNotificationWorker(
         prefs.edit().putString(KEY_SHOWN_CSV, shownOrder.joinToString(",")).apply()
     }}
 
+    @Suppress("DEPRECATION")
     private fun postSystemNotification(
         notifId: String,
         title: String,
@@ -726,60 +737,79 @@ class OtlobhaBgNotificationWorker(
         payloadJson: String,
         soundEnabled: Boolean,
         vibEnabled: Boolean
-    ) {{
-        val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    ): Boolean {{
+        return try {{
+            if (Build.VERSION.SDK_INT >= 33) {{
+                val perm = applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                if (perm != PackageManager.PERMISSION_GRANTED) {{
+                    return false
+                }}
+            }}
+            val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return false
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
-            val importance = if (!soundEnabled && !vibEnabled) {{
-                NotificationManager.IMPORTANCE_DEFAULT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                val importance = if (!soundEnabled && !vibEnabled) {{
+                    NotificationManager.IMPORTANCE_DEFAULT
+                }} else {{
+                    NotificationManager.IMPORTANCE_HIGH
+                }}
+                val channelName = when (channelId) {{
+                    "otlobha_dispatch_channel" -> "طلبات جديدة وإسناد الكباتن"
+                    "otlobha_chat_channel" -> "رسائل الشات المباشر"
+                    "otlobha_admin_channel" -> "تنبيهات الإدارة والحساب"
+                    "otlobha_promos_channel" -> "العروض والتخفيضات"
+                    "otlobha_silent_channel" -> "إشعارات صامتة"
+                    else -> "تحديثات الطلبات والمشاوير"
+                }}
+                val channel = NotificationChannel(channelId, channelName, importance).apply {{
+                    enableVibration(vibEnabled)
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }}
+                nm.createNotificationChannel(channel)
+            }}
+
+            val launchIntent = Intent(applicationContext, MainActivity::class.java).apply {{
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_PAYLOAD, payloadJson)
+            }}
+            val intId = stableIntId(notifId.ifEmpty {{ "${{System.currentTimeMillis()}}" }})
+            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             }} else {{
-                NotificationManager.IMPORTANCE_HIGH
+                PendingIntent.FLAG_UPDATE_CURRENT
             }}
-            val channelName = when (channelId) {{
-                "otlobha_dispatch_channel" -> "طلبات جديدة وإسناد الكباتن"
-                "otlobha_chat_channel" -> "رسائل الشات المباشر"
-                "otlobha_admin_channel" -> "تنبيهات الإدارة والحساب"
-                "otlobha_promos_channel" -> "العروض والتخفيضات"
-                "otlobha_silent_channel" -> "إشعارات صامتة"
-                else -> "تحديثات الطلبات والمشاوير"
+            val pendingIntent = PendingIntent.getActivity(applicationContext, intId, launchIntent, pendingFlags)
+
+            var defaults = Notification.DEFAULT_LIGHTS
+            if (soundEnabled) defaults = defaults or Notification.DEFAULT_SOUND
+            if (vibEnabled) defaults = defaults or Notification.DEFAULT_VIBRATE
+
+            val appIcon = applicationContext.applicationInfo.icon
+            val smallIcon = if (appIcon != 0) appIcon else android.R.drawable.ic_dialog_info
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                Notification.Builder(applicationContext, channelId)
+            }} else {{
+                Notification.Builder(applicationContext)
             }}
-            val channel = NotificationChannel(channelId, channelName, importance).apply {{
-                enableVibration(vibEnabled)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            builder
+                .setSmallIcon(smallIcon)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(Notification.BigTextStyle().bigText(body))
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {{
+                builder.setPriority(Notification.PRIORITY_MAX)
+                builder.setDefaults(defaults)
             }}
-            nm.createNotificationChannel(channel)
+
+            nm.notify(intId, builder.build())
+            true
+        }} catch (_: Throwable) {{
+            false
         }}
-
-        val launchIntent = Intent(applicationContext, MainActivity::class.java).apply {{
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_PAYLOAD, payloadJson)
-        }}
-        val intId = stableIntId(notifId.ifEmpty {{ "${{System.currentTimeMillis()}}" }})
-        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        }} else {{
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }}
-        val pendingIntent = PendingIntent.getActivity(applicationContext, intId, launchIntent, pendingFlags)
-
-        var defaults = NotificationCompat.DEFAULT_LIGHTS
-        if (soundEnabled) defaults = defaults or NotificationCompat.DEFAULT_SOUND
-        if (vibEnabled) defaults = defaults or NotificationCompat.DEFAULT_VIBRATE
-
-        val smallIcon = applicationContext.applicationInfo.icon
-        val builder = NotificationCompat.Builder(applicationContext, channelId)
-            .setSmallIcon(smallIcon)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setAutoCancel(true)
-            .setDefaults(defaults)
-            .setContentIntent(pendingIntent)
-
-        nm.notify(intId, builder.build())
     }}
 
     private fun stableIntId(key: String): Int {{
@@ -794,64 +824,65 @@ class OtlobhaBgNotificationWorker(
 
 scheduler_kt = f"""package {pkg_name}
 
+import android.app.job.JobInfo
+import android.app.job.JobScheduler
+import android.content.ComponentName
 import android.content.Context
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
-import java.util.concurrent.TimeUnit
+import android.os.PersistableBundle
 
 object OtlobhaBgScheduler {{
-    private const val PERIODIC_WORK_NAME = "otlobha_bg_notif_periodic_v1"
-    private const val FAST_WORK_NAME = "otlobha_bg_notif_fast_v1"
+    private const val PERIODIC_JOB_ID = 942101
+    private const val FAST_JOB_ID = 942102
 
     fun ensureScheduled(context: Context, fastCheck: Boolean = false) {{
         try {{
-            val wm = WorkManager.getInstance(context.applicationContext)
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
-                .build()
+            val appCtx = context.applicationContext
+            val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
+            val component = ComponentName(appCtx, OtlobhaBgJobService::class.java)
 
-            val periodic = PeriodicWorkRequestBuilder<OtlobhaBgNotificationWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(constraints)
-                .build()
-
-            wm.enqueueUniquePeriodicWork(
-                PERIODIC_WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
-                periodic
-            )
+            val alreadyScheduled = scheduler.allPendingJobs?.any {{ it.id == PERIODIC_JOB_ID }} == true
+            if (!alreadyScheduled) {{
+                val periodic = JobInfo.Builder(PERIODIC_JOB_ID, component)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setPeriodic(15L * 60L * 1000L)
+                    .setPersisted(true)
+                    .build()
+                scheduler.schedule(periodic)
+            }}
 
             if (fastCheck) {{
-                val fastReq = OneTimeWorkRequestBuilder<OtlobhaBgNotificationWorker>()
-                    .setConstraints(constraints)
-                    .setInitialDelay(45, TimeUnit.SECONDS)
-                    .setInputData(workDataOf("chain_fast" to true, "step" to 1))
+                val extras = PersistableBundle().apply {{
+                    putInt("step", 1)
+                }}
+                val fastJob = JobInfo.Builder(FAST_JOB_ID, component)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setMinimumLatency(45L * 1000L)
+                    .setOverrideDeadline(90L * 1000L)
+                    .setExtras(extras)
                     .build()
-                wm.enqueueUniqueWork(FAST_WORK_NAME, ExistingWorkPolicy.REPLACE, fastReq)
+                scheduler.schedule(fastJob)
             }}
-        }} catch (_: Exception) {{
-            // Ignore scheduler errors on restricted OEM states
+        }} catch (_: Throwable) {{
+            // Never crash app on OEM job scheduler limits
         }}
     }}
 
     fun scheduleNextFastCheck(context: Context, nextStep: Int) {{
         try {{
-            val wm = WorkManager.getInstance(context.applicationContext)
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
+            val appCtx = context.applicationContext
+            val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
+            val component = ComponentName(appCtx, OtlobhaBgJobService::class.java)
+            val extras = PersistableBundle().apply {{
+                putInt("step", nextStep)
+            }}
+            val job = JobInfo.Builder(FAST_JOB_ID, component)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setMinimumLatency(75L * 1000L)
+                .setOverrideDeadline(150L * 1000L)
+                .setExtras(extras)
                 .build()
-            val req = OneTimeWorkRequestBuilder<OtlobhaBgNotificationWorker>()
-                .setConstraints(constraints)
-                .setInitialDelay(75, TimeUnit.SECONDS)
-                .setInputData(workDataOf("chain_fast" to true, "step" to nextStep))
-                .build()
-            wm.enqueueUniqueWork(FAST_WORK_NAME, ExistingWorkPolicy.REPLACE, req)
-        }} catch (_: Exception) {{
+            scheduler.schedule(job)
+        }} catch (_: Throwable) {{
         }}
     }}
 }}
@@ -865,9 +896,12 @@ import android.content.Intent
 
 class OtlobhaBootReceiver : BroadcastReceiver() {{
     override fun onReceive(context: Context, intent: Intent?) {{
-        val action = intent?.action ?: return
-        if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {{
-            OtlobhaBgScheduler.ensureScheduled(context.applicationContext, fastCheck = false)
+        try {{
+            val action = intent?.action ?: return
+            if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {{
+                OtlobhaBgScheduler.ensureScheduled(context.applicationContext, fastCheck = false)
+            }}
+        }} catch (_: Throwable) {{
         }}
     }}
 }}
@@ -889,66 +923,84 @@ class MainActivity : FlutterActivity() {{
 
     override fun onCreate(savedInstanceState: Bundle?) {{
         super.onCreate(savedInstanceState)
-        capturePayloadFromIntent(intent, notifyFlutter = false)
-        OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = false)
+        try {{
+            capturePayloadFromIntent(intent, notifyFlutter = false)
+        }} catch (_: Throwable) {{
+        }}
     }}
 
     override fun onNewIntent(intent: Intent) {{
         super.onNewIntent(intent)
-        setIntent(intent)
-        capturePayloadFromIntent(intent, notifyFlutter = true)
+        try {{
+            setIntent(intent)
+            capturePayloadFromIntent(intent, notifyFlutter = true)
+        }} catch (_: Throwable) {{
+        }}
     }}
 
     override fun onStop() {{
         super.onStop()
-        OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+        try {{
+            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+        }} catch (_: Throwable) {{
+        }}
     }}
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
         super.configureFlutterEngine(flutterEngine)
-        bgChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, bgChannelName)
-        bgChannel?.setMethodCallHandler {{ call, result ->
-            when (call.method) {{
-                "consumeInitialNotification" -> {{
-                    val payload = pendingBgPayload
-                    pendingBgPayload = null
-                    result.success(payload)
-                }}
-                "scheduleBackgroundSync" -> {{
-                    val fastCheck = call.argument<Boolean>("fast_check") ?: false
-                    val apiBase = call.argument<String>("api_base_url")?.trim()
-                    if (!apiBase.isNullOrEmpty()) {{
-                        val prefs = applicationContext.getSharedPreferences(
-                            OtlobhaBgNotificationWorker.PREFS_NAME,
-                            Context.MODE_PRIVATE
-                        )
-                        prefs.edit().putString(OtlobhaBgNotificationWorker.KEY_API_BASE, apiBase).apply()
+        try {{
+            bgChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, bgChannelName)
+            bgChannel?.setMethodCallHandler {{ call, result ->
+                try {{
+                    when (call.method) {{
+                        "consumeInitialNotification" -> {{
+                            val payload = pendingBgPayload
+                            pendingBgPayload = null
+                            result.success(payload)
+                        }}
+                        "scheduleBackgroundSync" -> {{
+                            val fastCheck = call.argument<Boolean>("fast_check") ?: false
+                            val apiBase = call.argument<String>("api_base_url")?.trim()
+                            if (!apiBase.isNullOrEmpty()) {{
+                                val prefs = applicationContext.getSharedPreferences(
+                                    OtlobhaBgJobService.PREFS_NAME,
+                                    Context.MODE_PRIVATE
+                                )
+                                prefs.edit().putString(OtlobhaBgJobService.KEY_API_BASE, apiBase).apply()
+                            }}
+                            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = fastCheck)
+                            result.success(true)
+                        }}
+                        else -> result.notImplemented()
                     }}
-                    OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = fastCheck)
-                    result.success(true)
+                }} catch (_: Throwable) {{
+                    result.success(null)
                 }}
-                else -> result.notImplemented()
             }}
+        }} catch (_: Throwable) {{
         }}
     }}
 
     private fun capturePayloadFromIntent(intent: Intent?, notifyFlutter: Boolean) {{
-        val payload = intent?.getStringExtra(OtlobhaBgNotificationWorker.EXTRA_PAYLOAD)
-        if (!payload.isNullOrEmpty()) {{
-            intent.removeExtra(OtlobhaBgNotificationWorker.EXTRA_PAYLOAD)
-            if (notifyFlutter && bgChannel != null) {{
-                bgChannel?.invokeMethod("onBackgroundNotificationTap", payload)
-            }} else {{
-                pendingBgPayload = payload
+        try {{
+            val payload = intent?.getStringExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
+            if (!payload.isNullOrEmpty()) {{
+                intent.removeExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
+                if (notifyFlutter && bgChannel != null) {{
+                    bgChannel?.invokeMethod("onBackgroundNotificationTap", payload)
+                }} else {{
+                    pendingBgPayload = payload
+                }}
             }}
+        }} catch (_: Throwable) {{
         }}
     }}
 }}
 """
 
-(pkg_dir / "OtlobhaBgNotificationWorker.kt").write_text(worker_kt, encoding="utf-8")
+(pkg_dir / "OtlobhaBgJobService.kt").write_text(job_service_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBgScheduler.kt").write_text(scheduler_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBootReceiver.kt").write_text(boot_receiver_kt, encoding="utf-8")
 main_kt_path.write_text(main_activity_kt, encoding="utf-8")
-print(f"[FCM Android Setup] Generated Native Android Background Notification Worker & MainActivity bridge in {pkg_dir} ({pkg_name}).")
+print(f"[FCM Android Setup] Generated Zero-Dependency OS JobScheduler Notification Engine & MainActivity bridge in {pkg_dir} ({pkg_name}).")
 PYEOF
