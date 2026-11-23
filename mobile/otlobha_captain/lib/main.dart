@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -21,6 +23,14 @@ import 'screens/register_kyc_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp();
+    }
+    FirebaseMessaging.onBackgroundMessage(otlobhaCaptainBackgroundHandler);
+  } catch (e) {
+    debugPrint('[CaptainMain] Firebase pre-init skipped: $e');
+  }
   await CaptainPushNotificationService.instance.initialize();
   runApp(const OtlobhaCaptainApp());
 }
@@ -169,11 +179,18 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _activeCaptainId != null && api.hasTokens) {
-      _silentSync();
-      final push = CaptainPushNotificationService.instance;
-      if (push.currentToken == null || !push.isTokenSynced) {
-        push.registerForAuthenticatedCaptain(api);
+    final push = CaptainPushNotificationService.instance;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      push.scheduleNativeBackgroundSync(fastCheck: true);
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      push.refreshShownIdsFromStorage();
+      if (_activeCaptainId != null && api.hasTokens) {
+        _silentSync();
+        if (push.currentToken == null || !push.isTokenSynced) {
+          push.registerForAuthenticatedCaptain(api);
+        }
       }
     }
   }

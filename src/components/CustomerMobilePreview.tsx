@@ -944,7 +944,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       brand: storefrontBrand,
       merchantId: storefrontMerchantId,
     });
-  }, [storefrontFilter, storefrontCategoryId, storefrontBrand, storefrontMerchantId]);
+  }, [storefrontFilter, storefrontCategoryId, storefrontBrand, storefrontMerchantId, tab]);
 
   const ensureProductInCatalogState = (p: {
     id: string;

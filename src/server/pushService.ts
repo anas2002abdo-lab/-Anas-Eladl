@@ -175,21 +175,25 @@ function ensureFirebaseAdmin(): App | null {
   }
 
   const gac = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
-  const fallbackProjectId =
-    String(process.env.FCM_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '').trim() ||
-    'third-accumulator-bgtt6';
+  const explicitProjectId = String(
+    process.env.FCM_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || ''
+  ).trim();
 
   try {
     initializedApp = initializeApp(
-      {
-        credential: applicationDefault(),
-        projectId: fallbackProjectId,
-      },
+      explicitProjectId
+        ? {
+            credential: applicationDefault(),
+            projectId: explicitProjectId,
+          }
+        : {
+            credential: applicationDefault(),
+          },
       FCM_ADMIN_APP_NAME
     );
     initSource = gac ? 'google_application_credentials' : 'application_default';
-    initProjectId = fallbackProjectId;
-    console.log(`[FCM] Firebase Admin SDK initialized via ${initSource} (project: ${initProjectId})`);
+    initProjectId = explicitProjectId || (initializedApp.options?.projectId ?? null);
+    console.log(`[FCM] Firebase Admin SDK initialized via ${initSource} (project: ${initProjectId || 'auto'})`);
     return initializedApp;
   } catch (err) {
     console.warn('[FCM] applicationDefault() initialization failed:', err instanceof Error ? err.message : err);
@@ -386,6 +390,41 @@ export function registerDeviceToken(params: {
     device_id: cleanDeviceId,
     active_devices: activeDevices,
   };
+}
+
+export function registerGuestDeviceToken(params: {
+  fcmToken: string;
+  deviceId: string;
+  platform?: string | null;
+  appVersion?: string | null;
+  deviceLabel?: string | null;
+  userRole?: PushUserRole;
+}): { id: string; user_id: string; user_role: PushUserRole; device_id: string | null; active_devices: number } {
+  const cleanDeviceId = String(params.deviceId || '').trim().slice(0, 100);
+  const role: PushUserRole = params.userRole === 'captain' ? 'captain' : 'customer';
+  const existing = db
+    .prepare('SELECT user_id, user_role FROM push_device_tokens WHERE fcm_token = ? LIMIT 1')
+    .get(String(params.fcmToken || '').trim()) as { user_id?: string; user_role?: PushUserRole } | undefined;
+
+  // Never downgrade a logged-in customer's token back to guest_ if it already belongs to a real user
+  const effectiveUserId =
+    existing?.user_id && !String(existing.user_id).startsWith('guest_')
+      ? String(existing.user_id)
+      : `guest_${cleanDeviceId}`;
+  const effectiveRole: PushUserRole =
+    existing?.user_id && !String(existing.user_id).startsWith('guest_') && existing.user_role
+      ? existing.user_role
+      : role;
+
+  return registerDeviceToken({
+    userId: effectiveUserId,
+    userRole: effectiveRole,
+    fcmToken: params.fcmToken,
+    deviceId: cleanDeviceId,
+    platform: params.platform,
+    appVersion: params.appVersion,
+    deviceLabel: params.deviceLabel,
+  });
 }
 
 export function unregisterDeviceToken(params: {
@@ -588,7 +627,6 @@ export async function sendPushToTokens(
             notification: {
               channelId,
               sound: 'default',
-              defaultSound: true,
               defaultVibrateTimings: true,
               visibility: 'public',
               priority: 'max',
@@ -703,7 +741,6 @@ export async function sendPushToTopic(
         notification: {
           channelId,
           sound: 'default',
-          defaultSound: true,
           defaultVibrateTimings: true,
           visibility: 'public',
           priority: 'max',
@@ -868,9 +905,14 @@ export async function createAndSendNotification(params: {
 
   let fcmDelivery = await sendPushToTokens(tokens, pushPayload);
 
-  // For global broadcasts with 0 registered device tokens yet, also attempt FCM Topic delivery
-  // so phones subscribed to otlobha_customer_all / otlobha_captain_all / otlobha_all receive background pushes.
-  if (!params.recipientId && zoneTarget === 'all' && appTarget !== 'merchant' && tokens.length === 0) {
+  // For global broadcasts with 0 registered tokens OR 0 successful direct token sends,
+  // also send to the FCM broadcast topic so phones subscribed to otlobha_customer_all / otlobha_captain_all / otlobha_all receive background pushes.
+  if (
+    !params.recipientId &&
+    zoneTarget === 'all' &&
+    appTarget !== 'merchant' &&
+    (tokens.length === 0 || fcmDelivery.sent_count === 0)
+  ) {
     const targetTopic =
       appTarget === 'all'
         ? 'otlobha_all'

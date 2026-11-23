@@ -14,6 +14,7 @@ class StorefrontCategoriesScreen extends StatefulWidget {
   final void Function(String brand) onSelectBrand;
   final void Function(String merchantId, String merchantName) onSelectMerchant;
   final void Function(String groupKey)? onSelectGroup;
+  final Future<void> Function()? onRefreshCategories;
 
   const StorefrontCategoriesScreen({
     super.key,
@@ -27,6 +28,7 @@ class StorefrontCategoriesScreen extends StatefulWidget {
     required this.onSelectBrand,
     required this.onSelectMerchant,
     this.onSelectGroup,
+    this.onRefreshCategories,
   });
 
   @override
@@ -651,13 +653,20 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
   }
 
   Widget _buildEmptyCategoriesState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
+    return RefreshIndicator(
+      color: const Color(0xFFA92224),
+      onRefresh: () async {
+        if (widget.onRefreshCategories != null) {
+          await widget.onRefreshCategories!();
+        }
+      },
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(32),
+        children: [
+          const SizedBox(height: 60),
+          Center(
+            child: Container(
               width: 68,
               height: 68,
               decoration: BoxDecoration(
@@ -666,19 +675,35 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
               ),
               child: const Icon(Icons.category_outlined, size: 34, color: Color(0xFFA92224)),
             ),
-            const SizedBox(height: 12),
-            const Text(
-              'جاري تحميل الأقسام والتصنيفات...',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'ستظهر الأقسام الرئيسية والفرعية فور مزامنة المتجر',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            'لا توجد أقسام مضافة في المتجر حاليًا',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'ستظهر الأقسام الرئيسية والفرعية هنا فور إضافتها من لوحة التحكم',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+          ),
+          if (widget.onRefreshCategories != null) ...[
+            const SizedBox(height: 16),
+            Center(
+              child: ElevatedButton.icon(
+                onPressed: () => widget.onRefreshCategories!(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFA92224),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('تحديث الأقسام', style: TextStyle(fontWeight: FontWeight.w800)),
+              ),
             ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -972,82 +997,100 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
 
     final activeGroups = _groups.where((g) => (grouped[g.key] ?? []).isNotEmpty).toList();
     if (activeGroups.isEmpty) {
-      return GridView.builder(
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          childAspectRatio: 0.74,
+      return RefreshIndicator(
+        color: const Color(0xFFA92224),
+        onRefresh: () async {
+          if (widget.onRefreshCategories != null) {
+            await widget.onRefreshCategories!();
+          }
+        },
+        child: GridView.builder(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 10,
+            childAspectRatio: 0.74,
+          ),
+          itemCount: roots.length,
+          itemBuilder: (_, idx) => _buildRootSquareTile(roots[idx], accent: const Color(0xFFA92224)),
         ),
-        itemCount: roots.length,
-        itemBuilder: (_, idx) => _buildRootSquareTile(roots[idx], accent: const Color(0xFFA92224)),
       );
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-      itemCount: activeGroups.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 18),
-      itemBuilder: (_, idx) {
-        final meta = activeGroups[idx];
-        final cats = grouped[meta.key] ?? [];
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    meta.title,
-                    style: const TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF0F172A),
-                    ),
-                  ),
-                ),
-                if (widget.onSelectGroup != null)
-                  TextButton(
-                    onPressed: () => widget.onSelectGroup!(meta.key),
-                    style: TextButton.styleFrom(
-                      foregroundColor: const Color(0xFFA92224),
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('عرض الكل', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
-                        SizedBox(width: 2),
-                        Icon(Icons.chevron_left_rounded, size: 16),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-                childAspectRatio: 0.74,
-              ),
-              itemCount: cats.length,
-              itemBuilder: (_, cIdx) => _buildRootSquareTile(
-                cats[cIdx],
-                accent: meta.accent,
-                fallbackBg: meta.bg,
-                fallbackIcon: meta.icon,
-              ),
-            ),
-          ],
-        );
+    return RefreshIndicator(
+      color: const Color(0xFFA92224),
+      onRefresh: () async {
+        if (widget.onRefreshCategories != null) {
+          await widget.onRefreshCategories!();
+        }
       },
+      child: ListView.separated(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
+        itemCount: activeGroups.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 18),
+        itemBuilder: (_, idx) {
+          final meta = activeGroups[idx];
+          final cats = grouped[meta.key] ?? [];
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      meta.title,
+                      style: const TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                  ),
+                  if (widget.onSelectGroup != null)
+                    TextButton(
+                      onPressed: () => widget.onSelectGroup!(meta.key),
+                      style: TextButton.styleFrom(
+                        foregroundColor: const Color(0xFFA92224),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('عرض الكل', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                          SizedBox(width: 2),
+                          Icon(Icons.chevron_left_rounded, size: 16),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 0.74,
+                ),
+                itemCount: cats.length,
+                itemBuilder: (_, cIdx) => _buildRootSquareTile(
+                  cats[cIdx],
+                  accent: meta.accent,
+                  fallbackBg: meta.bg,
+                  fallbackIcon: meta.icon,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 

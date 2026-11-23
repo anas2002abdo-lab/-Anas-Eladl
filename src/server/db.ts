@@ -860,10 +860,7 @@ export function initDatabase(): void {
   `).run();
   db.prepare("UPDATE pricing_rules SET commission_rate = 10 WHERE service_type = 'rides'").run();
 
-  const countCats = db.prepare('SELECT COUNT(*) as c FROM categories WHERE merchant_id IS NULL').get() as { c: number };
-  if (countCats.c === 0) {
-    seedCatalogData();
-  }
+  // Auto-reseeding of default categories is disabled so admin-managed / wiped categories persist across restarts.
 
   const merCols = db.prepare("PRAGMA table_info('merchants')").all() as Array<{ name: string }>;
   const merAlterDefs: Array<[string, string]> = [
@@ -930,26 +927,7 @@ export function initDatabase(): void {
   });
   purgeDemoDataTx();
 
-  // Ensure each active real merchant has a dedicated Offers section ("العروض")
-  const allMerchantsForOffers = db.prepare('SELECT id, merchant_type FROM merchants').all() as Array<{
-    id: string;
-    merchant_type: string;
-  }>;
-  const checkOfferCat = db.prepare(
-    "SELECT id FROM categories WHERE merchant_id = ? AND (is_offers_section = 1 OR TRIM(name_ar) IN ('العروض', 'عروض المتجر'))"
-  );
-  const insertOfferCat = db.prepare(
-    "INSERT OR IGNORE INTO categories (id, scope, merchant_id, name_ar, name_en, image_url, sort_order, is_offers_section, is_active) VALUES (?, ?, ?, 'العروض', 'Offers', '', 0, 1, 1)"
-  );
-  for (const m of allMerchantsForOffers) {
-    const existingOffer = checkOfferCat.get(m.id) as { id: string } | undefined;
-    if (!existingOffer) {
-      const catScope = m.merchant_type === 'pharmacy' ? 'pharmacy' : 'merchant';
-      insertOfferCat.run(`cat_offers_${m.id}`, catScope, m.id);
-    } else {
-      db.prepare('UPDATE categories SET is_offers_section = 1 WHERE id = ?').run(existingOffer.id);
-    }
-  }
+  // Do not auto-recreate per-merchant Offers categories on boot so cleared categories stay clean.
 
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email_lower ON customers(LOWER(email))');
 
@@ -1405,36 +1383,7 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_storefront_banners_active ON storefront_banners(is_active, sort_order);
   `);
 
-  // Seed comprehensive Arabic storefront categories (INSERT OR IGNORE — preserves all existing categories)
-  const storefrontCategories: Array<[string, string, string, string, string, string, number]> = [
-    // المقاضي (Groceries)
-    ['cat_frozen', 'merchant', 'الأطعمة المجمدة', 'Frozen Foods', 'groceries', 'المقاضي', 5],
-    ['cat_rice_grains', 'merchant', 'الأرز والحبوب', 'Rice & Grains', 'groceries', 'المقاضي', 6],
-    ['cat_pasta_canned', 'merchant', 'المعكرونة والمعلبات', 'Pasta & Canned Food', 'groceries', 'المقاضي', 7],
-    ['cat_sauces', 'merchant', 'الصلصات والتتبيلات', 'Sauces & Condiments', 'groceries', 'المقاضي', 8],
-    ['cat_snacks_sweets', 'merchant', 'الحلويات والسناكات', 'Snacks & Sweets', 'groceries', 'المقاضي', 9],
-    // المنتجات الطازجة (Fresh)
-    ['cat_fruits_veg', 'merchant', 'الخضروات والفواكه', 'Fruits & Vegetables', 'fresh', 'المنتجات الطازجة', 10],
-    ['cat_meat_poultry', 'merchant', 'اللحوم والدواجن', 'Meat & Poultry', 'fresh', 'المنتجات الطازجة', 11],
-    ['cat_seafood_fresh', 'merchant', 'الأسماك والمأكولات البحرية', 'Fish & Seafood', 'fresh', 'المنتجات الطازجة', 12],
-    ['cat_dairy_eggs', 'merchant', 'الألبان والبيض', 'Dairy & Eggs', 'fresh', 'المنتجات الطازجة', 13],
-    // المشروبات والمرطبات (Drinks)
-    ['cat_juices_drinks', 'merchant', 'العصائر والمشروبات', 'Juices & Beverages', 'drinks', 'المشروبات والمرطبات', 14],
-    ['cat_coffee_tea', 'merchant', 'القهوة والشاي', 'Coffee & Tea', 'drinks', 'المشروبات والمرطبات', 15],
-    // العناية بالمنزل والمطبخ (Home & Kitchen)
-    ['cat_detergents', 'merchant', 'المنظفات والمطهرات', 'Detergents & Disinfectants', 'home_care', 'العناية بالمنزل', 16],
-    ['cat_home_care', 'merchant', 'العناية بالمنزل', 'Home Care', 'home_care', 'العناية بالمنزل', 17],
-    ['cat_kitchen_supplies', 'merchant', 'مستلزمات المطبخ', 'Kitchen Supplies', 'kitchen', 'مستلزمات المطبخ', 18],
-  ];
-  const insStorefrontCat = db.prepare(`
-    INSERT OR IGNORE INTO categories (id, scope, name_ar, name_en, group_key, group_name_ar, sort_order, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-  `);
-  for (const row of storefrontCategories) {
-    insStorefrontCat.run(...row);
-  }
-  // Ensure earlier base categories also have clear group keys
-  db.prepare("UPDATE categories SET group_key = 'fresh', group_name_ar = 'المنتجات الطازجة' WHERE id IN ('cat_dairy', 'cat_seafood', 'cat_bakery') AND (group_key = 'groceries' OR group_key = '')").run();
+  // Storefront categories are managed exclusively by Admin / Master Catalog — never auto-seeded on startup.
 
   // Seed default Otlobha-branded storefront banners if none exist yet
   const bannersCount = (db.prepare('SELECT COUNT(*) as c FROM storefront_banners').get() as { c: number }).c;

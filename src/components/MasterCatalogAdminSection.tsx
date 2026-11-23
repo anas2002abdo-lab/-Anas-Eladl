@@ -58,13 +58,13 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
     multi_store_masters: 0,
   });
 
-  // Create Master modal
+  // Create Master modal (auto-publishes directly into the live Store)
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newMaster, setNewMaster] = useState({
     canonical_name_ar: '',
     canonical_name_en: '',
     brand: '',
-    category_id: 'cat_grocery',
+    category_id: '',
     category_path: '',
     barcode: '',
     size_label: '',
@@ -72,6 +72,10 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
     description: '',
     usage_notes: '',
     ingredients: '',
+    base_price: '',
+    sale_price: '',
+    stock_quantity: '50',
+    merchant_id: '',
   });
 
   // Inspect Master & linked stores modal
@@ -198,14 +202,20 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
   const handleCreateMaster = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.createAdminMasterProduct(newMaster);
-      onToast('تم إنشاء المنتج المركزي واعتماده بنجاح');
+      await api.createAdminMasterProduct({
+        ...newMaster,
+        base_price: newMaster.base_price !== '' ? Number(newMaster.base_price) : 0,
+        sale_price: newMaster.sale_price !== '' ? Number(newMaster.sale_price) : null,
+        stock_quantity: newMaster.stock_quantity !== '' ? Number(newMaster.stock_quantity) : 50,
+        merchant_id: newMaster.merchant_id || undefined,
+      });
+      onToast('تم إنشاء المنتج في الكتالوج المركزي ونشره مباشرة في المتجر بنجاح');
       setShowCreateModal(false);
       setNewMaster({
         canonical_name_ar: '',
         canonical_name_en: '',
         brand: '',
-        category_id: 'cat_grocery',
+        category_id: '',
         category_path: '',
         barcode: '',
         size_label: '',
@@ -213,6 +223,10 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
         description: '',
         usage_notes: '',
         ingredients: '',
+        base_price: '',
+        sale_price: '',
+        stock_quantity: '50',
+        merchant_id: '',
       });
       await loadMasters();
       onRefresh();
@@ -517,6 +531,7 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
         <MasterCatalogExcelPanel
           key={excelMode}
           categories={categories}
+          merchants={merchants}
           initialMode={excelMode}
           onImported={() => {
             void loadMasters();
@@ -1112,12 +1127,15 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
         </div>
       )}
 
-      {/* MODAL: CREATE NEW MASTER PRODUCT */}
+      {/* MODAL: CREATE NEW MASTER PRODUCT (AUTO-PUBLISHES TO STORE) */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-black text-slate-900">إضافة منتج مركزي معتمد جديد</h3>
+              <div>
+                <h3 className="text-lg font-black text-slate-900">إضافة منتج جديد (الكتالوج المركزي + المتجر)</h3>
+                <p className="text-xs text-slate-500 mt-0.5">يُضاف المنتج تلقائيًا للكتالوج المركزي ويُعرض مباشرة للعملاء في المتجر.</p>
+              </div>
               <button onClick={() => setShowCreateModal(false)} className="p-2 rounded-xl hover:bg-slate-100 cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
@@ -1144,9 +1162,59 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-700">العلامة التجارية (Brand) *</label>
+                  <label className="text-xs font-bold text-slate-700">السعر الأساسي في المتجر (ج.م) *</label>
                   <input
+                    type="number"
+                    step="0.5"
+                    min="0"
                     required
+                    value={newMaster.base_price}
+                    onChange={(e) => setNewMaster({ ...newMaster, base_price: e.target.value })}
+                    placeholder="مثال: 45"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">سعر العرض / الخصم (اختياري)</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    value={newMaster.sale_price}
+                    onChange={(e) => setNewMaster({ ...newMaster, sale_price: e.target.value })}
+                    placeholder="اتركه فارغًا بدون خصم"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">المخزون المتاح</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={newMaster.stock_quantity}
+                    onChange={(e) => setNewMaster({ ...newMaster, stock_quantity: e.target.value })}
+                    placeholder="50"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">المتجر المستهدف</label>
+                  <select
+                    value={newMaster.merchant_id}
+                    onChange={(e) => setNewMaster({ ...newMaster, merchant_id: e.target.value })}
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white"
+                  >
+                    <option value="">متجر اطلبها الرئيسي (تلقائي)</option>
+                    {merchants.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.business_name_ar}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">العلامة التجارية (اختياري)</label>
+                  <input
                     value={newMaster.brand}
                     onChange={(e) => setNewMaster({ ...newMaster, brand: e.target.value })}
                     placeholder="مثال: نسكافيه"
@@ -1154,9 +1222,8 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-700">الحجم / الوزن / السعة *</label>
+                  <label className="text-xs font-bold text-slate-700">الحجم / الوزن / السعة (اختياري)</label>
                   <input
-                    required
                     value={newMaster.size_label}
                     onChange={(e) => setNewMaster({ ...newMaster, size_label: e.target.value })}
                     placeholder="مثال: 200 جرام أو 1 لتر"
@@ -1180,7 +1247,7 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                     valueCategoryId={newMaster.category_id}
                     valueCategoryPath={newMaster.category_path}
                     compact
-                    label="مسار المنتج المركزي في الأقسام (رئيسي ← فرعي ← القسم الأخير)"
+                    label="مسار المنتج في الأقسام (رئيسي ← فرعي ← القسم الأخير)"
                     onChange={({ category_id, category_path }) =>
                       setNewMaster((prev) => ({ ...prev, category_id, category_path }))
                     }
@@ -1217,7 +1284,7 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                   type="submit"
                   className="px-5 py-2 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-sm font-bold cursor-pointer"
                 >
-                  حفظ واعتماد في الكتالوج المركزي
+                  حفظ ونشر في الكتالوج المركزي والمتجر
                 </button>
               </div>
             </form>

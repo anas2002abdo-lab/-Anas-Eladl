@@ -16,10 +16,11 @@ import {
   XCircle,
 } from 'lucide-react';
 import { api } from '../lib/api';
-import type { CategoryRecord } from '../shared/types';
+import type { CategoryRecord, MerchantRecord } from '../shared/types';
 
 interface Props {
   categories: CategoryRecord[];
+  merchants?: MerchantRecord[];
   initialMode?: 'import' | 'compare';
   onImported: () => void;
   onToast: (msg: string) => void;
@@ -38,6 +39,8 @@ interface ParsedMasterExcelRow {
   usage_notes: string;
   ingredients: string;
   price: string;
+  sale_price?: string;
+  stock_quantity?: string;
 }
 
 interface CompareRowResult {
@@ -240,7 +243,9 @@ async function parseMasterSpreadsheetFile(file: File): Promise<ParsedMasterExcel
 
   const usageKeys = ['الاستخدامات', 'طريقه الاستخدام', 'usage', 'usage notes'].map(normalizeHeaderCell);
   const ingredientsKeys = ['المكونات', 'ingredients'].map(normalizeHeaderCell);
-  const priceKeys = ['السعر', 'سعر', 'السعر الحالي', 'سعر البيع', 'price', 'base price', 'sale price'].map(normalizeHeaderCell);
+  const priceKeys = ['السعر', 'سعر', 'السعر الاساسي', 'السعر الحالي', 'سعر البيع', 'سعر المنتج', 'price', 'base price'].map(normalizeHeaderCell);
+  const salePriceKeys = ['سعر العرض', 'سعر الخصم', 'الخصم', 'عرض', 'sale price', 'discount price', 'offer price'].map(normalizeHeaderCell);
+  const stockKeys = ['المخزون', 'الكميه', 'الكميه بالمخزون', 'الرصيد', 'stock', 'qty', 'quantity', 'stock quantity'].map(normalizeHeaderCell);
 
   const findCol = (headers: string[], keys: string[]): number => {
     for (let i = 0; i < headers.length; i++) {
@@ -272,6 +277,8 @@ async function parseMasterSpreadsheetFile(file: File): Promise<ParsedMasterExcel
     let colUsage = -1;
     let colIngredients = -1;
     let colPrice = -1;
+    let colSalePrice = -1;
+    let colStock = -1;
 
     const scanLimit = Math.min(matrix.length, 12);
     for (let r = 0; r < scanLimit; r++) {
@@ -293,6 +300,8 @@ async function parseMasterSpreadsheetFile(file: File): Promise<ParsedMasterExcel
         colUsage = findCol(normHeaders, usageKeys);
         colIngredients = findCol(normHeaders, ingredientsKeys);
         colPrice = findCol(normHeaders, priceKeys);
+        colSalePrice = findCol(normHeaders, salePriceKeys);
+        colStock = findCol(normHeaders, stockKeys);
         break;
       }
     }
@@ -330,6 +339,8 @@ async function parseMasterSpreadsheetFile(file: File): Promise<ParsedMasterExcel
         usage_notes: colUsage >= 0 ? cleanCellText(row[colUsage]) : '',
         ingredients: colIngredients >= 0 ? cleanCellText(row[colIngredients]) : '',
         price: colPrice >= 0 ? cleanCellText(row[colPrice]) : '',
+        sale_price: colSalePrice >= 0 ? cleanCellText(row[colSalePrice]) : '',
+        stock_quantity: colStock >= 0 ? cleanCellText(row[colStock]) : '',
       });
     }
 
@@ -345,6 +356,7 @@ function applyColumnWidths(ws: XLSX.WorkSheet, widths: number[]) {
 
 export const MasterCatalogExcelPanel: React.FC<Props> = ({
   categories,
+  merchants = [],
   initialMode = 'compare',
   onImported,
   onToast,
@@ -355,7 +367,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [importFileName, setImportFileName] = useState('');
   const [importRows, setImportRows] = useState<ParsedMasterExcelRow[]>([]);
-  const [defaultCategoryId, setDefaultCategoryId] = useState('cat_grocery');
+  const [defaultCategoryId, setDefaultCategoryId] = useState('');
+  const [targetMerchantId, setTargetMerchantId] = useState('');
   const [skipExisting, setSkipExisting] = useState(true);
   const [updateMissingFields, setUpdateMissingFields] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -364,6 +377,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
     created_count: number;
     skipped_existing_count: number;
     updated_existing_count: number;
+    store_products_created: number;
+    store_products_updated: number;
     categories_created_count: number;
     error_count: number;
     errors: Array<{ row_index: number; name_ar: string; error: string }>;
@@ -384,7 +399,7 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
   const [exportingCatalog, setExportingCatalog] = useState(false);
 
   const merchantCategories = useMemo(
-    () => categories.filter((c) => !c.merchant_id && c.scope !== 'market'),
+    () => categories.filter((c) => c.scope !== 'market'),
     [categories]
   );
 
@@ -396,6 +411,9 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
       {
         'اسم المنتج': 'كرواسون بالزبدة مولتو 80 جرام',
         'الاسم الإنجليزي': 'Molto Butter Croissant 80g',
+        'السعر': 15,
+        'سعر العرض': '',
+        'المخزون': 50,
         'العلامة التجارية': 'مولتو',
         'الحجم أو الوزن': '80 جرام',
         'الباركود': '6221039000801',
@@ -406,6 +424,9 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
       {
         'اسم المنتج': 'نسكافيه كلاسيك 200 جرام',
         'الاسم الإنجليزي': 'Nescafe Classic 200g',
+        'السعر': 185,
+        'سعر العرض': 170,
+        'المخزون': 30,
         'العلامة التجارية': 'نسكافيه',
         'الحجم أو الوزن': '200 جرام',
         'الباركود': '7613035089123',
@@ -416,6 +437,9 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
       {
         'اسم المنتج': 'حليب جهينة كامل الدسم 1 لتر',
         'الاسم الإنجليزي': 'Juhayna Full Cream Milk 1L',
+        'السعر': 44,
+        'سعر العرض': '',
+        'المخزون': 40,
         'العلامة التجارية': 'جهينة',
         'الحجم أو الوزن': '1 لتر',
         'الباركود': '6221007011223',
@@ -425,12 +449,12 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
       },
     ];
     const ws = XLSX.utils.json_to_sheet(sampleRows);
-    applyColumnWidths(ws, [30, 26, 18, 15, 18, 38, 28, 36]);
+    applyColumnWidths(ws, [30, 26, 12, 12, 10, 18, 15, 18, 38, 28, 36]);
     ws['!views'] = [{ rightToLeft: true }];
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'نموذج المنتجات المركزية');
+    XLSX.utils.book_append_sheet(wb, ws, 'نموذج منتجات المتجر');
     XLSX.writeFile(wb, 'otlobha-master-products-template.xlsx');
-    onToast('تم تحميل نموذج Excel الجاهز بمسارات الأقسام الرئيسية والفرعية');
+    onToast('تم تحميل نموذج Excel الجاهز بالأسعار ومسارات الأقسام الرئيسية والفرعية');
   };
 
   const handleExportAllMasterCatalog = async () => {
@@ -502,6 +526,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
     let totalCreated = 0;
     let totalSkipped = 0;
     let totalUpdated = 0;
+    let totalStoreCreated = 0;
+    let totalStoreUpdated = 0;
     let totalCategoriesCreated = 0;
     let totalErrors = 0;
     const allErrors: Array<{ row_index: number; name_ar: string; error: string }> = [];
@@ -511,13 +537,17 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
         const chunk = rowsToImport.slice(start, start + CHUNK_SIZE);
         const res = await api.importMasterProductsExcel({
           rows: chunk as unknown as Array<Record<string, unknown>>,
-          default_category_id: defaultCategoryId,
+          default_category_id: defaultCategoryId || undefined,
+          merchant_id: targetMerchantId || undefined,
+          publish_to_store: true,
           skip_existing: skipExisting,
           update_missing_fields: updateMissingFields,
         });
         totalCreated += res.created_count || 0;
         totalSkipped += res.skipped_existing_count || 0;
         totalUpdated += res.updated_existing_count || 0;
+        totalStoreCreated += res.store_products_created || 0;
+        totalStoreUpdated += res.store_products_updated || 0;
         totalCategoriesCreated += res.categories_created_count || 0;
         totalErrors += res.error_count || 0;
         if (Array.isArray(res.errors) && allErrors.length < 100) {
@@ -530,15 +560,16 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
         created_count: totalCreated,
         skipped_existing_count: totalSkipped,
         updated_existing_count: totalUpdated,
+        store_products_created: totalStoreCreated,
+        store_products_updated: totalStoreUpdated,
         categories_created_count: totalCategoriesCreated,
         error_count: totalErrors,
         errors: allErrors,
       });
       onToast(
-        `اكتمل الرفع: تمت إضافة ${totalCreated} منتج مركزي جديد` +
-          (totalCategoriesCreated > 0 ? ` · إنشاء ${totalCategoriesCreated} قسم رئيسي/فرعي تلقائيًا` : '') +
-          (totalUpdated > 0 ? ` · تحديث ${totalUpdated}` : '') +
-          (totalSkipped > 0 ? ` · تخطي ${totalSkipped} موجود مسبقًا` : '')
+        `اكتمل الرفع: تمت إضافة ${totalCreated} منتج للكتالوج ونشر ${totalStoreCreated} منتج مباشرة في المتجر` +
+          (totalStoreUpdated > 0 ? ` · تحديث ${totalStoreUpdated} في المتجر` : '') +
+          (totalCategoriesCreated > 0 ? ` · إنشاء ${totalCategoriesCreated} قسم تلقائيًا` : '')
       );
       onImported();
     } catch (err) {
@@ -845,7 +876,23 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
           </div>
 
           {/* Smart Import Settings */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-[#F6F7F9] p-4 rounded-2xl border border-slate-200/80">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 bg-[#F6F7F9] p-4 rounded-2xl border border-slate-200/80">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">المتجر المستهدف للنشر المباشر</label>
+              <select
+                value={targetMerchantId}
+                onChange={(e) => setTargetMerchantId(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold"
+              >
+                <option value="">متجر اطلبها الرئيسي (تلقائي)</option>
+                {merchants.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.business_name_ar}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">القسم الافتراضي (إن لم يُذكر في الملف)</label>
               <select
@@ -853,6 +900,7 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                 onChange={(e) => setDefaultCategoryId(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold"
               >
+                <option value="">تلقائي من عمود القسم في الملف</option>
                 {merchantCategories.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.full_path_ar ? c.full_path_ar.replace(/;\s*$/, '') : c.name_ar}
@@ -869,8 +917,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                 className="mt-1 accent-[#A92224]"
               />
               <div>
-                <div className="text-xs font-black text-slate-900">تخطي المنتجات الموجودة تلقائيًا</div>
-                <div className="text-[11px] text-slate-500">يمنع إنشاء أي تكرار بالباركود أو الاسم + الماركة + الحجم.</div>
+                <div className="text-xs font-black text-slate-900">تخطي التكرار بالكتالوج</div>
+                <div className="text-[11px] text-slate-500">يمنع تكرار المنتج مع نشره أو تحديث سعره بالمتجر.</div>
               </div>
             </label>
 
@@ -882,8 +930,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                 className="mt-1 accent-[#A92224]"
               />
               <div>
-                <div className="text-xs font-black text-slate-900">استكمال الحقول الناقصة للموجود</div>
-                <div className="text-[11px] text-slate-500">يكمل الصورة أو الباركود أو الوصف إذا كان فارغًا في الكتالوج المركزي.</div>
+                <div className="text-xs font-black text-slate-900">استكمال الحقول الناقصة</div>
+                <div className="text-[11px] text-slate-500">يكمل الصورة أو الباركود أو الوصف للموجود.</div>
               </div>
             </label>
           </div>
@@ -971,6 +1019,7 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                     <tr>
                       <th className="py-2.5 px-3">#</th>
                       <th className="py-2.5 px-3">اسم المنتج</th>
+                      <th className="py-2.5 px-3">السعر</th>
                       <th className="py-2.5 px-3">العلامة</th>
                       <th className="py-2.5 px-3">الحجم / الوزن</th>
                       <th className="py-2.5 px-3">الباركود</th>
@@ -985,6 +1034,7 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                           {r.name_ar}
                           {r.name_en && <div className="text-[11px] font-normal text-slate-400">{r.name_en}</div>}
                         </td>
+                        <td className="py-2 px-3 font-bold text-emerald-700">{r.price ? `${r.price} ج.م` : '0 ج.م'}</td>
                         <td className="py-2 px-3 text-slate-700">{r.brand || '—'}</td>
                         <td className="py-2 px-3 text-[#A92224] font-bold">{r.size_label || 'تلقائي من الاسم'}</td>
                         <td className="py-2 px-3 font-mono text-slate-600">{r.barcode || '—'}</td>
@@ -1003,7 +1053,7 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
               <div className="flex items-center justify-between">
                 <div className="font-black text-emerald-900 flex items-center gap-2">
                   <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  تقرير نتيجة الرفع الجماعي
+                  تقرير نتيجة الرفع الجماعي (الكتالوج المركزي + المتجر)
                 </div>
                 <button
                   type="button"
@@ -1013,25 +1063,29 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5">
                 <div className="bg-white rounded-xl p-3 border border-emerald-200">
-                  <div className="text-[11px] text-slate-500 font-bold">تمت إضافتها (جديدة)</div>
+                  <div className="text-[11px] text-slate-500 font-bold">مضاف للكتالوج</div>
                   <div className="text-xl font-black text-emerald-700">{importReport.created_count}</div>
                 </div>
+                <div className="bg-white rounded-xl p-3 border border-teal-200">
+                  <div className="text-[11px] text-slate-500 font-bold">نُشر في المتجر</div>
+                  <div className="text-xl font-black text-teal-700">{importReport.store_products_created}</div>
+                </div>
+                <div className="bg-white rounded-xl p-3 border border-sky-200">
+                  <div className="text-[11px] text-slate-500 font-bold">حُدّث في المتجر</div>
+                  <div className="text-xl font-black text-sky-700">{importReport.store_products_updated}</div>
+                </div>
                 <div className="bg-white rounded-xl p-3 border border-indigo-200">
-                  <div className="text-[11px] text-slate-500 font-bold">أقسام رئيسية/فرعية أُنشئت</div>
+                  <div className="text-[11px] text-slate-500 font-bold">أقسام أُنشئت</div>
                   <div className="text-xl font-black text-indigo-700">{importReport.categories_created_count}</div>
                 </div>
                 <div className="bg-white rounded-xl p-3 border border-slate-200">
-                  <div className="text-[11px] text-slate-500 font-bold">موجودة مسبقًا (تم تخطيها)</div>
+                  <div className="text-[11px] text-slate-500 font-bold">موجود مسبقًا</div>
                   <div className="text-xl font-black text-slate-700">{importReport.skipped_existing_count}</div>
                 </div>
-                <div className="bg-white rounded-xl p-3 border border-amber-200">
-                  <div className="text-[11px] text-slate-500 font-bold">تم استكمال بياناتها</div>
-                  <div className="text-xl font-black text-amber-700">{importReport.updated_existing_count}</div>
-                </div>
                 <div className="bg-white rounded-xl p-3 border border-rose-200">
-                  <div className="text-[11px] text-slate-500 font-bold">صفوف بها ملاحظات/أخطاء</div>
+                  <div className="text-[11px] text-slate-500 font-bold">ملاحظات/أخطاء</div>
                   <div className="text-xl font-black text-rose-700">{importReport.error_count}</div>
                 </div>
               </div>

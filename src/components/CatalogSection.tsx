@@ -11,6 +11,7 @@ interface Props {
   merchants: MerchantRecord[];
   portalMode?: 'admin' | 'merchant';
   merchantSession?: MerchantRecord | null;
+  onOpenMasterCatalog?: () => void;
   onRefreshCore?: () => Promise<void>;
   onMerchantUpdated?: (merchant: MerchantRecord) => void;
   onNotify: (msg: string) => void;
@@ -57,6 +58,7 @@ export const CatalogSection: React.FC<Props> = ({
   merchants,
   portalMode = 'admin',
   merchantSession,
+  onOpenMasterCatalog,
   onRefreshCore,
   onMerchantUpdated,
   onNotify,
@@ -1132,16 +1134,48 @@ export const CatalogSection: React.FC<Props> = ({
 
       {subTab === 'products' && (
         <div className="space-y-6">
+          {!editingId && (
+            <div className="bg-gradient-to-l from-[#FFFBEB] via-white to-[#FEF2F2] border border-[#F5A623]/40 rounded-2xl p-5 flex flex-wrap items-center justify-between gap-4 shadow-xs">
+              <div className="space-y-1 max-w-2xl">
+                <div className="inline-flex items-center gap-1.5 text-[11px] font-black text-[#A92224] bg-red-50 border border-red-200/70 px-2.5 py-0.5 rounded-full">
+                  <FolderTree className="w-3.5 h-3.5" />
+                  <span>{isAr ? 'مسار الإضافة الموحّد' : 'Unified Catalog Workflow'}</span>
+                </div>
+                <h3 className="text-base font-black text-slate-900">
+                  {isAr
+                    ? 'الكتالوج المركزي هو الطريقة الوحيدة لإضافة المنتجات أو رفع ملفات Excel'
+                    : 'Master Catalog is the only way to add or Excel-import products'}
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  {isAr
+                    ? isMerchantPortal
+                      ? 'ابحث عن المنتج في الكتالوج المركزي بالأعلى واربط متجرك به بسعرك ومخزونك، أو أرسل طلب منتج جديد.'
+                      : 'أي منتج يتم إضافته يدويًا أو رفعه عبر ملف Excel داخل «الكتالوج المركزي» يُنشر تلقائيًا ومباشرةً في المتجر ويظهر للعملاء فورًا. يمكنك هنا تعديل أسعار أو مخزون المنتجات الحالية أو حذفها.'
+                    : 'Any product added manually or via Excel in Master Catalog is automatically published live to the store.'}
+                </p>
+              </div>
+              {!isMerchantPortal && onOpenMasterCatalog && (
+                <button
+                  type="button"
+                  onClick={onOpenMasterCatalog}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-sm font-black shadow-sm cursor-pointer shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{isAr ? 'فتح الكتالوج المركزي لإضافة / رفع Excel' : 'Open Master Catalog'}</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {editingId && (
           <form onSubmit={handleSaveProduct} className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-slate-900">
-                {editingId ? (isAr ? 'تعديل المنتج المحدد' : 'Edit Product') : isAr ? 'إضافة منتج جديد لمتجر أو صيدلية' : 'Add New Product'}
+                {isAr ? 'تعديل المنتج المحدد' : 'Edit Product'}
               </h3>
-              {editingId && (
-                <button type="button" onClick={resetProductForm} className="text-xs text-slate-600 underline">
-                  {isAr ? 'إلغاء التعديل وإضافة جديد' : 'Cancel Edit'}
-                </button>
-              )}
+              <button type="button" onClick={resetProductForm} className="text-xs text-slate-600 underline cursor-pointer">
+                {isAr ? 'إغلاق التعديل' : 'Close Edit'}
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -1368,181 +1402,45 @@ export const CatalogSection: React.FC<Props> = ({
               </div>
             </div>
           </form>
+          )}
 
-          {/* EXCEL IMPORT & EXPORT BAR */}
-          <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
-                  <FileSpreadsheet className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">
-                    {isAr ? 'استيراد وتصدير المنتجات عبر جميع صيغ Excel والجداول (حتى 10,000 صنف)' : 'Universal Excel & Spreadsheet Import/Export (Up to 10,000 Items)'}
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    {isAr
-                      ? 'يقبل جميع صيغ الإكسل (.xlsx, .xls, .xlsm, .xlsb, .ods, .csv, .tsv, .xml) مع تعرّف تلقائي ذكي على الأعمدة وسقف استيراد حتى 10,000 صنف'
-                      : 'Supports all spreadsheet formats (.xlsx, .xls, .xlsm, .xlsb, .ods, .csv, .tsv, .xml) up to 10,000 items'}
-                  </p>
-                </div>
+          {/* Export Store Products to Excel (Import is exclusively in Master Catalog) */}
+          <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                <FileSpreadsheet className="w-5 h-5" />
               </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleDownloadExcelTemplate}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-lg text-xs font-semibold"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-slate-600" />
-                  <span>{isAr ? 'تنزيل نموذج Excel جاهز' : 'Download Template'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportProductsExcel}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>{isAr ? 'تصدير المنتجات إلى Excel' : 'Export Excel'}</span>
-                </button>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  {isAr ? 'تصدير منتجات المتجر الحالية إلى Excel' : 'Export Live Store Products to Excel'}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {isAr
+                    ? 'لرفع ملف Excel جديد وإضافة منتجات للمتجر استخدم تبويب «الكتالوج المركزي ← رفع Excel».'
+                    : 'To upload Excel and add new products, use Master Catalog → Excel Upload.'}
+                </p>
               </div>
             </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end pt-3 border-t border-slate-100">
-              <div className="sm:col-span-4">
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  {isAr ? 'استيراد الملف لصالح متجر / صيدلية:' : 'Target Merchant for Import:'}
-                </label>
-                <select
-                  value={lockedMerchantId || importMerchantId}
-                  disabled={isMerchantPortal}
-                  onChange={(e) => setImportMerchantId(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white disabled:bg-slate-100"
-                >
-                  {merchants.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.business_name_ar}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="sm:col-span-5">
-                <label className="flex items-center justify-center gap-2 w-full px-3.5 py-2 border-2 border-dashed border-emerald-300 bg-emerald-50/50 hover:bg-emerald-50 text-emerald-900 rounded-lg text-xs font-bold cursor-pointer min-h-[38px]">
-                  <Upload className="w-4 h-4 text-emerald-700 shrink-0" />
-                  <span>
-                    {importFileName
-                      ? `تم اختيار: ${importFileName}`
-                      : isAr
-                      ? 'اختر أي ملف Excel / CSV / ODS (حتى 10,000 صنف)'
-                      : 'Choose any Excel / CSV / ODS File'}
-                  </span>
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls,.xlsm,.xlsb,.xltx,.xltm,.xlt,.ods,.fods,.csv,.tsv,.txt,.xml,.html,.htm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.ms-excel.sheet.binary.macroEnabled.12,application/vnd.oasis.opendocument.spreadsheet,text/csv,text/tab-separated-values,text/plain"
-                    onChange={handleExcelFileSelected}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-              <div className="sm:col-span-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {!isMerchantPortal && onOpenMasterCatalog && (
                 <button
                   type="button"
-                  disabled={parsedExcelRows.length === 0 || importingExcel}
-                  onClick={handleConfirmExcelImport}
-                  className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white rounded-lg text-xs font-bold min-h-[38px]"
+                  onClick={onOpenMasterCatalog}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#A92224] hover:bg-[#86191B] text-white rounded-lg text-xs font-bold cursor-pointer"
                 >
-                  {importingExcel
-                    ? importProgress
-                      ? isAr
-                        ? `جاري الاستيراد (${importProgress.done}/${importProgress.total})...`
-                        : `Importing (${importProgress.done}/${importProgress.total})...`
-                      : isAr
-                      ? 'جاري الاستيراد...'
-                      : 'Importing...'
-                    : isAr
-                    ? `تأكيد استيراد (${parsedExcelRows.length})`
-                    : `Confirm Import (${parsedExcelRows.length})`}
+                  <Upload className="w-4 h-4" />
+                  <span>{isAr ? 'رفع Excel من الكتالوج المركزي' : 'Upload Excel in Master Catalog'}</span>
                 </button>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={handleExportProductsExcel}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>{isAr ? 'تصدير المنتجات إلى Excel' : 'Export Excel'}</span>
+              </button>
             </div>
-
-            {parsedExcelRows.length > 0 && (
-              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-slate-900">
-                    معاينة الملف قبل الحفظ ({parsedExcelRows.length} منتج) — يتم تحديث المنتج تلقائيًا إذا تطابق «كود المنتج»
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setParsedExcelRows([]);
-                      setImportFileName('');
-                    }}
-                    className="text-rose-600 hover:underline"
-                  >
-                    إلغاء المعاينة
-                  </button>
-                </div>
-                <div className="overflow-x-auto max-h-48">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-slate-500">
-                        <th className="py-1.5 text-start">كود المنتج</th>
-                        <th className="py-1.5 text-start">اسم المنتج</th>
-                        <th className="py-1.5 text-start">سعر المنتج</th>
-                        <th className="py-1.5 text-start">قسم المنتج</th>
-                        <th className="py-1.5 text-start">صورة المنتج</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200/70">
-                      {parsedExcelRows.slice(0, 8).map((r, idx) => (
-                        <tr key={idx}>
-                          <td className="py-1.5 font-mono-num text-slate-700">{r.product_code || 'تلقائي'}</td>
-                          <td className="py-1.5 font-semibold text-slate-900">{r.name_ar}</td>
-                          <td className="py-1.5 tabular-nums font-bold text-teal-700">{r.price} ج.م</td>
-                          <td className="py-1.5 text-slate-600">{r.category_name || 'القسم الافتراضي'}</td>
-                          <td className="py-1.5">
-                            {r.image_url ? (
-                              <div className="flex items-center gap-1.5">
-                                <img
-                                  src={r.image_url}
-                                  alt={r.name_ar}
-                                  referrerPolicy="no-referrer"
-                                  className="w-6 h-6 rounded object-cover border border-slate-200"
-                                />
-                                <span className="text-[11px] text-teal-700 truncate max-w-[140px]" dir="ltr">
-                                  {r.image_url}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="text-slate-400">بدون صورة</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {importSummary && (
-              <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg bg-teal-50 border border-teal-200 text-xs text-teal-900">
-                <CheckCircle2 className="w-4 h-4 text-teal-700 shrink-0" />
-                <span>
-                  نتيجة الاستيراد: <strong>{importSummary.created}</strong> منتج جديد ·{' '}
-                  <strong>{importSummary.updated}</strong> منتج محدّث ·{' '}
-                  <strong>{importSummary.categories_created}</strong> قسم جديد ·{' '}
-                  <strong>{importSummary.skipped}</strong> متخطى
-                </span>
-                {importSummary.errors.length > 0 && (
-                  <span className="inline-flex items-center gap-1 text-amber-800">
-                    <AlertCircle className="w-3.5 h-3.5" />
-                    {importSummary.errors[0]}
-                  </span>
-                )}
-              </div>
-            )}
           </div>
 
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">

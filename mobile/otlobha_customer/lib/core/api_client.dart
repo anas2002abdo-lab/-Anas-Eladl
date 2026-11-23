@@ -894,6 +894,36 @@ class OtlobhaCustomerApi {
     return _decode(res, endpointHint: '/api/mobile/push/register');
   }
 
+  static Future<void> registerGuestPushToken({
+    required String fcmToken,
+    required String deviceId,
+    String platform = 'android',
+    String? appVersion,
+    String? deviceLabel,
+  }) async {
+    try {
+      await http
+          .post(
+            _apiUri('/api/mobile/push/register-guest'),
+            headers: const {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: jsonEncode({
+              'fcm_token': fcmToken,
+              'device_id': deviceId,
+              'platform': platform,
+              'app': 'customer',
+              if (appVersion != null && appVersion.isNotEmpty) 'app_version': appVersion,
+              if (deviceLabel != null && deviceLabel.isNotEmpty) 'device_label': deviceLabel,
+            }),
+          )
+          .timeout(const Duration(seconds: 12));
+    } catch (_) {
+      // Best-effort guest device registration
+    }
+  }
+
   Future<void> unregisterPushToken({String? fcmToken, String? deviceId}) async {
     if (!hasTokens) return;
     try {

@@ -169,16 +169,16 @@ class _HomeScreenState extends State<HomeScreen> {
           .where((s) => s.isNotEmpty)
           .toList();
 
-      if (parsedCats.isNotEmpty) {
+      if (reset) {
         widget.onCategoriesLoaded(parsedCats);
       }
 
       setState(() {
         if (reset) {
           _products = parsedProducts;
-          if (parsedBanners.isNotEmpty) _banners = parsedBanners;
-          if (parsedCats.isNotEmpty) _categories = parsedCats;
-          if (parsedBrands.isNotEmpty) _brands = parsedBrands;
+          _banners = parsedBanners;
+          _categories = parsedCats;
+          _brands = parsedBrands;
         } else {
           final existingIds = _products.map((p) => (p['id'] ?? '').toString()).toSet();
           for (final p in parsedProducts) {

@@ -1011,6 +1011,82 @@ export function createMasterProductRecord(input: {
   return { master, reused: false };
 }
 
+function parseFlexibleMoney(raw: unknown): number | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 ? raw : null;
+  const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
+  const normalized = String(raw)
+    .trim()
+    .replace(/[٠-٩]/g, (d) => String(arabicDigits.indexOf(d)))
+    .replace(/[,٬]/g, '')
+    .replace(/[^\d.]/g, '');
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function ensureDefaultStorefrontMerchant(requestedMerchantId?: string | null): string {
+  const reqId = String(requestedMerchantId || '').trim();
+  if (reqId) {
+    const found = db.prepare('SELECT id FROM merchants WHERE id = ?').get(reqId) as { id: string } | undefined;
+    if (found) return found.id;
+  }
+
+  const approved = db
+    .prepare("SELECT id FROM merchants WHERE verification_status = 'approved' ORDER BY rowid ASC LIMIT 1")
+    .get() as { id: string } | undefined;
+  if (approved) return approved.id;
+
+  const anyMerchant = db.prepare('SELECT id FROM merchants ORDER BY rowid ASC LIMIT 1').get() as
+    | { id: string }
+    | undefined;
+  if (anyMerchant) return anyMerchant.id;
+
+  // Auto-create primary official Otlobha storefront merchant so Master Catalog products publish seamlessly
+  const defaultId = 'mer_otlobha_store';
+  db.prepare(`
+    INSERT OR IGNORE INTO merchants (
+      id, email, password_hash, business_name_ar, business_name_en, merchant_type,
+      branch_name, zone_name, phone, working_hours, terms_accepted, commission_rate,
+      verification_status, supports_free_order, is_open_now, is_email_verified, lat, lng
+    ) VALUES (
+      ?, 'store@otlobha.eg', '', 'متجر اطلبها', 'Otlobha Store', 'supermarket',
+      'الفرع الرئيسي', 'المنزلة', '01000000000', '24 ساعة', 1, 0,
+      'approved', 1, 1, 1, 31.1583, 31.9369
+    )
+  `).run(defaultId);
+  return defaultId;
+}
+
+export function ensureValidStoreCategoryId(rawCatId?: string | null): string {
+  const cleanId = String(rawCatId || '').trim();
+  if (cleanId) {
+    const found = db.prepare('SELECT id FROM categories WHERE id = ?').get(cleanId) as { id: string } | undefined;
+    if (found) return found.id;
+  }
+
+  const anyActive = db
+    .prepare("SELECT id FROM categories WHERE is_active = 1 AND scope IN ('merchant', 'pharmacy') ORDER BY level ASC, sort_order ASC LIMIT 1")
+    .get() as { id: string } | undefined;
+  if (anyActive) return anyActive.id;
+
+  const anyCat = db.prepare('SELECT id FROM categories ORDER BY rowid ASC LIMIT 1').get() as { id: string } | undefined;
+  if (anyCat) return anyCat.id;
+
+  // Only created on demand when adding a product while zero categories exist in the store
+  const fallbackId = 'cat_general';
+  db.prepare(`
+    INSERT OR IGNORE INTO categories (
+      id, scope, merchant_id, parent_id, level, full_path_ar, name_ar, name_en,
+      image_url, group_key, group_name_ar, sort_order, is_offers_section, is_active
+    ) VALUES (
+      ?, 'merchant', NULL, NULL, 0, 'عام;', 'عام', 'General',
+      '', 'groceries', 'المقاضي', 0, 0, 1
+    )
+  `).run(fallbackId);
+  return fallbackId;
+}
+
 export function linkMerchantListingToMaster(input: {
   merchant_id: string;
   master_product_id: string;
@@ -1052,20 +1128,13 @@ export function linkMerchantListingToMaster(input: {
     throw new Error('سعر العرض يجب أن يكون أقل من أو يساوي السعر الأساسي');
   }
 
-  const stockQty = Math.max(0, Math.floor(Number(input.stock_quantity ?? 10)));
+  const stockQty = Math.max(0, Math.floor(Number(input.stock_quantity ?? 50)));
   const minQty = Math.max(1, Math.floor(Number(input.min_order_qty ?? 1)));
   const isAvailable = input.is_available !== false ? 1 : 0;
   const isOffer = Boolean(input.is_offer) || (salePrice !== null && salePrice < basePrice) ? 1 : 0;
 
-  // Ensure valid category_id
-  let categoryId = input.category_id || master.category_id || 'cat_grocery';
-  const catExists = db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId);
-  if (!catExists) {
-    const fallbackCat = db.prepare('SELECT id FROM categories WHERE is_active = 1 LIMIT 1').get() as
-      | { id: string }
-      | undefined;
-    categoryId = fallbackCat?.id || 'cat_grocery';
-  }
+  // Ensure valid category_id (safe even when store started with 0 categories)
+  const categoryId = ensureValidStoreCategoryId(input.category_id || master.category_id);
 
   // Check if merchant already has a listing for this master product (prevent duplicate store listing!)
   const existing = db
@@ -1076,6 +1145,10 @@ export function linkMerchantListingToMaster(input: {
     db.prepare(`
       UPDATE products SET
         category_id = ?,
+        name_ar = ?,
+        name_en = ?,
+        description = ?,
+        image_url = CASE WHEN TRIM(COALESCE(?, '')) != '' THEN ? ELSE image_url END,
         base_price = ?,
         sale_price = ?,
         is_offer = ?,
@@ -1092,6 +1165,11 @@ export function linkMerchantListingToMaster(input: {
       WHERE id = ?
     `).run(
       categoryId,
+      master.canonical_name_ar,
+      master.canonical_name_en || master.canonical_name_ar,
+      master.description || existing.description || '',
+      master.image_url || '',
+      master.image_url || '',
       basePrice,
       salePrice,
       isOffer,
@@ -2208,7 +2286,9 @@ export function registerMasterCatalogRoutes(app: Express): void {
           (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id AND p.is_available = 1) AS products_count,
           (SELECT p.image_url FROM products p WHERE p.category_id = c.id AND p.is_available = 1 AND TRIM(COALESCE(p.image_url, '')) != '' LIMIT 1) AS sample_image_url
         FROM categories c
-        WHERE c.is_active = 1 AND c.merchant_id IS NULL AND c.scope IN ('merchant', 'pharmacy')
+        WHERE c.is_active = 1
+          AND c.scope IN ('merchant', 'pharmacy')
+          AND (c.merchant_id IS NULL OR EXISTS (SELECT 1 FROM merchants m WHERE m.id = c.merchant_id))
         ORDER BY c.level ASC, c.sort_order ASC, c.name_ar ASC
       `)
       .all() as Array<Record<string, any>>;
@@ -3061,7 +3141,7 @@ export function registerMasterCatalogRoutes(app: Express): void {
   app.post('/api/admin/master-products', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
     if (!ensureAdminCatalogAccess(req, res)) return;
     try {
-      let resolvedCatId = req.body?.category_id || null;
+      let resolvedCatId: string | null = req.body?.category_id ? String(req.body.category_id).trim() : null;
       const rawCatPath = String(req.body?.category_path || '').trim();
       if (rawCatPath) {
         const resolver = createCategoryPathResolver({ scope: 'merchant', merchantId: null });
@@ -3069,13 +3149,44 @@ export function registerMasterCatalogRoutes(app: Express): void {
         if (resolved.category_id) resolvedCatId = resolved.category_id;
         if (resolved.created_count > 0) recomputeAllCategoryPaths();
       }
+      // Validate category_id exists (or gracefully create/pick valid category)
+      resolvedCatId = ensureValidStoreCategoryId(resolvedCatId);
+
       const result = createMasterProductRecord({
         ...req.body,
         category_id: resolvedCatId,
         created_by: req.auth!.fullName,
         allow_reuse_exact: false,
       });
-      res.status(201).json({ ok: true, ...result });
+
+      // Automatically publish the Master Product directly into the live Store (products table)
+      const targetMerchantId = ensureDefaultStorefrontMerchant(req.body?.merchant_id);
+      const parsedBasePrice = parseFlexibleMoney(req.body?.base_price ?? req.body?.price) ?? 0;
+      const parsedSalePriceRaw = parseFlexibleMoney(req.body?.sale_price);
+      const parsedSalePrice =
+        parsedSalePriceRaw !== null && parsedSalePriceRaw > 0 && parsedSalePriceRaw < parsedBasePrice
+          ? parsedSalePriceRaw
+          : null;
+      const parsedStock = Math.max(0, Math.floor(Number(req.body?.stock_quantity ?? 50) || 50));
+
+      const linked = linkMerchantListingToMaster({
+        merchant_id: targetMerchantId,
+        master_product_id: String(result.master.id),
+        category_id: resolvedCatId,
+        base_price: parsedBasePrice,
+        sale_price: parsedSalePrice,
+        stock_quantity: parsedStock,
+        is_available: req.body?.is_available !== false,
+        is_offer: Boolean(req.body?.is_offer) || parsedSalePrice !== null,
+        actor_name: req.auth!.fullName,
+      });
+
+      res.status(201).json({
+        ok: true,
+        ...result,
+        listing: linked.listing,
+        merchant_id: targetMerchantId,
+      });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }
@@ -3145,12 +3256,32 @@ export function registerMasterCatalogRoutes(app: Express): void {
       existing.id
     );
 
-    // Sync canonical brand/size_label/barcode down to linked listings (NEVER touching merchant price/stock!)
+    // Sync canonical fields down to linked store listings
+    const nextCatId = b.category_id !== undefined ? b.category_id : existing.category_id;
+    const nextImgUrl = b.image_url !== undefined ? String(b.image_url || '').trim() : existing.image_url;
+    const nextDesc = b.description !== undefined ? String(b.description || '') : existing.description;
     db.prepare(`
       UPDATE products
-      SET brand = ?, size_label = ?, size_value = ?, size_unit = ?, barcode = ?, updated_at = datetime('now')
+      SET
+        name_ar = ?,
+        name_en = ?,
+        category_id = COALESCE(?, category_id),
+        image_url = CASE WHEN TRIM(COALESCE(?, '')) != '' THEN ? ELSE image_url END,
+        description = ?,
+        brand = ?,
+        size_label = ?,
+        size_value = ?,
+        size_unit = ?,
+        barcode = ?,
+        updated_at = datetime('now')
       WHERE master_product_id = ?
     `).run(
+      nextNameAr,
+      nextNameEn || nextNameAr,
+      nextCatId,
+      nextImgUrl,
+      nextImgUrl,
+      nextDesc,
       nextBrand,
       nextSizeLabel || parsedSize?.displayLabel || '',
       parsedSize?.canonicalValue ?? existing.size_value ?? null,
@@ -3429,12 +3560,16 @@ export function registerMasterCatalogRoutes(app: Express): void {
     res.json({ ok: true });
   });
 
-  // Delete all products in Central Master Catalog
+  // Delete all products in Central Master Catalog (and remove all published store products)
   app.delete('/api/admin/master-products/all', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
     if (!ensureAdminCatalogAccess(req, res)) return;
     try {
       db.transaction(() => {
-        db.prepare('UPDATE products SET master_product_id = NULL WHERE master_product_id IS NOT NULL').run();
+        db.prepare('DELETE FROM product_deals').run();
+        db.prepare('DELETE FROM product_attributes').run();
+        db.prepare('DELETE FROM product_images').run();
+        db.prepare('DELETE FROM product_matching_requests').run();
+        db.prepare('DELETE FROM products').run();
         db.prepare('DELETE FROM master_products').run();
         recordAuditLog({
           actor_name: req.auth!.fullName,
@@ -3442,22 +3577,25 @@ export function registerMasterCatalogRoutes(app: Express): void {
           action: 'MASTER_CATALOG_CLEARED',
           entity_type: 'master_products',
           entity_id: 'all',
-          details: 'حذف جميع المنتجات في الكتالوج المركزي وفصل ربط المنتجات',
+          details: 'حذف جميع المنتجات في الكتالوج المركزي والمتجر بالكامل',
         });
       })();
-      res.json({ ok: true, message: 'تم حذف جميع المنتجات في الكتالوج المركزي بنجاح' });
+      res.json({ ok: true, message: 'تم حذف جميع المنتجات في الكتالوج المركزي والمتجر بنجاح' });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
   });
 
-  // Delete single Master Product
+  // Delete single Master Product (and remove its linked store listings)
   app.delete('/api/admin/master-products/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
     if (!ensureAdminCatalogAccess(req, res)) return;
     const { id } = req.params;
     try {
       db.transaction(() => {
-        db.prepare('UPDATE products SET master_product_id = NULL WHERE master_product_id = ?').run(id);
+        db.prepare('DELETE FROM product_deals WHERE master_product_id = ? OR product_id IN (SELECT id FROM products WHERE master_product_id = ?)').run(id, id);
+        db.prepare('DELETE FROM products WHERE master_product_id = ?').run(id);
+        db.prepare('DELETE FROM product_images WHERE master_product_id = ?').run(id);
+        db.prepare('DELETE FROM product_attributes WHERE master_product_id = ?').run(id);
         const info = db.prepare('DELETE FROM master_products WHERE id = ?').run(id);
         if (info.changes === 0) {
           throw new Error('المنتج المركزي غير موجود');
@@ -3468,10 +3606,10 @@ export function registerMasterCatalogRoutes(app: Express): void {
           action: 'MASTER_PRODUCT_DELETED',
           entity_type: 'master_products',
           entity_id: id,
-          details: `حذف المنتج المركزي ${id} وفصل ربط المتاجر به`,
+          details: `حذف المنتج المركزي ${id} وإزالة عروضه المرتبطة من المتجر`,
         });
       })();
-      res.json({ ok: true, message: 'تم حذف المنتج المركزي بنجاح' });
+      res.json({ ok: true, message: 'تم حذف المنتج المركزي ومنتجاته في المتجر بنجاح' });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }
@@ -3562,7 +3700,9 @@ export function registerMasterCatalogRoutes(app: Express): void {
       }
       const result = bulkImportMasterProductsFromExcel({
         rows,
-        default_category_id: req.body?.default_category_id || 'cat_grocery',
+        default_category_id: req.body?.default_category_id || null,
+        merchant_id: req.body?.merchant_id || null,
+        publish_to_store: req.body?.publish_to_store !== false,
         skip_existing: req.body?.skip_existing !== false,
         update_missing_fields: Boolean(req.body?.update_missing_fields),
         actor_name: req.auth?.fullName || req.auth?.email || 'admin',
@@ -3591,6 +3731,8 @@ export interface ExcelMasterInputRow {
   usage_notes?: string;
   ingredients?: string;
   price?: number | string | null;
+  sale_price?: number | string | null;
+  stock_quantity?: number | string | null;
   extra?: Record<string, unknown>;
 }
 
@@ -4026,6 +4168,8 @@ export function compareExcelRowsAgainstMasterCatalog(rows: ExcelMasterInputRow[]
 export function bulkImportMasterProductsFromExcel(input: {
   rows: ExcelMasterInputRow[];
   default_category_id?: string | null;
+  merchant_id?: string | null;
+  publish_to_store?: boolean;
   skip_existing?: boolean;
   update_missing_fields?: boolean;
   actor_name?: string;
@@ -4034,7 +4178,10 @@ export function bulkImportMasterProductsFromExcel(input: {
   created_count: number;
   skipped_existing_count: number;
   updated_existing_count: number;
+  store_products_created: number;
+  store_products_updated: number;
   categories_created_count: number;
+  merchant_id: string | null;
   error_count: number;
   errors: Array<{ row_index: number; name_ar: string; error: string }>;
   created_ids: string[];
@@ -4042,7 +4189,9 @@ export function bulkImportMasterProductsFromExcel(input: {
   const index = buildMasterCatalogMemoryIndex();
   const skipExisting = input.skip_existing !== false;
   const updateMissing = Boolean(input.update_missing_fields);
+  const publishToStore = input.publish_to_store !== false;
   const actorName = String(input.actor_name || 'admin');
+  const targetMerchantId = publishToStore ? ensureDefaultStorefrontMerchant(input.merchant_id) : null;
 
   // Hierarchical category path resolver (supports "سوبر ماركت > مخبوزات > كرواسون وكيك;")
   const catResolver = createCategoryPathResolver({ scope: 'merchant', merchantId: null });
@@ -4056,6 +4205,8 @@ export function bulkImportMasterProductsFromExcel(input: {
   let createdCount = 0;
   let skippedExistingCount = 0;
   let updatedExistingCount = 0;
+  let storeProductsCreated = 0;
+  let storeProductsUpdated = 0;
   let categoriesCreatedCount = 0;
   const errors: Array<{ row_index: number; name_ar: string; error: string }> = [];
   const createdIds: string[] = [];
@@ -4082,6 +4233,137 @@ export function bulkImportMasterProductsFromExcel(input: {
       updated_at = datetime('now')
     WHERE id = ?
   `);
+
+  const findStoreListingStmt = db.prepare(
+    'SELECT id, base_price, sale_price, stock_quantity FROM products WHERE merchant_id = ? AND master_product_id = ? LIMIT 1'
+  );
+  const checkCodeStmt = db.prepare('SELECT 1 FROM products WHERE LOWER(product_code) = LOWER(?)');
+  const insertStoreProductStmt = db.prepare(`
+    INSERT INTO products (
+      id, product_code, merchant_id, category_id, master_product_id,
+      name_ar, name_en, description, image_url,
+      brand, size_label, size_value, size_unit, barcode, merchant_sku,
+      base_price, sale_price, is_offer, stock_quantity, low_stock_threshold,
+      min_order_qty, requires_prescription, addons_text, is_available
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 5, 1, 0, '', 1)
+  `);
+  const updateStoreProductStmt = db.prepare(`
+    UPDATE products
+    SET
+      category_id = ?,
+      name_ar = ?,
+      name_en = ?,
+      description = CASE WHEN TRIM(COALESCE(?, '')) != '' THEN ? ELSE description END,
+      image_url = CASE WHEN TRIM(COALESCE(?, '')) != '' THEN ? ELSE image_url END,
+      brand = CASE WHEN TRIM(COALESCE(?, '')) != '' THEN ? ELSE brand END,
+      size_label = CASE WHEN TRIM(COALESCE(?, '')) != '' THEN ? ELSE size_label END,
+      barcode = COALESCE(NULLIF(TRIM(COALESCE(?, '')), ''), barcode),
+      base_price = ?,
+      sale_price = ?,
+      is_offer = ?,
+      stock_quantity = ?,
+      is_available = 1,
+      updated_at = datetime('now')
+    WHERE id = ?
+  `);
+
+  let prodCodeSeq = 1001 + ((db.prepare('SELECT COUNT(*) as c FROM products').get() as { c: number })?.c || 0);
+  const nextProductCode = () => {
+    while (checkCodeStmt.get(`PRD-${prodCodeSeq}`)) {
+      prodCodeSeq += 1;
+    }
+    const code = `PRD-${prodCodeSeq}`;
+    prodCodeSeq += 1;
+    return code;
+  };
+
+  const upsertStoreListing = (params: {
+    masterId: string;
+    nameAr: string;
+    nameEn: string;
+    description: string;
+    imageUrl: string;
+    brand: string;
+    sizeLabel: string;
+    sizeValue: number | null;
+    sizeUnit: string;
+    barcode: string | null;
+    categoryId: string | null;
+    rawPrice: unknown;
+    rawSalePrice: unknown;
+    rawStock: unknown;
+  }) => {
+    if (!targetMerchantId) return;
+    const validCatId = ensureValidStoreCategoryId(params.categoryId);
+    const parsedPrice = parseFlexibleMoney(params.rawPrice);
+    const parsedSaleRaw = parseFlexibleMoney(params.rawSalePrice);
+    const parsedStockRaw = parseFlexibleMoney(params.rawStock);
+
+    const existingListing = findStoreListingStmt.get(targetMerchantId, params.masterId) as
+      | { id: string; base_price: number; sale_price: number | null; stock_quantity: number }
+      | undefined;
+
+    if (existingListing) {
+      const nextBase = parsedPrice !== null ? parsedPrice : Number(existingListing.base_price || 0);
+      const nextSale =
+        parsedSaleRaw !== null && parsedSaleRaw > 0 && parsedSaleRaw < nextBase
+          ? parsedSaleRaw
+          : existingListing.sale_price ?? null;
+      const nextStock =
+        parsedStockRaw !== null ? Math.max(0, Math.floor(parsedStockRaw)) : Number(existingListing.stock_quantity ?? 50);
+      const isOffer = nextSale !== null && nextSale < nextBase ? 1 : 0;
+
+      updateStoreProductStmt.run(
+        validCatId,
+        params.nameAr,
+        params.nameEn || params.nameAr,
+        params.description,
+        params.description,
+        params.imageUrl,
+        params.imageUrl,
+        params.brand,
+        params.brand,
+        params.sizeLabel,
+        params.sizeLabel,
+        params.barcode || '',
+        nextBase,
+        nextSale,
+        isOffer,
+        nextStock,
+        existingListing.id
+      );
+      storeProductsUpdated++;
+      return;
+    }
+
+    const basePrice = parsedPrice ?? 0;
+    const salePrice =
+      parsedSaleRaw !== null && parsedSaleRaw > 0 && parsedSaleRaw < basePrice ? parsedSaleRaw : null;
+    const stockQty = parsedStockRaw !== null ? Math.max(0, Math.floor(parsedStockRaw)) : 50;
+    const isOffer = salePrice !== null && salePrice < basePrice ? 1 : 0;
+
+    insertStoreProductStmt.run(
+      uid('prd'),
+      nextProductCode(),
+      targetMerchantId,
+      validCatId,
+      params.masterId,
+      params.nameAr,
+      params.nameEn || params.nameAr,
+      params.description,
+      params.imageUrl,
+      params.brand,
+      params.sizeLabel,
+      params.sizeValue,
+      params.sizeUnit,
+      params.barcode,
+      basePrice,
+      salePrice,
+      isOffer,
+      stockQty
+    );
+    storeProductsCreated++;
+  };
 
   const tx = db.transaction(() => {
     for (let i = 0; i < input.rows.length; i++) {
@@ -4118,9 +4400,15 @@ export function bulkImportMasterProductsFromExcel(input: {
       }
 
       if (match.status === 'existing' && match.best) {
+        const targetId = match.best.row.id;
+        let resolvedCatIdForExisting: string | null = match.best.row.category_id || fallbackCatId;
+        if (String(raw?.category || '').trim()) {
+          const resolvedCat = resolveOrCreateCategoryPath(catResolver, String(raw?.category || ''), resolvedCatIdForExisting);
+          if (resolvedCat.category_id) resolvedCatIdForExisting = resolvedCat.category_id;
+          categoriesCreatedCount += resolvedCat.created_count;
+        }
+
         if (updateMissing) {
-          const targetId = match.best.row.id;
-          // Guard against setting a barcode that already belongs to another master
           const safeBarcode = barcode && !index.byBarcode.has(barcode.toLowerCase()) ? barcode : '';
           const info = updateMissingStmt.run(
             nameEn, nameEn,
@@ -4148,6 +4436,27 @@ export function bulkImportMasterProductsFromExcel(input: {
             name_ar: finalNameAr,
             error: `موجود بالفعل: ${match.best.row.canonical_name_ar}`,
           });
+          continue;
+        }
+
+        // Ensure matched Master Product is also published/updated in the live Store
+        if (publishToStore) {
+          upsertStoreListing({
+            masterId: targetId,
+            nameAr: match.best.row.canonical_name_ar || finalNameAr,
+            nameEn: match.best.row.canonical_name_en || nameEn,
+            description: description || match.best.row.description || '',
+            imageUrl: imageUrl || match.best.row.image_url || '',
+            brand: match.best.row.brand || brand,
+            sizeLabel: match.best.row.size_label || sizeLabelRaw,
+            sizeValue: match.best.row.size_value ?? null,
+            sizeUnit: match.best.row.size_unit || '',
+            barcode: match.best.row.barcode || barcode,
+            categoryId: resolvedCatIdForExisting,
+            rawPrice: raw?.price,
+            rawSalePrice: raw?.sale_price,
+            rawStock: raw?.stock_quantity,
+          });
         }
         continue;
       }
@@ -4156,7 +4465,7 @@ export function bulkImportMasterProductsFromExcel(input: {
       const parsedSize = match.parsed_size;
       const finalSizeLabel = sizeLabelRaw || parsedSize?.displayLabel || '';
       const resolvedCat = resolveOrCreateCategoryPath(catResolver, String(raw?.category || ''), fallbackCatId);
-      const catId = resolvedCat.category_id;
+      const catId = ensureValidStoreCategoryId(resolvedCat.category_id);
       categoriesCreatedCount += resolvedCat.created_count;
 
       try {
@@ -4182,6 +4491,26 @@ export function bulkImportMasterProductsFromExcel(input: {
           insertImgStmt.run(uid('pimg'), id, imageUrl);
         }
 
+        // Automatically publish newly imported Master Product directly to the live Store!
+        if (publishToStore) {
+          upsertStoreListing({
+            masterId: id,
+            nameAr: finalNameAr,
+            nameEn,
+            description,
+            imageUrl,
+            brand,
+            sizeLabel: finalSizeLabel,
+            sizeValue: parsedSize?.canonicalValue ?? null,
+            sizeUnit: parsedSize?.canonicalUnit ?? '',
+            barcode,
+            categoryId: catId,
+            rawPrice: raw?.price,
+            rawSalePrice: raw?.sale_price,
+            rawStock: raw?.stock_quantity,
+          });
+        }
+
         // Update in-memory index immediately to catch duplicates inside the same Excel file
         addEntryToIndex(index, {
           id,
@@ -4198,8 +4527,8 @@ export function bulkImportMasterProductsFromExcel(input: {
           description,
           normalized_key: match.normalized_key,
           approval_status: 'approved',
-          stores_count: 0,
-          lowest_price: null,
+          stores_count: publishToStore ? 1 : 0,
+          lowest_price: parseFlexibleMoney(raw?.price),
         });
 
         createdCount++;
@@ -4209,18 +4538,21 @@ export function bulkImportMasterProductsFromExcel(input: {
       }
     }
 
-    if (createdCount > 0 || updatedExistingCount > 0) {
+    if (createdCount > 0 || updatedExistingCount > 0 || storeProductsCreated > 0 || storeProductsUpdated > 0) {
       db.prepare(`
         INSERT INTO catalog_merge_audit (id, action, actor_name, reason, details_json)
         VALUES (?, 'excel_bulk_import', ?, ?, ?)
       `).run(
         uid('cma'),
         actorName,
-        `استيراد جماعي بالـ Excel (${createdCount} جديد، ${updatedExistingCount} محدّث، ${skippedExistingCount} موجود مسبقًا)`,
+        `استيراد جماعي بالـ Excel (${createdCount} مركزي جديد، ${storeProductsCreated} مضاف للمتجر، ${storeProductsUpdated} محدّث بالمتجر)`,
         JSON.stringify({
           created_count: createdCount,
           updated_existing_count: updatedExistingCount,
           skipped_existing_count: skippedExistingCount,
+          store_products_created: storeProductsCreated,
+          store_products_updated: storeProductsUpdated,
+          merchant_id: targetMerchantId,
           error_count: errors.length,
         })
       );
@@ -4237,7 +4569,10 @@ export function bulkImportMasterProductsFromExcel(input: {
     created_count: createdCount,
     skipped_existing_count: skippedExistingCount,
     updated_existing_count: updatedExistingCount,
+    store_products_created: storeProductsCreated,
+    store_products_updated: storeProductsUpdated,
     categories_created_count: categoriesCreatedCount,
+    merchant_id: targetMerchantId,
     error_count: errors.length,
     errors: errors.slice(0, 100),
     created_ids: createdIds,

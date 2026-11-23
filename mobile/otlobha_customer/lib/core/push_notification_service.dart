@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
@@ -82,6 +83,23 @@ Future<void> otlobhaCustomerBackgroundHandler(RemoteMessage message) async {
     if (Firebase.apps.isEmpty) {
       await Firebase.initializeApp();
     }
+    // Persist FCM notification_id so neither WorkManager nor foreground sync duplicates it.
+    final incomingId = (message.data['notification_id'] ?? message.data['id'] ?? '').toString().trim();
+    if (incomingId.isNotEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final existingCsv = prefs.getString('otlobha_bg_shown_ids_csv') ?? '';
+        final parts = existingCsv.split(',').where((e) => e.trim().isNotEmpty).toList();
+        if (!parts.contains(incomingId)) {
+          parts.add(incomingId);
+          while (parts.length > 150) {
+            parts.removeAt(0);
+          }
+          await prefs.setString('otlobha_bg_shown_ids_csv', parts.join(','));
+        }
+      } catch (_) {}
+    }
+
     // When message.notification != null, Android FCM SDK automatically displays the system tray notification
     // using android.notification.channel_id. For data-only messages, display it via local notifications.
     if (message.notification == null && message.data.isNotEmpty) {
@@ -136,6 +154,9 @@ class CustomerPushNotificationService {
   static const String _prefSoundKey = 'otlobha_customer_push_sound_v1';
   static const String _prefVibrationKey = 'otlobha_customer_push_vibration_v1';
   static const String _prefShownIdsKey = 'otlobha_customer_shown_local_notif_ids_v1';
+  static const String _prefBgShownIdsCsvKey = 'otlobha_bg_shown_ids_csv';
+  static const String _prefBgApiBaseUrlKey = 'otlobha_bg_api_base_url';
+  static const MethodChannel _bgChannel = MethodChannel('com.otlobha/background_push');
 
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
   final List<String> _shownNotificationIdsOrder = <String>[];
@@ -178,8 +199,11 @@ class CustomerPushNotificationService {
     _initialized = true;
 
     await _loadPreferences();
+    await _initNativeBackgroundBridge();
     await _initLocalNotifications();
     await _initFirebaseMessaging();
+    unawaited(requestPermission());
+    unawaited(scheduleNativeBackgroundSync(fastCheck: false));
     _flushPendingTap();
   }
 
@@ -192,9 +216,75 @@ class CustomerPushNotificationService {
     _flushPendingTap();
   }
 
+  Future<void> _initNativeBackgroundBridge() async {
+    if (kIsWeb) return;
+    try {
+      _bgChannel.setMethodCallHandler((MethodCall call) async {
+        if (call.method == 'onBackgroundNotificationTap') {
+          final raw = call.arguments?.toString() ?? '';
+          if (raw.isNotEmpty) {
+            try {
+              final decoded = jsonDecode(raw);
+              if (decoded is Map) {
+                _dispatchTap(Map<String, dynamic>.from(decoded));
+              }
+            } catch (_) {}
+          }
+        }
+      });
+
+      final initialPayload = await _bgChannel.invokeMethod<String>('consumeInitialNotification');
+      if (initialPayload != null && initialPayload.trim().isNotEmpty) {
+        try {
+          final decoded = jsonDecode(initialPayload);
+          if (decoded is Map) {
+            _pendingTapData = Map<String, dynamic>.from(decoded);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {
+      // Safe on non-Android platforms or unit tests where native channel is absent
+    }
+  }
+
+  Future<void> scheduleNativeBackgroundSync({bool fastCheck = false}) async {
+    if (kIsWeb) return;
+    try {
+      await _bgChannel.invokeMethod<void>('scheduleBackgroundSync', <String, dynamic>{
+        'fast_check': fastCheck,
+        'api_base_url': OtlobhaCustomerApi.normalizeBaseUrl(OtlobhaCustomerApi.baseUrl),
+        'app': 'customer',
+      });
+    } catch (_) {
+      // Safe on non-Android platforms or unit tests
+    }
+  }
+
+  Future<void> refreshShownIdsFromStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final bgCsv = prefs.getString(_prefBgShownIdsCsvKey) ?? '';
+      for (final rawId in bgCsv.split(',')) {
+        final cleanId = rawId.trim();
+        if (cleanId.isNotEmpty && _shownNotificationIds.add(cleanId)) {
+          _shownNotificationIdsOrder.add(cleanId);
+        }
+      }
+      while (_shownNotificationIdsOrder.length > 150) {
+        final removed = _shownNotificationIdsOrder.removeAt(0);
+        _shownNotificationIds.remove(removed);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadPreferences() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _prefBgApiBaseUrlKey,
+        OtlobhaCustomerApi.normalizeBaseUrl(OtlobhaCustomerApi.baseUrl),
+      );
       _soundEnabled = prefs.getBool(_prefSoundKey) ?? true;
       _vibrationEnabled = prefs.getBool(_prefVibrationKey) ?? true;
       var savedId = prefs.getString(_prefDeviceIdKey);
@@ -206,12 +296,27 @@ class CustomerPushNotificationService {
       }
       _deviceId = savedId;
       final savedShown = prefs.getStringList(_prefShownIdsKey) ?? const <String>[];
+      final bgCsv = prefs.getString(_prefBgShownIdsCsvKey) ?? '';
+      final merged = <String>[];
+      final seen = <String>{};
+      for (final id in [...savedShown, ...bgCsv.split(',')]) {
+        final clean = id.trim();
+        if (clean.isNotEmpty && seen.add(clean)) {
+          merged.add(clean);
+        }
+      }
+      while (merged.length > 150) {
+        merged.removeAt(0);
+      }
       _shownNotificationIdsOrder
         ..clear()
-        ..addAll(savedShown);
+        ..addAll(merged);
       _shownNotificationIds
         ..clear()
-        ..addAll(savedShown);
+        ..addAll(merged);
+      if (merged.isNotEmpty) {
+        await prefs.setString(_prefBgShownIdsCsvKey, merged.join(','));
+      }
     } catch (e) {
       debugPrint('[CustomerPush] Preferences unavailable: $e');
     }
@@ -229,6 +334,7 @@ class CustomerPushNotificationService {
       try {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setStringList(_prefShownIdsKey, _shownNotificationIdsOrder);
+        await prefs.setString(_prefBgShownIdsCsvKey, _shownNotificationIdsOrder.join(','));
       } catch (_) {}
     }
   }
@@ -377,10 +483,34 @@ class CustomerPushNotificationService {
         }
       });
 
-      // Subscribe to customer broadcast topics so background pushes arrive even on fresh installs
+      // Subscribe to customer broadcast topics & register device token immediately (even in guest mode)
       unawaited(_subscribeDefaultTopics());
+      unawaited(_registerGuestTokenIfNeeded());
     } catch (e) {
       debugPrint('[CustomerPush] Messaging listeners error: $e');
+    }
+  }
+
+  Future<void> _registerGuestTokenIfNeeded() async {
+    if (!_firebaseReady || kIsWeb) return;
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token != null && token.isNotEmpty) {
+        _currentToken = token;
+        if (_boundApi != null && _boundApi!.hasTokens) {
+          await _syncTokenToBackend(_boundApi!, token);
+        } else if (_deviceId != null && _deviceId!.isNotEmpty) {
+          await OtlobhaCustomerApi.registerGuestPushToken(
+            fcmToken: token,
+            deviceId: _deviceId!,
+            platform: Platform.isIOS ? 'ios' : 'android',
+            appVersion: '1.0.0',
+            deviceLabel: Platform.operatingSystem,
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('[CustomerPush] Startup guest token registration skipped: $e');
     }
   }
 
@@ -616,6 +746,7 @@ class CustomerPushNotificationService {
     String? customerEmail,
     bool isEmailVerified = false,
   }) async {
+    await refreshShownIdsFromStorage();
     var showedVerifyEmail = false;
     final unread = <Map<String, dynamic>>[];
     for (final item in records) {

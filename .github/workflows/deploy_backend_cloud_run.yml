@@ -132,12 +132,17 @@ jobs:
             SECRET_BINDINGS="${SECRET_BINDINGS},FIREBASE_SERVICE_ACCOUNT_JSON=otlobha-firebase-sa-json:latest"
           fi
 
+          # Best-effort: grant FCM Admin role to runtime service account so ADC can send FCM pushes
+          gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+            --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+            --role="roles/firebasecloudmessaging.admin" >/dev/null 2>&1 || true
+
           REQ_FLAG="0"
           if [ "$REQUIRE_EXISTING_DB" = "true" ]; then
             REQ_FLAG="1"
           fi
 
-          ENV_VARS="NODE_ENV=production,DISABLE_VITE=1,OTLOBHA_DB_PATH=/tmp/otlobha-local/otlobha.db,OTLOBHA_GCS_PERSIST_DIR=/mnt/gcs-data,OTLOBHA_SQLITE_JOURNAL_MODE=WAL,OTLOBHA_SQLITE_SYNC_INTERVAL_MS=15000,OTLOBHA_REQUIRE_EXISTING_PERSISTED_DB=${REQ_FLAG}"
+          ENV_VARS="NODE_ENV=production,DISABLE_VITE=1,FIREBASE_PROJECT_ID=${GCP_PROJECT_ID},OTLOBHA_DB_PATH=/tmp/otlobha-local/otlobha.db,OTLOBHA_GCS_PERSIST_DIR=/mnt/gcs-data,OTLOBHA_SQLITE_JOURNAL_MODE=WAL,OTLOBHA_SQLITE_SYNC_INTERVAL_MS=15000,OTLOBHA_REQUIRE_EXISTING_PERSISTED_DB=${REQ_FLAG}"
           for key in SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER SMTP_FROM SUPER_ADMIN_EMAIL SUPER_ADMIN_NAME; do
             val="${!key:-}"
             if [ -n "$val" ]; then

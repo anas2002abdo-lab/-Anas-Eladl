@@ -76,6 +76,8 @@ import {
   getFcmStatus,
   probeFcmAuth,
   registerDeviceToken,
+  registerGuestDeviceToken,
+  resolveChannelId,
   setNotificationCreatedListener,
   unregisterDeviceToken,
   verifyGoogleOrFirebaseToken,
@@ -4169,9 +4171,28 @@ app.post('/api/categories', requireAuth, requireRole('merchant', ...ALL_ADMIN_RO
 
   const isOffers =
     Boolean(is_offers_section) || ['العروض', 'عروض', 'عروض المتجر', 'offers'].includes(trimmedAr.toLowerCase());
+  const lowerName = trimmedAr.toLowerCase();
+  let inferredGroupKey = 'groceries';
+  let inferredGroupName = 'المقاضي والمواد الغذائية';
+  if (/خضار|فاكه|فواك|طازج|مخبوز|خبز|لحوم|دواجن|فراخ|أسماك|اسماك|سمك|ألبان|البان|جبن|بيض/.test(lowerName)) {
+    inferredGroupKey = 'fresh';
+    inferredGroupName = 'المنتجات الطازجة';
+  } else if (/مشروب|قهو|شاي|عصير|عصائر|مياه|سخن|بارد/.test(lowerName)) {
+    inferredGroupKey = 'drinks';
+    inferredGroupName = 'المشروبات والمرطبات';
+  } else if (/منظف|تنظيف|غسيل|مطهر|عناي|شخصي|صابون|شامبو/.test(lowerName)) {
+    inferredGroupKey = 'home_care';
+    inferredGroupName = 'المنظفات والعناية بالمنزل';
+  } else if (/مطبخ|أواني|اواني|أدوات|ادوات/.test(lowerName)) {
+    inferredGroupKey = 'kitchen';
+    inferredGroupName = 'مستلزمات المطبخ';
+  } else if (effectiveScope === 'pharmacy') {
+    inferredGroupKey = 'other';
+    inferredGroupName = 'أقسام أخرى والصيدلية';
+  }
   const id = uid('cat');
   db.prepare(
-    'INSERT INTO categories (id, scope, merchant_id, parent_id, level, full_path_ar, name_ar, name_en, image_url, sort_order, is_offers_section, is_active) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1)'
+    'INSERT INTO categories (id, scope, merchant_id, parent_id, level, full_path_ar, name_ar, name_en, image_url, group_key, group_name_ar, sort_order, is_offers_section, is_active) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)'
   ).run(
     id,
     effectiveScope,
@@ -4181,6 +4202,8 @@ app.post('/api/categories', requireAuth, requireRole('merchant', ...ALL_ADMIN_RO
     trimmedAr,
     String(name_en || trimmedAr).trim(),
     String(image_url || ''),
+    inferredGroupKey,
+    inferredGroupName,
     Number(sort_order || 0),
     isOffers ? 1 : 0
   );
@@ -7169,6 +7192,28 @@ app.post('/api/mobile/push/register', requireAuth, requireRole('customer', 'capt
   res.json({ ok: true, ...result });
 });
 
+app.post('/api/mobile/push/register-guest', (req, res) => {
+  const { fcm_token, device_id, platform, app_version, device_label, app } = req.body || {};
+  const cleanToken = typeof fcm_token === 'string' ? fcm_token.trim() : '';
+  const cleanDeviceId = typeof device_id === 'string' ? device_id.trim() : '';
+  if (!cleanToken || cleanToken.length < 20) {
+    return res.status(400).json({ error: 'رمز FCM غير صالح أو ناقص' });
+  }
+  if (!cleanDeviceId || cleanDeviceId.length < 4) {
+    return res.status(400).json({ error: 'معرّف الجهاز مطلوب' });
+  }
+  const role: PushUserRole = String(app || '').toLowerCase() === 'captain' ? 'captain' : 'customer';
+  const result = registerGuestDeviceToken({
+    fcmToken: cleanToken,
+    deviceId: cleanDeviceId,
+    platform: typeof platform === 'string' ? platform : 'android',
+    appVersion: typeof app_version === 'string' ? app_version : null,
+    deviceLabel: typeof device_label === 'string' ? device_label : null,
+    userRole: role,
+  });
+  res.json({ ok: true, ...result });
+});
+
 app.post('/api/mobile/push/unregister', requireAuth, requireRole('customer', 'captain'), (req, res) => {
   const auth = req.auth!;
   if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
@@ -7353,6 +7398,77 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
   });
 
   res.status(201).json(result);
+});
+
+app.get('/api/mobile/notifications/background-poll', (req, res) => {
+  const auth = optionalAuth(req);
+  const requestedApp = String(req.query.app || '').toLowerCase() === 'captain' ? 'captain' : 'customer';
+  const limit = Math.min(Math.max(Number(req.query.limit || 12) || 12, 1), 25);
+
+  let appName = requestedApp;
+  let recipientId: string | null = null;
+  let customerIsVerified = false;
+  let customerEmail = '';
+
+  if (auth && !isAdminAuth(auth)) {
+    appName = auth.role === 'captain' ? 'captain' : 'customer';
+    recipientId = auth.id;
+    if (auth.role === 'customer') {
+      const custRow = db
+        .prepare('SELECT email, is_email_verified FROM customers WHERE id = ?')
+        .get(auth.id) as { email?: string | null; is_email_verified?: number } | undefined;
+      customerIsVerified = Boolean(custRow?.is_email_verified);
+      customerEmail = String(custRow?.email || '').trim();
+    }
+  }
+
+  const rows = recipientId
+    ? (db
+        .prepare(
+          `SELECT id, target_app, category, title_ar, body_ar, deep_link, is_read, created_at
+           FROM notifications
+           WHERE (target_app = ? OR target_app = 'all')
+             AND (recipient_id IS NULL OR recipient_id = ?)
+             AND COALESCE(is_read, 0) = 0
+             AND NOT (? = 1 AND LOWER(COALESCE(deep_link, '')) = 'verify_email' AND recipient_id IS NULL)
+           ORDER BY created_at DESC
+           LIMIT ?`
+        )
+        .all(appName, recipientId, customerIsVerified ? 1 : 0, limit) as Array<Record<string, unknown>>)
+    : (db
+        .prepare(
+          `SELECT id, target_app, category, title_ar, body_ar, deep_link, is_read, created_at
+           FROM notifications
+           WHERE (target_app = ? OR target_app = 'all')
+             AND recipient_id IS NULL
+             AND COALESCE(is_read, 0) = 0
+             AND LOWER(COALESCE(deep_link, '')) != 'verify_email'
+           ORDER BY created_at DESC
+           LIMIT ?`
+        )
+        .all(appName, limit) as Array<Record<string, unknown>>);
+
+  const notifications = rows.map((n) => {
+    const category = String(n.category || 'operational');
+    const deepLink = String(n.deep_link || 'notifications');
+    return {
+      id: String(n.id || ''),
+      title_ar: String(n.title_ar || ''),
+      body_ar: String(n.body_ar || ''),
+      category,
+      deep_link: deepLink,
+      channel_id: resolveChannelId(category, deepLink, appName),
+      email: customerEmail || undefined,
+      created_at: String(n.created_at || ''),
+    };
+  });
+
+  res.json({
+    ok: true,
+    authenticated: Boolean(recipientId),
+    app: appName,
+    notifications,
+  });
 });
 
 app.get('/api/mobile/notifications', requireAuth, (req, res) => {

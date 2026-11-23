@@ -1113,6 +1113,8 @@ export const api = {
   importMasterProductsExcel: (body: {
     rows: Array<Record<string, unknown>>;
     default_category_id?: string;
+    merchant_id?: string;
+    publish_to_store?: boolean;
     skip_existing?: boolean;
     update_missing_fields?: boolean;
   }) =>
@@ -1121,7 +1123,10 @@ export const api = {
       created_count: number;
       skipped_existing_count: number;
       updated_existing_count: number;
+      store_products_created?: number;
+      store_products_updated?: number;
       categories_created_count?: number;
+      merchant_id?: string | null;
       error_count: number;
       errors: Array<{ row_index: number; name_ar: string; error: string }>;
       created_ids: string[];

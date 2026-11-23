@@ -893,6 +893,7 @@ export default function App() {
                   merchants={merchants}
                   portalMode={portalMode === 'merchant' ? 'merchant' : 'admin'}
                   merchantSession={merchantSession}
+                  onOpenMasterCatalog={portalMode === 'admin' ? () => setActiveTab('master_catalog') : undefined}
                   onRefreshCore={refreshCore}
                   onMerchantUpdated={(updated) => {
                     setMerchants((prev) =>

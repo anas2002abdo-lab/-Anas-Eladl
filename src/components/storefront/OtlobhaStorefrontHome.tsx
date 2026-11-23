@@ -371,30 +371,36 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
           الكل
         </button>
 
-        {/* مستطيلات الأقسام الأكثر رواجًا */}
-        {(categories || []).slice(0, 12).map((cat) => {
-          const active = selectedCategoryId === cat.id;
-          return (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => {
-                if (active) {
-                  onSelectCategory('');
-                } else {
-                  onSelectCategory(cat.id);
-                }
-              }}
-              className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer whitespace-nowrap ${
-                active
-                  ? 'bg-[#A92224] text-white shadow-sm'
-                  : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224]/40'
-              }`}
-            >
-              {cat.name_ar}
-            </button>
-          );
-        })}
+        {/* مستطيلات الأقسام الرئيسية */}
+        {(() => {
+          const allCats = categories || [];
+          const catIds = new Set(allCats.map((c) => c.id));
+          const rootCats = allCats.filter((c) => !c.parent_id || !catIds.has(c.parent_id));
+          const displayCats = (rootCats.length > 0 ? rootCats : allCats).slice(0, 24);
+          return displayCats.map((cat) => {
+            const active = selectedCategoryId === cat.id;
+            return (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => {
+                  if (active) {
+                    onSelectCategory('');
+                  } else {
+                    onSelectCategory(cat.id);
+                  }
+                }}
+                className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer whitespace-nowrap ${
+                  active
+                    ? 'bg-[#A92224] text-white shadow-sm'
+                    : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224]/40'
+                }`}
+              >
+                {cat.name_ar}
+              </button>
+            );
+          });
+        })()}
       </div>
 
       {/* 5. 2-COLUMN PRODUCT GRID (Responsive up to 4 cols on desktop) */}

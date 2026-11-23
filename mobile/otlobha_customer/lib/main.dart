@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -27,6 +29,14 @@ import 'screens/storefront_assistant_sheet.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp();
+    }
+    FirebaseMessaging.onBackgroundMessage(otlobhaCustomerBackgroundHandler);
+  } catch (e) {
+    debugPrint('[CustomerMain] Firebase pre-init skipped: $e');
+  }
   await CustomerPushNotificationService.instance.initialize();
   runApp(const OtlobhaCustomerApp());
 }
@@ -120,6 +130,20 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   static const String _prefTabIndex = 'otlobha_cust_tab_index';
   static const String _prefServiceSubView = 'otlobha_cust_service_sub_view';
 
+  Future<void> _refreshStorefrontCategories() async {
+    try {
+      final res = await api.getStorefrontHome(page: 1, limit: 1);
+      final rawCats = (res['categories'] as List?) ?? [];
+      final parsedCats = rawCats
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      if (mounted) {
+        setState(() => _storefrontCategories = parsedCats);
+      }
+    } catch (_) {}
+  }
+
   void _switchTab(int nextIndex, {String? serviceSubView, bool recordHistory = true}) {
     final prevIndex = _index;
     setState(() {
@@ -135,6 +159,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       _index = nextIndex;
     });
     _persistNavState(tabIndex: nextIndex, subView: serviceSubView);
+    if (nextIndex == 1) {
+      _refreshStorefrontCategories();
+    }
   }
 
   void _handleSystemBack() {
@@ -227,11 +254,18 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _isAuthenticated && !_isGuest) {
-      _silentSync();
-      final push = CustomerPushNotificationService.instance;
-      if (push.currentToken == null || !push.isTokenSynced) {
-        push.registerForAuthenticatedUser(api);
+    final push = CustomerPushNotificationService.instance;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      push.scheduleNativeBackgroundSync(fastCheck: true);
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      push.refreshShownIdsFromStorage();
+      if (_isAuthenticated && !_isGuest) {
+        _silentSync();
+        if (push.currentToken == null || !push.isTokenSynced) {
+          push.registerForAuthenticatedUser(api);
+        }
       }
     }
   }
@@ -896,6 +930,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _loading = false;
         });
       }
+      _refreshStorefrontCategories();
     } catch (e) {
       if (mounted) {
         setState(() => _loading = false);
@@ -1588,7 +1623,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onSelectMerchant: _selectStorefrontMerchant,
         onClearAllFilters: _clearStorefrontFilters,
         onCategoriesLoaded: (cats) {
-          if (mounted && cats.isNotEmpty) {
+          if (mounted) {
             setState(() => _storefrontCategories = cats);
           }
         },
@@ -1614,6 +1649,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onOpenCart: () => _switchTab(3),
         onSelectBrand: _selectStorefrontBrand,
         onSelectMerchant: _selectStorefrontMerchant,
+        onRefreshCategories: _refreshStorefrontCategories,
         onSelectGroup: (groupKey) {
           setState(() {
             _clearStorefrontFilters();
