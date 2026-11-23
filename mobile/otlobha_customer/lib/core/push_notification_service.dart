@@ -594,7 +594,14 @@ class CustomerPushNotificationService {
   /// Registers the current device's FCM token with the Otlobha backend for the authenticated customer.
   Future<void> registerForAuthenticatedUser(OtlobhaCustomerApi api) async {
     _boundApi = api;
+    if (!_initialized) {
+      await initialize(
+        onNotificationTap: _onNotificationTap,
+        onForegroundNotification: _onForegroundNotification,
+      );
+    }
     await requestPermission();
+    unawaited(scheduleNativeBackgroundSync(fastCheck: false));
     if (!_firebaseReady) {
       await _initFirebaseMessaging();
     }

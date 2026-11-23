@@ -558,7 +558,14 @@ class CaptainPushNotificationService {
 
   Future<void> registerForAuthenticatedCaptain(OtlobhaCaptainApi api) async {
     _boundApi = api;
+    if (!_initialized) {
+      await initialize(
+        onNotificationTap: _onNotificationTap,
+        onForegroundNotification: _onForegroundNotification,
+      );
+    }
     await requestPermission();
+    unawaited(scheduleNativeBackgroundSync(fastCheck: false));
     if (!_firebaseReady) {
       await _initFirebaseMessaging();
     }

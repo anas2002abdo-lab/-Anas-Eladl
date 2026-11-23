@@ -445,27 +445,38 @@ if manifest_path.exists():
         )
         m_text = m_text.replace("</activity>", click_filter, 1)
 
-    if "OtlobhaBgJobService" not in m_text and "</application>" in m_text:
-        bg_components_xml = (
-            '        <service\n'
-            '            android:name=".OtlobhaBgJobService"\n'
-            '            android:permission="android.permission.BIND_JOB_SERVICE"\n'
-            '            android:exported="false" />\n'
+    if "OtlobhaBgAlarmReceiver" not in m_text and "</application>" in m_text:
+        bg_components_xml = ""
+        if "OtlobhaBgJobService" not in m_text:
+            bg_components_xml += (
+                '        <service\n'
+                '            android:name=".OtlobhaBgJobService"\n'
+                '            android:permission="android.permission.BIND_JOB_SERVICE"\n'
+                '            android:exported="false" />\n'
+            )
+        bg_components_xml += (
             '        <receiver\n'
-            '            android:name=".OtlobhaBootReceiver"\n'
+            '            android:name=".OtlobhaBgAlarmReceiver"\n'
             '            android:enabled="true"\n'
-            '            android:exported="false">\n'
-            '            <intent-filter>\n'
-            '                <action android:name="android.intent.action.BOOT_COMPLETED" />\n'
-            '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />\n'
-            '            </intent-filter>\n'
-            '        </receiver>\n'
-            '    </application>'
+            '            android:exported="false" />\n'
         )
+        if "OtlobhaBootReceiver" not in m_text:
+            bg_components_xml += (
+                '        <receiver\n'
+                '            android:name=".OtlobhaBootReceiver"\n'
+                '            android:enabled="true"\n'
+                '            android:exported="false">\n'
+                '            <intent-filter>\n'
+                '                <action android:name="android.intent.action.BOOT_COMPLETED" />\n'
+                '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />\n'
+                '            </intent-filter>\n'
+                '        </receiver>\n'
+            )
+        bg_components_xml += '    </application>'
         m_text = m_text.replace("</application>", bg_components_xml, 1)
 
     manifest_path.write_text(m_text, encoding="utf-8")
-    print(f"[FCM Android Setup] Patched AndroidManifest.xml with POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED, JobService, BootReceiver, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
+    print(f"[FCM Android Setup] Patched AndroidManifest.xml with POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED, JobService, AlarmReceiver, BootReceiver, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
 
 # --- 4. Generate Zero-Dependency Native Android Background Notification Engine (OS JobScheduler + BootReceiver + MainActivity Bridge) ---
 expected_pkg_raw = os.environ.get("EXPECTED_PKG", "").strip()
@@ -498,19 +509,18 @@ legacy_worker = pkg_dir / "OtlobhaBgNotificationWorker.kt"
 if legacy_worker.exists():
     legacy_worker.unlink()
 
-job_service_kt = f"""package {pkg_name}
+poll_engine_kt = f"""package {pkg_name}
 
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.job.JobParameters
-import android.app.job.JobService
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -518,102 +528,90 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 
-class OtlobhaBgJobService : JobService() {{
+object OtlobhaBgPollEngine {{
+    const val PREFS_NAME = "FlutterSharedPreferences"
+    const val KEY_API_BASE = "flutter.otlobha_bg_api_base_url"
+    const val KEY_SHOWN_CSV = "flutter.otlobha_bg_shown_ids_csv"
+    const val KEY_ACCESS_TOKEN = "{access_token_key}"
+    const val KEY_REFRESH_TOKEN = "{refresh_token_key}"
+    const val KEY_SOUND = "{sound_pref_key}"
+    const val KEY_VIBRATION = "{vib_pref_key}"
+    const val APP_ROLE = "{app_role}"
+    const val DEFAULT_CHANNEL = "{default_channel_bg}"
+    const val DEFAULT_TITLE = "{default_app_title}"
+    const val EXTRA_PAYLOAD = "otlobha_bg_notification_payload"
+    const val FALLBACK_API_BASE = "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"
 
-    companion object {{
-        const val PREFS_NAME = "FlutterSharedPreferences"
-        const val KEY_API_BASE = "flutter.otlobha_bg_api_base_url"
-        const val KEY_SHOWN_CSV = "flutter.otlobha_bg_shown_ids_csv"
-        const val KEY_ACCESS_TOKEN = "{access_token_key}"
-        const val KEY_REFRESH_TOKEN = "{refresh_token_key}"
-        const val KEY_SOUND = "{sound_pref_key}"
-        const val KEY_VIBRATION = "{vib_pref_key}"
-        const val APP_ROLE = "{app_role}"
-        const val DEFAULT_CHANNEL = "{default_channel_bg}"
-        const val DEFAULT_TITLE = "{default_app_title}"
-        const val EXTRA_PAYLOAD = "otlobha_bg_notification_payload"
-        const val FALLBACK_API_BASE = "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"
-    }}
+    private data class HttpResp(val code: Int, val body: String?)
 
-    @Volatile
-    private var cancelled = false
+    fun runPollOnce(context: Context) {{
+        try {{
+            val appCtx = context.applicationContext
+            val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val rawBase = prefs.getString(KEY_API_BASE, null)?.trim()
+            val apiBase = if (!rawBase.isNullOrEmpty()) rawBase.trimEnd('/') else FALLBACK_API_BASE
+            var accessToken = prefs.getString(KEY_ACCESS_TOKEN, null)?.trim() ?: ""
+            val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
 
-    override fun onStartJob(params: JobParameters?): Boolean {{
-        cancelled = false
-        val jobParams = params ?: return false
-        val workerThread = Thread {{
-            try {{
-                if (!cancelled) {{
-                    runPollOnce()
-                }}
-                val step = jobParams.extras.getInt("step", 0)
-                if (!cancelled && step in 1..8) {{
-                    OtlobhaBgScheduler.scheduleNextFastCheck(applicationContext, step + 1)
-                }}
-            }} catch (e: Throwable) {{
-                // Never crash background process
-            }} finally {{
-                try {{
-                    jobFinished(jobParams, false)
-                }} catch (e: Throwable) {{
+            // 1. Primary endpoint: /api/mobile/notifications/background-poll (supports both logged-in and guest broadcasts)
+            var resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10", accessToken)
+            if (resp.code == 401 && refreshToken.isNotEmpty()) {{
+                val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
+                if (!refreshed.isNullOrEmpty()) {{
+                    accessToken = refreshed
+                    resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10", accessToken)
                 }}
             }}
-        }}
-        workerThread.isDaemon = true
-        workerThread.start()
-        return true
-    }}
 
-    override fun onStopJob(params: JobParameters?): Boolean {{
-        cancelled = true
-        return false
-    }}
-
-    private fun runPollOnce() {{
-        val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val rawBase = prefs.getString(KEY_API_BASE, null)?.trim()
-        val apiBase = if (!rawBase.isNullOrEmpty()) rawBase.trimEnd('/') else FALLBACK_API_BASE
-        var accessToken = prefs.getString(KEY_ACCESS_TOKEN, null)?.trim() ?: ""
-        val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
-
-        var responseBody = fetchPoll(apiBase, accessToken)
-        if (responseBody == null && refreshToken.isNotEmpty()) {{
-            val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
-            if (!refreshed.isNullOrEmpty()) {{
-                accessToken = refreshed
-                responseBody = fetchPoll(apiBase, accessToken)
+            // 2. Fallback endpoint: /api/mobile/notifications?app=... (works immediately on existing Cloud Run deployments!)
+            if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
+                resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE", accessToken)
+                if (resp.code == 401 && refreshToken.isNotEmpty()) {{
+                    val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
+                    if (!refreshed.isNullOrEmpty()) {{
+                        accessToken = refreshed
+                        resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE", accessToken)
+                    }}
+                }}
             }}
-        }}
-        if (responseBody == null && accessToken.isNotEmpty()) {{
-            responseBody = fetchPoll(apiBase, "")
-        }}
-        val finalBody = responseBody
-        if (!finalBody.isNullOrEmpty()) {{
-            processNotifications(finalBody, prefs)
+
+            // 3. Guest fallback if authenticated token failed on /background-poll
+            if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
+                resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10", "")
+            }}
+
+            val bodyText = resp.body
+            if (resp.code in 200..299 && !bodyText.isNullOrEmpty()) {{
+                processNotifications(appCtx, bodyText, prefs)
+            }}
+        }} catch (e: Throwable) {{
+            // Never crash background process
         }}
     }}
 
-    private fun fetchPoll(apiBase: String, accessToken: String): String? {{
+    private fun httpGet(urlStr: String, accessToken: String): HttpResp {{
         var conn: HttpURLConnection? = null
         return try {{
-            val url = URL("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10")
+            val url = URL(urlStr)
             val connection = (url.openConnection() as HttpURLConnection).apply {{
                 requestMethod = "GET"
-                connectTimeout = 10000
-                readTimeout = 12000
+                connectTimeout = 8000
+                readTimeout = 10000
                 setRequestProperty("Accept", "application/json")
                 if (accessToken.isNotEmpty()) {{
                     setRequestProperty("Authorization", "Bearer $accessToken")
                 }}
             }}
             conn = connection
-            if (connection.responseCode in 200..299) {{
-                BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
+            val code = connection.responseCode
+            if (code in 200..299) {{
+                val body = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
+                HttpResp(code, body)
             }} else {{
-                null
+                HttpResp(code, null)
             }}
         }} catch (e: Throwable) {{
-            null
+            HttpResp(0, null)
         }} finally {{
             try {{
                 conn?.disconnect()
@@ -633,8 +631,8 @@ class OtlobhaBgJobService : JobService() {{
             val connection = (url.openConnection() as HttpURLConnection).apply {{
                 requestMethod = "POST"
                 doOutput = true
-                connectTimeout = 10000
-                readTimeout = 12000
+                connectTimeout = 8000
+                readTimeout = 10000
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
             }}
@@ -666,9 +664,13 @@ class OtlobhaBgJobService : JobService() {{
         }}
     }}
 
-    private fun processNotifications(responseBody: String, prefs: SharedPreferences) {{
-        val root = JSONObject(responseBody)
-        val arr = root.optJSONArray("notifications") ?: return
+    private fun processNotifications(appCtx: Context, responseBody: String, prefs: SharedPreferences) {{
+        val trimmed = responseBody.trim()
+        val arr: JSONArray = if (trimmed.startsWith("[")) {{
+            JSONArray(trimmed)
+        }} else {{
+            JSONObject(trimmed).optJSONArray("notifications") ?: return
+        }}
         if (arr.length() == 0) return
 
         val existingCsv = prefs.getString(KEY_SHOWN_CSV, "") ?: ""
@@ -681,6 +683,9 @@ class OtlobhaBgJobService : JobService() {{
         val pending = mutableListOf<JSONObject>()
         for (i in 0 until arr.length()) {{
             val item = arr.optJSONObject(i) ?: continue
+            val isReadBool = item.optBoolean("is_read", false)
+            val isReadInt = item.optInt("is_read", 0)
+            if (isReadBool || isReadInt == 1) continue
             val id = item.optString("id", "").trim()
             if (id.isNotEmpty() && shownSet.contains(id)) continue
             pending.add(item)
@@ -715,9 +720,13 @@ class OtlobhaBgJobService : JobService() {{
                 put("channel_id", channelId)
                 val email = item.optString("email", "").trim()
                 if (email.isNotEmpty()) put("email", email)
+                val orderId = item.optString("order_id", "").trim()
+                if (orderId.isNotEmpty()) put("order_id", orderId)
+                val tripId = item.optString("trip_id", "").trim()
+                if (tripId.isNotEmpty()) put("trip_id", tripId)
             }}
 
-            val posted = postSystemNotification(id, title, body, channelId, payloadJson.toString(), soundEnabled, vibEnabled)
+            val posted = postSystemNotification(appCtx, id, title, body, channelId, payloadJson.toString(), soundEnabled, vibEnabled)
             if (posted && id.isNotEmpty() && shownSet.add(id)) {{
                 shownOrder.add(id)
                 while (shownOrder.size > 150) {{
@@ -732,6 +741,7 @@ class OtlobhaBgJobService : JobService() {{
 
     @Suppress("DEPRECATION")
     private fun postSystemNotification(
+        appCtx: Context,
         notifId: String,
         title: String,
         body: String,
@@ -742,12 +752,12 @@ class OtlobhaBgJobService : JobService() {{
     ): Boolean {{
         return try {{
             if (Build.VERSION.SDK_INT >= 33) {{
-                val perm = applicationContext.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                val perm = appCtx.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
                 if (perm != PackageManager.PERMISSION_GRANTED) {{
                     return false
                 }}
             }}
-            val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val nm = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                 ?: return false
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
@@ -771,7 +781,7 @@ class OtlobhaBgJobService : JobService() {{
                 nm.createNotificationChannel(channel)
             }}
 
-            val launchIntent = Intent(applicationContext, MainActivity::class.java).apply {{
+            val launchIntent = Intent(appCtx, MainActivity::class.java).apply {{
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(EXTRA_PAYLOAD, payloadJson)
             }}
@@ -781,18 +791,18 @@ class OtlobhaBgJobService : JobService() {{
             }} else {{
                 PendingIntent.FLAG_UPDATE_CURRENT
             }}
-            val pendingIntent = PendingIntent.getActivity(applicationContext, intId, launchIntent, pendingFlags)
+            val pendingIntent = PendingIntent.getActivity(appCtx, intId, launchIntent, pendingFlags)
 
             var defaults = Notification.DEFAULT_LIGHTS
             if (soundEnabled) defaults = defaults or Notification.DEFAULT_SOUND
             if (vibEnabled) defaults = defaults or Notification.DEFAULT_VIBRATE
 
-            val appIcon = applicationContext.applicationInfo.icon
+            val appIcon = appCtx.applicationInfo.icon
             val smallIcon = if (appIcon != 0) appIcon else android.R.drawable.ic_dialog_info
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
-                Notification.Builder(applicationContext, channelId)
+                Notification.Builder(appCtx, channelId)
             }} else {{
-                Notification.Builder(applicationContext)
+                Notification.Builder(appCtx)
             }}
             builder
                 .setSmallIcon(smallIcon)
@@ -824,68 +834,167 @@ class OtlobhaBgJobService : JobService() {{
 }}
 """
 
+alarm_receiver_kt = f"""package {pkg_name}
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.PowerManager
+
+class OtlobhaBgAlarmReceiver : BroadcastReceiver() {{
+    override fun onReceive(context: Context, intent: Intent?) {{
+        val pendingResult = goAsync()
+        val appCtx = context.applicationContext
+        val step = intent?.getIntExtra("step", 1) ?: 1
+        val wakeLock = try {{
+            val pm = appCtx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "otlobha:bg_push_poll")?.apply {{
+                setReferenceCounted(false)
+                acquire(20000L)
+            }}
+        }} catch (e: Throwable) {{
+            null
+        }}
+        val worker = Thread {{
+            try {{
+                OtlobhaBgPollEngine.runPollOnce(appCtx)
+                val nextStep = if (step < 15) step + 1 else 15
+                OtlobhaBgScheduler.scheduleFastAlarm(appCtx, nextStep)
+            }} catch (e: Throwable) {{
+                // Never crash background receiver
+            }} finally {{
+                try {{
+                    if (wakeLock != null && wakeLock.isHeld) {{
+                        wakeLock.release()
+                    }}
+                }} catch (e: Throwable) {{
+                }}
+                try {{
+                    pendingResult.finish()
+                }} catch (e: Throwable) {{
+                }}
+            }}
+        }}
+        worker.isDaemon = true
+        worker.start()
+    }}
+}}
+"""
+
+job_service_kt = f"""package {pkg_name}
+
+import android.app.job.JobParameters
+import android.app.job.JobService
+
+class OtlobhaBgJobService : JobService() {{
+
+    @Volatile
+    private var cancelled = false
+
+    override fun onStartJob(params: JobParameters?): Boolean {{
+        cancelled = false
+        val jobParams = params ?: return false
+        val appCtx = applicationContext
+        val workerThread = Thread {{
+            try {{
+                if (!cancelled) {{
+                    OtlobhaBgPollEngine.runPollOnce(appCtx)
+                    // Self-heal: revive continuous alarm chain if OEM cleared alarms
+                    OtlobhaBgScheduler.scheduleFastAlarm(appCtx, 5)
+                }}
+            }} catch (e: Throwable) {{
+                // Never crash background process
+            }} finally {{
+                try {{
+                    jobFinished(jobParams, false)
+                }} catch (e: Throwable) {{
+                }}
+            }}
+        }}
+        workerThread.isDaemon = true
+        workerThread.start()
+        return true
+    }}
+
+    override fun onStopJob(params: JobParameters?): Boolean {{
+        cancelled = true
+        return false
+    }}
+}}
+"""
+
 scheduler_kt = f"""package {pkg_name}
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.app.job.JobInfo
 import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
-import android.os.PersistableBundle
+import android.content.Intent
+import android.os.Build
+import android.os.SystemClock
 
 object OtlobhaBgScheduler {{
     private const val PERIODIC_JOB_ID = 942101
-    private const val FAST_JOB_ID = 942102
+    private const val FAST_ALARM_REQ_CODE = 942109
 
     fun ensureScheduled(context: Context, fastCheck: Boolean = false) {{
         try {{
             val appCtx = context.applicationContext
-            val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
-            val component = ComponentName(appCtx, OtlobhaBgJobService::class.java)
-
-            val pendingJobs = scheduler.allPendingJobs ?: emptyList()
-            val alreadyScheduled = pendingJobs.any {{ it.id == PERIODIC_JOB_ID }}
-            if (!alreadyScheduled) {{
-                val periodic = JobInfo.Builder(PERIODIC_JOB_ID, component)
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setPeriodic(15L * 60L * 1000L)
-                    .setPersisted(true)
-                    .build()
-                scheduler.schedule(periodic)
+            val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler
+            if (scheduler != null) {{
+                val component = ComponentName(appCtx, OtlobhaBgJobService::class.java)
+                val pendingJobs = scheduler.allPendingJobs ?: emptyList()
+                val alreadyScheduled = pendingJobs.any {{ it.id == PERIODIC_JOB_ID }}
+                if (!alreadyScheduled) {{
+                    val periodic = JobInfo.Builder(PERIODIC_JOB_ID, component)
+                        .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                        .setPeriodic(15L * 60L * 1000L)
+                        .setPersisted(true)
+                        .build()
+                    scheduler.schedule(periodic)
+                }}
             }}
 
             if (fastCheck) {{
-                val extras = PersistableBundle().apply {{
-                    putInt("step", 1)
-                }}
-                val fastJob = JobInfo.Builder(FAST_JOB_ID, component)
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setMinimumLatency(45L * 1000L)
-                    .setOverrideDeadline(90L * 1000L)
-                    .setExtras(extras)
-                    .build()
-                scheduler.schedule(fastJob)
+                scheduleFastAlarm(appCtx, 1)
             }}
         }} catch (e: Throwable) {{
-            // Never crash app on OEM job scheduler limits
+            // Never crash app on OEM scheduler limits
         }}
     }}
 
-    fun scheduleNextFastCheck(context: Context, nextStep: Int) {{
+    fun scheduleFastAlarm(context: Context, step: Int) {{
         try {{
             val appCtx = context.applicationContext
-            val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
-            val component = ComponentName(appCtx, OtlobhaBgJobService::class.java)
-            val extras = PersistableBundle().apply {{
-                putInt("step", nextStep)
+            val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+            val delayMs = when {{
+                step <= 1 -> 10L * 1000L
+                step == 2 -> 15L * 1000L
+                step == 3 -> 20L * 1000L
+                step == 4 -> 30L * 1000L
+                step <= 6 -> 45L * 1000L
+                step <= 10 -> 60L * 1000L
+                else -> 90L * 1000L
             }}
-            val job = JobInfo.Builder(FAST_JOB_ID, component)
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setMinimumLatency(75L * 1000L)
-                .setOverrideDeadline(150L * 1000L)
-                .setExtras(extras)
-                .build()
-            scheduler.schedule(job)
+            val intent = Intent(appCtx, OtlobhaBgAlarmReceiver::class.java).apply {{
+                putExtra("step", step)
+            }}
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            }} else {{
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }}
+            val pi = PendingIntent.getBroadcast(appCtx, FAST_ALARM_REQ_CODE, intent, flags)
+            val triggerAt = SystemClock.elapsedRealtime() + delayMs
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
+                alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            }} else {{
+                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            }}
         }} catch (e: Throwable) {{
+            // Never crash app on OEM alarm limits
         }}
     }}
 }}
@@ -902,7 +1011,7 @@ class OtlobhaBootReceiver : BroadcastReceiver() {{
         try {{
             val action = intent?.action ?: return
             if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {{
-                OtlobhaBgScheduler.ensureScheduled(context.applicationContext, fastCheck = false)
+                OtlobhaBgScheduler.ensureScheduled(context.applicationContext, fastCheck = true)
             }}
         }} catch (e: Throwable) {{
         }}
@@ -928,6 +1037,7 @@ class MainActivity : FlutterActivity() {{
         super.onCreate(savedInstanceState)
         try {{
             capturePayloadFromIntent(intent, notifyFlutter = false)
+            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
         }} catch (e: Throwable) {{
         }}
     }}
@@ -941,12 +1051,28 @@ class MainActivity : FlutterActivity() {{
         }}
     }}
 
+    override fun onPause() {{
+        super.onPause()
+        try {{
+            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+        }} catch (e: Throwable) {{
+        }}
+    }}
+
     override fun onStop() {{
         super.onStop()
         try {{
             OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
         }} catch (e: Throwable) {{
         }}
+    }}
+
+    override fun onDestroy() {{
+        try {{
+            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+        }} catch (e: Throwable) {{
+        }}
+        super.onDestroy()
     }}
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
@@ -962,16 +1088,15 @@ class MainActivity : FlutterActivity() {{
                             result.success(payload)
                         }}
                         "scheduleBackgroundSync" -> {{
-                            val fastCheck = call.argument<Boolean>("fast_check") ?: false
                             val apiBase = call.argument<String>("api_base_url")?.trim()
                             if (!apiBase.isNullOrEmpty()) {{
                                 val prefs = applicationContext.getSharedPreferences(
-                                    OtlobhaBgJobService.PREFS_NAME,
+                                    OtlobhaBgPollEngine.PREFS_NAME,
                                     Context.MODE_PRIVATE
                                 )
-                                prefs.edit().putString(OtlobhaBgJobService.KEY_API_BASE, apiBase).apply()
+                                prefs.edit().putString(OtlobhaBgPollEngine.KEY_API_BASE, apiBase).apply()
                             }}
-                            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = fastCheck)
+                            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
                             result.success(true)
                         }}
                         else -> result.notImplemented()
@@ -987,9 +1112,9 @@ class MainActivity : FlutterActivity() {{
     private fun capturePayloadFromIntent(intent: Intent?, notifyFlutter: Boolean) {{
         try {{
             val safeIntent = intent ?: return
-            val payload = safeIntent.getStringExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
+            val payload = safeIntent.getStringExtra(OtlobhaBgPollEngine.EXTRA_PAYLOAD)
             if (!payload.isNullOrEmpty()) {{
-                safeIntent.removeExtra(OtlobhaBgJobService.EXTRA_PAYLOAD)
+                safeIntent.removeExtra(OtlobhaBgPollEngine.EXTRA_PAYLOAD)
                 if (notifyFlutter && bgChannel != null) {{
                     bgChannel?.invokeMethod("onBackgroundNotificationTap", payload)
                 }} else {{
@@ -1002,9 +1127,11 @@ class MainActivity : FlutterActivity() {{
 }}
 """
 
+(pkg_dir / "OtlobhaBgPollEngine.kt").write_text(poll_engine_kt, encoding="utf-8")
+(pkg_dir / "OtlobhaBgAlarmReceiver.kt").write_text(alarm_receiver_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBgJobService.kt").write_text(job_service_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBgScheduler.kt").write_text(scheduler_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBootReceiver.kt").write_text(boot_receiver_kt, encoding="utf-8")
 main_kt_path.write_text(main_activity_kt, encoding="utf-8")
-print(f"[FCM Android Setup] Generated Zero-Dependency OS JobScheduler Notification Engine & MainActivity bridge in {pkg_dir} ({pkg_name}).")
+print(f"[FCM Android Setup] Generated Dual AlarmManager + JobScheduler Background Notification Engine in {pkg_dir} ({pkg_name}).")
 PYEOF

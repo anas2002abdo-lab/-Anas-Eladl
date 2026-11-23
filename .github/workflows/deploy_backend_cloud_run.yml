@@ -19,6 +19,10 @@ on:
         description: "Refuse to start if gs://<bucket>/otlobha.db is missing (prevents empty DB creation)"
         required: true
         default: "true"
+      firebase_project_id:
+        description: "Firebase Project ID for FCM Push (optional, defaults to OTLOBHA_FIREBASE_PROJECT_ID or GCP_PROJECT_ID)"
+        required: false
+        default: ""
 
 jobs:
   deploy_backend:
@@ -117,9 +121,31 @@ jobs:
           SMTP_FROM: ${{ vars.SMTP_FROM }}
           SUPER_ADMIN_EMAIL: ${{ vars.SUPER_ADMIN_EMAIL }}
           SUPER_ADMIN_NAME: ${{ vars.SUPER_ADMIN_NAME }}
+          FIREBASE_PROJECT_ID_OVERRIDE: ${{ github.event.inputs.firebase_project_id || vars.OTLOBHA_FIREBASE_PROJECT_ID || '' }}
+          FIREBASE_SA_JSON_B64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           set -euo pipefail
           RUNTIME_SA_EMAIL="${RUNTIME_SA_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+          TARGET_FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID_OVERRIDE:-$GCP_PROJECT_ID}"
+          echo "Runtime Service Account: ${RUNTIME_SA_EMAIL}"
+          echo "Target Firebase FCM Project ID: ${TARGET_FIREBASE_PROJECT_ID}"
+
+          # Enable FCM API on Cloud Run & target Firebase projects (best-effort)
+          gcloud services enable fcm.googleapis.com --project "$GCP_PROJECT_ID" >/dev/null 2>&1 || true
+          if [ "$TARGET_FIREBASE_PROJECT_ID" != "$GCP_PROJECT_ID" ]; then
+            gcloud services enable fcm.googleapis.com --project "$TARGET_FIREBASE_PROJECT_ID" >/dev/null 2>&1 || true
+          fi
+
+          # If FIREBASE_SERVICE_ACCOUNT_JSON_B64 secret is set in GitHub, sync it into Google Secret Manager automatically
+          if [ -n "${FIREBASE_SA_JSON_B64:-}" ]; then
+            echo "Syncing FIREBASE_SERVICE_ACCOUNT_JSON_B64 into Secret Manager (otlobha-firebase-sa-json)..."
+            python3 -c 'import base64, json, os; raw="".join(os.environ.get("FIREBASE_SA_JSON_B64","").split()); decoded=base64.b64decode(raw, validate=True); data=json.loads(decoded.decode("utf-8")); assert all(data.get(k) for k in ("project_id","client_email","private_key")), "Invalid Firebase SA JSON"; open("/tmp/otlobha-firebase-sa.json","wb").write(decoded); print("Validated Firebase Admin SA for project_id=" + str(data["project_id"]))'
+            if ! gcloud secrets describe "otlobha-firebase-sa-json" --project "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+              gcloud secrets create "otlobha-firebase-sa-json" --replication-policy="automatic" --project "$GCP_PROJECT_ID" >/dev/null
+            fi
+            gcloud secrets versions add "otlobha-firebase-sa-json" --data-file="/tmp/otlobha-firebase-sa.json" --project "$GCP_PROJECT_ID" >/dev/null
+            rm -f /tmp/otlobha-firebase-sa.json
+          fi
 
           SECRET_BINDINGS="SMTP_PASS=otlobha-smtp-pass:latest,JWT_ACCESS_SECRET=otlobha-jwt-access-secret:latest,JWT_REFRESH_SECRET=otlobha-jwt-refresh-secret:latest,SUPER_ADMIN_PASSWORD=otlobha-super-admin-password:latest"
           if gcloud secrets describe "otlobha-gemini-api-key" >/dev/null 2>&1; then
@@ -132,8 +158,8 @@ jobs:
             SECRET_BINDINGS="${SECRET_BINDINGS},FIREBASE_SERVICE_ACCOUNT_JSON=otlobha-firebase-sa-json:latest"
           fi
 
-          # Best-effort: grant FCM Admin role to runtime service account so ADC can send FCM pushes
-          gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+          # Best-effort: grant keyless FCM Admin role to runtime service account on target Firebase project
+          gcloud projects add-iam-policy-binding "$TARGET_FIREBASE_PROJECT_ID" \
             --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
             --role="roles/firebasecloudmessaging.admin" >/dev/null 2>&1 || true
 
@@ -142,7 +168,7 @@ jobs:
             REQ_FLAG="1"
           fi
 
-          ENV_VARS="NODE_ENV=production,DISABLE_VITE=1,FIREBASE_PROJECT_ID=${GCP_PROJECT_ID},OTLOBHA_DB_PATH=/tmp/otlobha-local/otlobha.db,OTLOBHA_GCS_PERSIST_DIR=/mnt/gcs-data,OTLOBHA_SQLITE_JOURNAL_MODE=WAL,OTLOBHA_SQLITE_SYNC_INTERVAL_MS=15000,OTLOBHA_REQUIRE_EXISTING_PERSISTED_DB=${REQ_FLAG}"
+          ENV_VARS="NODE_ENV=production,DISABLE_VITE=1,FIREBASE_PROJECT_ID=${TARGET_FIREBASE_PROJECT_ID},OTLOBHA_DB_PATH=/tmp/otlobha-local/otlobha.db,OTLOBHA_GCS_PERSIST_DIR=/mnt/gcs-data,OTLOBHA_SQLITE_JOURNAL_MODE=WAL,OTLOBHA_SQLITE_SYNC_INTERVAL_MS=15000,OTLOBHA_REQUIRE_EXISTING_PERSISTED_DB=${REQ_FLAG}"
           for key in SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER SMTP_FROM SUPER_ADMIN_EMAIL SUPER_ADMIN_NAME; do
             val="${!key:-}"
             if [ -n "$val" ]; then

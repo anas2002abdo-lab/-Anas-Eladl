@@ -371,6 +371,11 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
               ? `أجهزة مسجلة: ${fcmStatus?.registered_devices.total ?? 0} (عملاء ${fcmStatus?.registered_devices.customer ?? 0} · طيارون ${fcmStatus?.registered_devices.captain ?? 0})`
               : `Devices: ${fcmStatus?.registered_devices.total ?? 0} (Cust ${fcmStatus?.registered_devices.customer ?? 0} · Cap ${fcmStatus?.registered_devices.captain ?? 0})`}
           </p>
+          {!fcmReady && fcmStatus?.auth_probe?.message && (
+            <p className="text-[11px] text-amber-700 mt-1 leading-snug">
+              {fcmStatus.auth_probe.message}
+            </p>
+          )}
         </div>
       </div>
 
