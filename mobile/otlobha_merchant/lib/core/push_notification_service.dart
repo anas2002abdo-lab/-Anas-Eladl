@@ -180,31 +180,62 @@ class MerchantPushNotificationService {
 
   Future<void> scheduleNativeBackgroundSync({bool fastCheck = false}) async {
     if (kIsWeb || !Platform.isAndroid) return;
+    final normalizedBase = MerchantAppConfig.normalizedBaseUrl.trim();
     try {
       final prefs = await SharedPreferences.getInstance();
-      final normalizedBase = MerchantAppConfig.normalizedBaseUrl.trim();
       if (normalizedBase.isNotEmpty) {
         await prefs.setString(_kBgApiBaseKey, normalizedBase);
       }
     } catch (_) {}
     try {
-      await _kNativeBgPushChannel.invokeMethod('scheduleBackgroundSync');
-      if (fastCheck) {
-        await _kNativeBgPushChannel.invokeMethod('triggerNow');
-      }
+      await _kNativeBgPushChannel.invokeMethod('scheduleBackgroundSync', <String, dynamic>{
+        'fast_check': fastCheck,
+        'api_base_url': normalizedBase,
+        'app': 'merchant',
+      }).timeout(const Duration(seconds: 3));
     } catch (e) {
       debugPrint('[MerchantPush] Native background sync channel not ready: $e');
     }
   }
 
+  Future<void> refreshShownIdsFromStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final existingCsv = prefs.getString(_kMerchantShownBgIdsKey) ?? '';
+      for (final id in existingCsv.split(',')) {
+        final clean = id.trim();
+        if (clean.isNotEmpty) {
+          _shownServerNotifIds.add(clean);
+          _shownLocalIds.add(clean);
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> _checkNativeLaunchPayload() async {
     if (kIsWeb || !Platform.isAndroid) return;
     try {
-      final raw = await _kNativeBgPushChannel.invokeMethod<String>('getInitialPayload');
+      _kNativeBgPushChannel.setMethodCallHandler((MethodCall call) async {
+        if (call.method == 'onBackgroundNotificationTap') {
+          final raw = call.arguments?.toString() ?? '';
+          if (raw.trim().isNotEmpty) {
+            try {
+              final decoded = jsonDecode(raw);
+              if (decoded is Map) {
+                onNotificationTap?.call(Map<String, dynamic>.from(decoded));
+              }
+            } catch (_) {}
+          }
+        }
+      });
+      final raw = await _kNativeBgPushChannel
+          .invokeMethod<String>('consumeInitialNotification')
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
       if (raw != null && raw.trim().isNotEmpty) {
         final decoded = jsonDecode(raw);
-        if (decoded is Map<String, dynamic>) {
-          onNotificationTap?.call(decoded);
+        if (decoded is Map) {
+          onNotificationTap?.call(Map<String, dynamic>.from(decoded));
         }
       }
     } catch (_) {}

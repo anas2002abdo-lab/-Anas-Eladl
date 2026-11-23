@@ -7550,6 +7550,8 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
 });
 
 app.get('/api/mobile/notifications/background-poll', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
   const auth = optionalAuth(req);
   const rawRequested = String(req.query.app || '').toLowerCase();
   const requestedApp =
@@ -7623,6 +7625,8 @@ app.get('/api/mobile/notifications/background-poll', (req, res) => {
 });
 
 app.get('/api/mobile/notifications', requireAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
   const auth = req.auth!;
   const isAdmin = isAdminAuth(auth);
   const appName = isAdmin ? String(req.query.app || 'customer') : auth.role;

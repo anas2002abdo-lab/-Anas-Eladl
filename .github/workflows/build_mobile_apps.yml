@@ -100,6 +100,7 @@ jobs:
           FIREBASE_SECRET_NAME: "FIREBASE_CUSTOMER_GOOGLE_SERVICES_JSON_B64"
           EXPECTED_ANDROID_PACKAGE: "com.otlobha.otlobha_customer"
           REQUIRE_GOOGLE_SERVICES: "1"
+          OTLOBHA_BG_API_BASE_URL: ${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
           CUSTOMER_KEYSTORE_BASE64: ${{ secrets.CUSTOMER_KEYSTORE_BASE64 }}
           CUSTOMER_KEY_ALIAS: ${{ secrets.CUSTOMER_KEY_ALIAS }}
           CUSTOMER_STORE_PASSWORD: ${{ secrets.CUSTOMER_STORE_PASSWORD }}
@@ -234,6 +235,7 @@ jobs:
           FIREBASE_SECRET_NAME: "FIREBASE_CAPTAIN_GOOGLE_SERVICES_JSON_B64"
           EXPECTED_ANDROID_PACKAGE: "com.otlobha.otlobha_captain"
           REQUIRE_GOOGLE_SERVICES: "1"
+          OTLOBHA_BG_API_BASE_URL: ${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
         run: |
           set -euo pipefail
           cd mobile/otlobha_captain
@@ -301,6 +303,7 @@ jobs:
           FIREBASE_SECRET_NAME: "FIREBASE_MERCHANT_GOOGLE_SERVICES_JSON_B64"
           EXPECTED_ANDROID_PACKAGE: "com.otlobha.otlobha_merchant"
           REQUIRE_GOOGLE_SERVICES: "0"
+          OTLOBHA_BG_API_BASE_URL: ${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}
         run: |
           set -euo pipefail
           cd mobile/otlobha_merchant

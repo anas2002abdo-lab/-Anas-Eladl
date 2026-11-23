@@ -57,6 +57,7 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
       MerchantPushNotificationService.instance.scheduleNativeBackgroundSync(fastCheck: true);
     } else if (state == AppLifecycleState.resumed) {
+      MerchantPushNotificationService.instance.refreshShownIdsFromStorage();
       MerchantPushNotificationService.instance.scheduleNativeBackgroundSync();
       final merchantId = _merchant?['id']?.toString() ?? '';
       if (merchantId.isNotEmpty) {

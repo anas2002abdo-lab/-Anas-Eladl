@@ -18,8 +18,9 @@ GS_TARGET="android/app/google-services.json"
 SECRET_NAME="${FIREBASE_SECRET_NAME:-FIREBASE_GOOGLE_SERVICES_JSON_B64}"
 REQUIRE_GS="${REQUIRE_GOOGLE_SERVICES:-1}"
 EXPECTED_PKG="${EXPECTED_ANDROID_PACKAGE:-}"
+BG_API_BASE_URL="${OTLOBHA_BG_API_BASE_URL:-https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app}"
 
-export GS_TARGET SECRET_NAME REQUIRE_GS EXPECTED_PKG
+export GS_TARGET SECRET_NAME REQUIRE_GS EXPECTED_PKG BG_API_BASE_URL
 
 # 1. Decode base64 secret into android/app/google-services.json (never print secret values)
 python3 - <<'PYEOF'
@@ -407,6 +408,9 @@ if manifest_path.exists():
         "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK",
         "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.SCHEDULE_EXACT_ALARM",
     ]
     perm_lines = []
     for perm in required_permissions:
@@ -446,8 +450,17 @@ if manifest_path.exists():
         )
         m_text = m_text.replace("</activity>", click_filter, 1)
 
-    if "OtlobhaBgAlarmReceiver" not in m_text and "</application>" in m_text:
+    if "</application>" in m_text:
         bg_components_xml = ""
+        if "OtlobhaBgPushService" not in m_text:
+            bg_components_xml += (
+                '        <service\n'
+                '            android:name=".OtlobhaBgPushService"\n'
+                '            android:enabled="true"\n'
+                '            android:exported="false"\n'
+                '            android:stopWithTask="false"\n'
+                '            android:foregroundServiceType="dataSync" />\n'
+            )
         if "OtlobhaBgJobService" not in m_text:
             bg_components_xml += (
                 '        <service\n'
@@ -455,12 +468,13 @@ if manifest_path.exists():
                 '            android:permission="android.permission.BIND_JOB_SERVICE"\n'
                 '            android:exported="false" />\n'
             )
-        bg_components_xml += (
-            '        <receiver\n'
-            '            android:name=".OtlobhaBgAlarmReceiver"\n'
-            '            android:enabled="true"\n'
-            '            android:exported="false" />\n'
-        )
+        if "OtlobhaBgAlarmReceiver" not in m_text:
+            bg_components_xml += (
+                '        <receiver\n'
+                '            android:name=".OtlobhaBgAlarmReceiver"\n'
+                '            android:enabled="true"\n'
+                '            android:exported="false" />\n'
+            )
         if "OtlobhaBootReceiver" not in m_text:
             bg_components_xml += (
                 '        <receiver\n'
@@ -470,14 +484,16 @@ if manifest_path.exists():
                 '            <intent-filter>\n'
                 '                <action android:name="android.intent.action.BOOT_COMPLETED" />\n'
                 '                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />\n'
+                '                <action android:name="android.intent.action.QUICKBOOT_POWERON" />\n'
                 '            </intent-filter>\n'
                 '        </receiver>\n'
             )
-        bg_components_xml += '    </application>'
-        m_text = m_text.replace("</application>", bg_components_xml, 1)
+        if bg_components_xml:
+            bg_components_xml += '    </application>'
+            m_text = m_text.replace("</application>", bg_components_xml, 1)
 
     manifest_path.write_text(m_text, encoding="utf-8")
-    print(f"[FCM Android Setup] Patched AndroidManifest.xml with POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED, JobService, AlarmReceiver, BootReceiver, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
+    print(f"[FCM Android Setup] Patched AndroidManifest.xml with ForegroundService (OtlobhaBgPushService), POST_NOTIFICATIONS, WAKE_LOCK, RECEIVE_BOOT_COMPLETED, JobService, AlarmReceiver, BootReceiver, channel '{default_channel}', and FLUTTER_NOTIFICATION_CLICK.")
 
 # --- 4. Generate Zero-Dependency Native Android Background Notification Engine (OS JobScheduler + BootReceiver + MainActivity Bridge) ---
 expected_pkg_raw = os.environ.get("EXPECTED_PKG", "").strip()
@@ -532,6 +548,8 @@ legacy_worker = pkg_dir / "OtlobhaBgNotificationWorker.kt"
 if legacy_worker.exists():
     legacy_worker.unlink()
 
+fallback_api_base = os.environ.get("BG_API_BASE_URL", "").strip().rstrip("/") or "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"
+
 poll_engine_kt = f"""package {pkg_name}
 
 import android.app.Notification
@@ -542,7 +560,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -552,6 +573,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object OtlobhaBgPollEngine {{
+    private const val TAG = "OtlobhaBgPush"
     const val PREFS_NAME = "FlutterSharedPreferences"
     const val KEY_API_BASE = "flutter.otlobha_bg_api_base_url"
     const val KEY_SHOWN_CSV = "flutter.otlobha_bg_shown_ids_csv"
@@ -563,30 +585,34 @@ object OtlobhaBgPollEngine {{
     const val DEFAULT_CHANNEL = "{default_channel_bg}"
     const val DEFAULT_TITLE = "{default_app_title}"
     const val EXTRA_PAYLOAD = "otlobha_bg_notification_payload"
-    const val FALLBACK_API_BASE = "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"
+    const val FALLBACK_API_BASE = "{fallback_api_base}"
 
     private data class HttpResp(val code: Int, val body: String?)
 
-    fun runPollOnce(context: Context) {{
-        try {{
+    fun runPollOnce(context: Context): Boolean {{
+        return try {{
             val appCtx = context.applicationContext
             val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val rawBase = prefs.getString(KEY_API_BASE, null)?.trim()
-            val apiBase = if (!rawBase.isNullOrEmpty()) rawBase.trimEnd('/') else FALLBACK_API_BASE
+            val apiBase = if (!rawBase.isNullOrEmpty() && (rawBase.startsWith("https://") || rawBase.startsWith("http://"))) {{
+                rawBase.trimEnd('/')
+            }} else {{
+                FALLBACK_API_BASE
+            }}
             var accessToken = prefs.getString(KEY_ACCESS_TOKEN, null)?.trim() ?: ""
             val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
 
             // 1. Primary endpoint: /api/mobile/notifications/background-poll (supports both logged-in and guest broadcasts)
-            var resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10", accessToken)
+            var resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12", accessToken)
             if (resp.code == 401 && refreshToken.isNotEmpty()) {{
                 val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
                 if (!refreshed.isNullOrEmpty()) {{
                     accessToken = refreshed
-                    resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10", accessToken)
+                    resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12", accessToken)
                 }}
             }}
 
-            // 2. Fallback endpoint: /api/mobile/notifications?app=... (works immediately on existing Cloud Run deployments!)
+            // 2. Fallback endpoint: /api/mobile/notifications?app=... (works even on older backend versions)
             if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
                 resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE", accessToken)
                 if (resp.code == 401 && refreshToken.isNotEmpty()) {{
@@ -600,15 +626,20 @@ object OtlobhaBgPollEngine {{
 
             // 3. Guest fallback if authenticated token failed on /background-poll
             if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
-                resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=10", "")
+                resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12", "")
             }}
 
             val bodyText = resp.body
             if (resp.code in 200..299 && !bodyText.isNullOrEmpty()) {{
                 processNotifications(appCtx, bodyText, prefs)
+                true
+            }} else {{
+                Log.d(TAG, "Poll returned HTTP ${{resp.code}} for role=$APP_ROLE")
+                false
             }}
         }} catch (e: Throwable) {{
-            // Never crash background process
+            Log.d(TAG, "Poll exception: ${{e.message}}")
+            false
         }}
     }}
 
@@ -618,9 +649,12 @@ object OtlobhaBgPollEngine {{
             val url = URL(urlStr)
             val connection = (url.openConnection() as HttpURLConnection).apply {{
                 requestMethod = "GET"
+                instanceFollowRedirects = false
                 connectTimeout = 8000
                 readTimeout = 10000
+                useCaches = false
                 setRequestProperty("Accept", "application/json")
+                setRequestProperty("Cache-Control", "no-cache")
                 if (accessToken.isNotEmpty()) {{
                     setRequestProperty("Authorization", "Bearer $accessToken")
                 }}
@@ -673,7 +707,7 @@ object OtlobhaBgPollEngine {{
                     if (nextRefresh.isNotEmpty()) {{
                         ed.putString(KEY_REFRESH_TOKEN, nextRefresh)
                     }}
-                    ed.apply()
+                    ed.commit()
                     nextAccess
                 }} else null
             }} else null
@@ -689,6 +723,7 @@ object OtlobhaBgPollEngine {{
 
     private fun processNotifications(appCtx: Context, responseBody: String, prefs: SharedPreferences) {{
         val trimmed = responseBody.trim()
+        if (!trimmed.startsWith("[") && !trimmed.startsWith("{{")) return
         val arr: JSONArray = if (trimmed.startsWith("[")) {{
             JSONArray(trimmed)
         }} else {{
@@ -717,6 +752,7 @@ object OtlobhaBgPollEngine {{
 
         if (pending.isEmpty()) return
 
+        var changed = false
         for (item in pending.reversed()) {{
             val id = item.optString("id", "").trim()
             val title = item.optString("title_ar", "").trim().ifEmpty {{ DEFAULT_TITLE }}
@@ -752,14 +788,17 @@ object OtlobhaBgPollEngine {{
             val posted = postSystemNotification(appCtx, id, title, body, channelId, payloadJson.toString(), soundEnabled, vibEnabled)
             if (posted && id.isNotEmpty() && shownSet.add(id)) {{
                 shownOrder.add(id)
-                while (shownOrder.size > 150) {{
+                changed = true
+                while (shownOrder.size > 200) {{
                     val removed = shownOrder.removeAt(0)
                     shownSet.remove(removed)
                 }}
             }}
         }}
 
-        prefs.edit().putString(KEY_SHOWN_CSV, shownOrder.joinToString(",")).apply()
+        if (changed) {{
+            prefs.edit().putString(KEY_SHOWN_CSV, shownOrder.joinToString(",")).commit()
+        }}
     }}
 
     @Suppress("DEPRECATION")
@@ -784,13 +823,14 @@ object OtlobhaBgPollEngine {{
                 ?: return false
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
-                val importance = if (!soundEnabled && !vibEnabled) {{
+                val isSilent = !soundEnabled && !vibEnabled
+                val importance = if (isSilent) {{
                     NotificationManager.IMPORTANCE_DEFAULT
                 }} else {{
                     NotificationManager.IMPORTANCE_HIGH
                 }}
                 val channelName = when (channelId) {{
-                    "otlobha_dispatch_channel" -> "طلبات جديدة وإسناد الكباتن"
+                    "otlobha_dispatch_channel" -> "طلبات جديدة وتنبيهات فورية"
                     "otlobha_chat_channel" -> "رسائل الشات المباشر"
                     "otlobha_admin_channel" -> "تنبيهات الإدارة والحساب"
                     "otlobha_promos_channel" -> "العروض والتخفيضات"
@@ -798,8 +838,23 @@ object OtlobhaBgPollEngine {{
                     else -> "تحديثات الطلبات والمشاوير"
                 }}
                 val channel = NotificationChannel(channelId, channelName, importance).apply {{
+                    enableLights(true)
                     enableVibration(vibEnabled)
+                    if (vibEnabled) {{
+                        vibrationPattern = longArrayOf(0L, 320L, 140L, 320L, 140L, 420L)
+                    }}
+                    if (soundEnabled) {{
+                        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                        val attrs = AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                        setSound(soundUri, attrs)
+                    }} else {{
+                        setSound(null, null)
+                    }}
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    setShowBadge(true)
                 }}
                 nm.createNotificationChannel(channel)
             }}
@@ -833,8 +888,14 @@ object OtlobhaBgPollEngine {{
                 .setContentText(body)
                 .setStyle(Notification.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
+                .setShowWhen(true)
+                .setWhen(System.currentTimeMillis())
                 .setContentIntent(pendingIntent)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setCategory(
+                    if (channelId == "otlobha_dispatch_channel") Notification.CATEGORY_ALARM
+                    else Notification.CATEGORY_MESSAGE
+                )
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {{
                 builder.setPriority(Notification.PRIORITY_MAX)
                 builder.setDefaults(defaults)
@@ -843,6 +904,7 @@ object OtlobhaBgPollEngine {{
             nm.notify(intId, builder.build())
             true
         }} catch (e: Throwable) {{
+            Log.d(TAG, "postSystemNotification error: ${{e.message}}")
             false
         }}
     }}
@@ -852,7 +914,164 @@ object OtlobhaBgPollEngine {{
         for (ch in key) {{
             hash = ((hash * 31) + ch.code) and 0x7fffffff
         }}
-        return if (hash == 0 || hash == 904201) 100000 + (hash % 800000) else hash
+        return if (hash == 0 || hash == 904201 || hash == 942100) 100000 + (hash % 800000) else hash
+    }}
+}}
+"""
+
+push_service_kt = f"""package {pkg_name}
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+
+class OtlobhaBgPushService : Service() {{
+    companion object {{
+        private const val SERVICE_NOTIF_ID = 942100
+        private const val SERVICE_CHANNEL_ID = "otlobha_bg_service_channel"
+        @Volatile
+        var isRunning = false
+    }}
+
+    @Volatile
+    private var active = false
+    private var pollThread: Thread? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {{
+        super.onCreate()
+        startForegroundSilently()
+        startPollingLoop()
+    }}
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {{
+        startForegroundSilently()
+        startPollingLoop()
+        return START_STICKY
+    }}
+
+    override fun onTaskRemoved(rootIntent: Intent?) {{
+        // Immediately schedule a 3-second self-healing alarm if the user swipes the app away from Recents
+        try {{
+            OtlobhaBgScheduler.scheduleFastAlarm(applicationContext, 1)
+            OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+        }} catch (e: Throwable) {{
+        }}
+        super.onTaskRemoved(rootIntent)
+    }}
+
+    override fun onDestroy() {{
+        active = false
+        isRunning = false
+        try {{
+            pollThread?.interrupt()
+        }} catch (e: Throwable) {{
+        }}
+        try {{
+            OtlobhaBgScheduler.scheduleFastAlarm(applicationContext, 1)
+        }} catch (e: Throwable) {{
+        }}
+        super.onDestroy()
+    }}
+
+    @Suppress("DEPRECATION")
+    private fun startForegroundSilently() {{
+        try {{
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            if (nm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                val channel = NotificationChannel(
+                    SERVICE_CHANNEL_ID,
+                    "استقبال إشعارات {default_app_title} في الخلفية",
+                    NotificationManager.IMPORTANCE_MIN
+                ).apply {{
+                    setSound(null, null)
+                    enableVibration(false)
+                    enableLights(false)
+                    setShowBadge(false)
+                    lockscreenVisibility = Notification.VISIBILITY_SECRET
+                }}
+                nm.createNotificationChannel(channel)
+            }}
+
+            val launchIntent = Intent(this, MainActivity::class.java).apply {{
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }}
+            val piFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            }} else {{
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }}
+            val pi = PendingIntent.getActivity(this, SERVICE_NOTIF_ID, launchIntent, piFlags)
+
+            val appIcon = applicationInfo.icon
+            val smallIcon = if (appIcon != 0) appIcon else android.R.drawable.ic_dialog_info
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                Notification.Builder(this, SERVICE_CHANNEL_ID)
+            }} else {{
+                Notification.Builder(this)
+            }}
+            val notif = builder
+                .setSmallIcon(smallIcon)
+                .setContentTitle("{default_app_title}")
+                .setContentText("متصل لاستقبال الإشعارات الفورية")
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(pi)
+                .setVisibility(Notification.VISIBILITY_SECRET)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {{
+                startForeground(SERVICE_NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            }} else {{
+                startForeground(SERVICE_NOTIF_ID, notif)
+            }}
+        }} catch (e: Throwable) {{
+            // If Android 12+ blocks foreground start from background, stop safely and rely on AlarmReceiver/JobService
+            try {{
+                stopSelf()
+            }} catch (_: Throwable) {{
+            }}
+        }}
+    }}
+
+    private fun startPollingLoop() {{
+        if (active && pollThread?.isAlive == true) return
+        active = true
+        isRunning = true
+        val appCtx = applicationContext
+        val t = Thread {{
+            var consecutiveFailures = 0
+            while (active) {{
+                try {{
+                    val ok = OtlobhaBgPollEngine.runPollOnce(appCtx)
+                    consecutiveFailures = if (ok) 0 else (consecutiveFailures + 1).coerceAtMost(6)
+                }} catch (e: Throwable) {{
+                    consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(6)
+                }}
+                val sleepMs = when {{
+                    consecutiveFailures == 0 -> 5500L
+                    consecutiveFailures <= 2 -> 10000L
+                    else -> 20000L
+                }}
+                try {{
+                    Thread.sleep(sleepMs)
+                }} catch (e: InterruptedException) {{
+                    if (!active) break
+                }}
+            }}
+            isRunning = false
+        }}
+        t.isDaemon = true
+        pollThread = t
+        t.start()
     }}
 }}
 """
@@ -881,6 +1100,9 @@ class OtlobhaBgAlarmReceiver : BroadcastReceiver() {{
         val worker = Thread {{
             try {{
                 OtlobhaBgPollEngine.runPollOnce(appCtx)
+                if (!OtlobhaBgPushService.isRunning) {{
+                    OtlobhaBgScheduler.tryStartKeepAliveService(appCtx)
+                }}
                 val nextStep = if (step < 15) step + 1 else 15
                 OtlobhaBgScheduler.scheduleFastAlarm(appCtx, nextStep)
             }} catch (e: Throwable) {{
@@ -922,8 +1144,11 @@ class OtlobhaBgJobService : JobService() {{
             try {{
                 if (!cancelled) {{
                     OtlobhaBgPollEngine.runPollOnce(appCtx)
+                    if (!OtlobhaBgPushService.isRunning) {{
+                        OtlobhaBgScheduler.tryStartKeepAliveService(appCtx)
+                    }}
                     // Self-heal: revive continuous alarm chain if OEM cleared alarms
-                    OtlobhaBgScheduler.scheduleFastAlarm(appCtx, 5)
+                    OtlobhaBgScheduler.scheduleFastAlarm(appCtx, 2)
                 }}
             }} catch (e: Throwable) {{
                 // Never crash background process
@@ -962,6 +1187,20 @@ object OtlobhaBgScheduler {{
     private const val PERIODIC_JOB_ID = 942101
     private const val FAST_ALARM_REQ_CODE = 942109
 
+    fun tryStartKeepAliveService(context: Context) {{
+        try {{
+            val appCtx = context.applicationContext
+            val svcIntent = Intent(appCtx, OtlobhaBgPushService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                appCtx.startForegroundService(svcIntent)
+            }} else {{
+                appCtx.startService(svcIntent)
+            }}
+        }} catch (e: Throwable) {{
+            // Android 12+ may restrict background FGS start when process was cold; AlarmReceiver & JobService still poll
+        }}
+    }}
+
     fun ensureScheduled(context: Context, fastCheck: Boolean = false) {{
         try {{
             val appCtx = context.applicationContext
@@ -993,13 +1232,12 @@ object OtlobhaBgScheduler {{
             val appCtx = context.applicationContext
             val alarmManager = appCtx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
             val delayMs = when {{
-                step <= 1 -> 10L * 1000L
-                step == 2 -> 15L * 1000L
+                step <= 1 -> 5L * 1000L
+                step == 2 -> 12L * 1000L
                 step == 3 -> 20L * 1000L
-                step == 4 -> 30L * 1000L
-                step <= 6 -> 45L * 1000L
-                step <= 10 -> 60L * 1000L
-                else -> 90L * 1000L
+                step <= 6 -> 30L * 1000L
+                step <= 10 -> 45L * 1000L
+                else -> 60L * 1000L
             }}
             val intent = Intent(appCtx, OtlobhaBgAlarmReceiver::class.java).apply {{
                 putExtra("step", step)
@@ -1011,8 +1249,14 @@ object OtlobhaBgScheduler {{
             }}
             val pi = PendingIntent.getBroadcast(appCtx, FAST_ALARM_REQ_CODE, intent, flags)
             val triggerAt = SystemClock.elapsedRealtime() + delayMs
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
-                alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {{
+                if (alarmManager.canScheduleExactAlarms()) {{
+                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                }} else {{
+                    alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                }}
+            }} else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {{
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
             }} else {{
                 alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
             }}
@@ -1033,8 +1277,13 @@ class OtlobhaBootReceiver : BroadcastReceiver() {{
     override fun onReceive(context: Context, intent: Intent?) {{
         try {{
             val action = intent?.action ?: return
-            if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {{
-                OtlobhaBgScheduler.ensureScheduled(context.applicationContext, fastCheck = true)
+            if (action == Intent.ACTION_BOOT_COMPLETED ||
+                action == Intent.ACTION_MY_PACKAGE_REPLACED ||
+                action == "android.intent.action.QUICKBOOT_POWERON"
+            ) {{
+                val appCtx = context.applicationContext
+                OtlobhaBgScheduler.ensureScheduled(appCtx, fastCheck = true)
+                OtlobhaBgScheduler.tryStartKeepAliveService(appCtx)
             }}
         }} catch (e: Throwable) {{
         }}
@@ -1061,6 +1310,15 @@ class MainActivity : FlutterActivity() {{
         try {{
             capturePayloadFromIntent(intent, notifyFlutter = false)
             OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+            OtlobhaBgScheduler.tryStartKeepAliveService(applicationContext)
+        }} catch (e: Throwable) {{
+        }}
+    }}
+
+    override fun onResume() {{
+        super.onResume()
+        try {{
+            OtlobhaBgScheduler.tryStartKeepAliveService(applicationContext)
         }} catch (e: Throwable) {{
         }}
     }}
@@ -1078,6 +1336,7 @@ class MainActivity : FlutterActivity() {{
         super.onPause()
         try {{
             OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+            OtlobhaBgScheduler.tryStartKeepAliveService(applicationContext)
         }} catch (e: Throwable) {{
         }}
     }}
@@ -1117,9 +1376,10 @@ class MainActivity : FlutterActivity() {{
                                     OtlobhaBgPollEngine.PREFS_NAME,
                                     Context.MODE_PRIVATE
                                 )
-                                prefs.edit().putString(OtlobhaBgPollEngine.KEY_API_BASE, apiBase).apply()
+                                prefs.edit().putString(OtlobhaBgPollEngine.KEY_API_BASE, apiBase).commit()
                             }}
                             OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
+                            OtlobhaBgScheduler.tryStartKeepAliveService(applicationContext)
                             result.success(true)
                         }}
                         else -> result.notImplemented()
@@ -1151,10 +1411,11 @@ class MainActivity : FlutterActivity() {{
 """
 
 (pkg_dir / "OtlobhaBgPollEngine.kt").write_text(poll_engine_kt, encoding="utf-8")
+(pkg_dir / "OtlobhaBgPushService.kt").write_text(push_service_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBgAlarmReceiver.kt").write_text(alarm_receiver_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBgJobService.kt").write_text(job_service_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBgScheduler.kt").write_text(scheduler_kt, encoding="utf-8")
 (pkg_dir / "OtlobhaBootReceiver.kt").write_text(boot_receiver_kt, encoding="utf-8")
 main_kt_path.write_text(main_activity_kt, encoding="utf-8")
-print(f"[FCM Android Setup] Generated Dual AlarmManager + JobScheduler Background Notification Engine in {pkg_dir} ({pkg_name}).")
+print(f"[FCM Android Setup] Generated Triple-Layer ForegroundService + Exact-Alarm + JobScheduler Background Notification Engine in {pkg_dir} ({pkg_name}) targeting {fallback_api_base}.")
 PYEOF

@@ -32,7 +32,7 @@ for APP in otlobha_customer otlobha_captain otlobha_merchant; do
     if [ -f "/tmp/${APP}_analysis_options.yaml" ]; then cp "/tmp/${APP}_analysis_options.yaml" analysis_options.yaml; fi
   fi
 
-  REQUIRE_GOOGLE_SERVICES=0 EXPECTED_ANDROID_PACKAGE="com.otlobha.$APP" bash ../configure_firebase_android.sh .
+  REQUIRE_GOOGLE_SERVICES=0 EXPECTED_ANDROID_PACKAGE="com.otlobha.$APP" OTLOBHA_BG_API_BASE_URL="$API_URL" bash ../configure_firebase_android.sh .
 
   if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
     printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
