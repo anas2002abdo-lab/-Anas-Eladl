@@ -4,6 +4,7 @@ import {
   Bell,
   CheckCircle2,
   Cloud,
+  FileSpreadsheet,
   Languages,
   Layers,
   LogOut,
@@ -27,6 +28,7 @@ import {
 import { api } from './lib/api.ts';
 import { AdminLoginPortal } from './components/AdminLoginPortal.tsx';
 import { MerchantAuthPortal } from './components/MerchantAuthPortal.tsx';
+import { MerchantMasterLinkPanel } from './components/MerchantMasterLinkPanel.tsx';
 import { MerchantStoreOrdersView } from './components/MerchantStoreOrdersView.tsx';
 import { OverviewSection } from './components/OverviewSection.tsx';
 import { ServicesZonesSection } from './components/ServicesZonesSection.tsx';
@@ -130,6 +132,19 @@ export default function App() {
     document.documentElement.lang = lang;
   }, [lang, isAr]);
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const isMerchantApp = portalMode === 'merchant';
+    document.title = isMerchantApp ? 'اطلبها للتجار – Otlobha Merchant' : 'اطلبها – Otlobha';
+    const manifestLink = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+    if (manifestLink) {
+      const targetHref = isMerchantApp ? '/manifest-merchant.webmanifest' : '/manifest.webmanifest';
+      if (manifestLink.getAttribute('href') !== targetHref) {
+        manifestLink.setAttribute('href', targetHref);
+      }
+    }
+  }, [portalMode]);
+
   const notify = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 4500);
@@ -137,8 +152,13 @@ export default function App() {
 
   const refreshCore = async (forceAdmin?: boolean, explicitMerchant?: MerchantRecord | null) => {
     const isAdmin = forceAdmin !== undefined ? forceAdmin : Boolean(adminUserRef.current);
+    const activeMerchant = explicitMerchant !== undefined ? explicitMerchant : merchantSession;
+    const merchantOrderOpts =
+      portalMode === 'merchant' && activeMerchant?.id
+        ? { merchantId: activeMerchant.id, scope: 'merchant' as const }
+        : undefined;
     try {
-      if (isAdmin) {
+      if (isAdmin && portalMode !== 'merchant') {
         const [ovRes, srvRes, znRes, capRes, merRes, ordRes, catsRes] = await Promise.allSettled([
           api.getOverview(),
           api.getServices(),
@@ -179,11 +199,12 @@ export default function App() {
         return;
       }
 
-      const [srvRes, znRes, merRes, ordRes] = await Promise.allSettled([
+      const [srvRes, znRes, merRes, ordRes, catsRes] = await Promise.allSettled([
         api.getServices(),
         api.getZones(),
         api.getMerchants(true),
-        api.getOrders(),
+        api.getOrders(merchantOrderOpts),
+        api.getCategories(),
       ]);
       setOverview(null);
       setCaptains([]);
@@ -191,6 +212,7 @@ export default function App() {
       if (znRes.status === 'fulfilled') setZones(znRes.value);
       if (merRes.status === 'fulfilled') setMerchants(merRes.value);
       if (ordRes.status === 'fulfilled') setOrders(ordRes.value);
+      if (catsRes.status === 'fulfilled') setCategories(catsRes.value);
     } catch {
       // Transient network errors are swallowed cleanly to avoid unhandled rejections
     }
@@ -198,7 +220,7 @@ export default function App() {
 
   useEffect(() => {
     refreshCore().catch(() => {});
-  }, [portalMode]);
+  }, [portalMode, merchantSession?.id]);
 
   // Subscribe to Firebase Auth state for the permanent Cloud Vault
   useEffect(() => {
@@ -426,7 +448,12 @@ export default function App() {
             groupLabel: isAr ? 'بوابة التاجر' : 'Merchant Portal',
             items: [
               { id: 'orders', label: isAr ? 'طلبات متجري الواردة' : 'Store Orders', icon: Store },
-              { id: 'catalog', label: isAr ? 'المنتجات والكتالوج المركزي' : 'Products & Master Catalog', icon: Package },
+              {
+                id: 'merchant_excel',
+                label: isAr ? 'رفع Excel للإدارة للاعتماد' : 'Upload Excel for Approval',
+                icon: FileSpreadsheet,
+              },
+              { id: 'catalog', label: isAr ? 'المنتجات والأقسام' : 'Products & Categories', icon: Package },
             ],
           },
         ]
@@ -916,12 +943,23 @@ export default function App() {
               {activeTab === 'captains' && (
                 <CaptainsKycSection lang={lang} captains={captains} onRefresh={refreshCore} onNotify={notify} />
               )}
+              {activeTab === 'merchant_excel' && portalMode === 'merchant' && merchantSession && (
+                <MerchantMasterLinkPanel
+                  merchantId={merchantSession.id}
+                  categories={categories}
+                  merchantProducts={[]}
+                  initialSubTab="excel"
+                  onRefresh={() => void refreshCore()}
+                  onToast={notify}
+                />
+              )}
               {activeTab === 'orders' &&
                 (portalMode === 'merchant' && merchantSession ? (
                   <MerchantStoreOrdersView
                     lang={lang}
                     merchant={merchantSession}
                     orders={orders}
+                    categories={categories}
                     onRefresh={refreshCore}
                     onNotify={notify}
                   />
@@ -933,6 +971,7 @@ export default function App() {
                     orders={orders}
                     zones={zones}
                     captains={captains}
+                    categories={categories}
                     onRefresh={refreshCore}
                     onNotify={notify}
                   />
@@ -968,6 +1007,44 @@ export default function App() {
             </>
           )}
         </main>
+
+        {/* Dedicated Merchant Mobile App Bottom Navigation (Standalone or Mobile Screens) */}
+        {portalMode === 'merchant' && merchantSession && (
+          <nav
+            aria-label={isAr ? 'تنقل تطبيق التاجر' : 'Merchant App Navigation'}
+            className={`${standalone ? 'flex' : 'flex md:hidden'} sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 px-2 py-2 items-center justify-around shadow-[0_-4px_16px_rgba(15,23,42,0.06)]`}
+          >
+            {[
+              { id: 'orders', label: isAr ? 'الطلبات' : 'Orders', icon: ShoppingBag },
+              { id: 'merchant_excel', label: isAr ? 'رفع Excel' : 'Excel', icon: FileSpreadsheet },
+              { id: 'catalog', label: isAr ? 'المنتجات' : 'Products', icon: Package },
+            ].map((item) => {
+              const Icon = item.icon;
+              const isSelected = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setActiveTab(item.id)}
+                  className={`flex flex-col items-center justify-center gap-1 px-4 py-1.5 rounded-xl text-[11px] font-bold transition-colors ${
+                    isSelected ? 'text-[#A92224] bg-rose-50' : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => void refreshCore(false, merchantSession)}
+              className="flex flex-col items-center justify-center gap-1 px-4 py-1.5 rounded-xl text-[11px] font-bold text-slate-500 hover:text-teal-700"
+            >
+              <RefreshCw className="w-5 h-5" />
+              <span>{isAr ? 'تحديث' : 'Refresh'}</span>
+            </button>
+          </nav>
+        )}
       </div>
     </div>
   );

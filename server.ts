@@ -477,6 +477,15 @@ setNotificationCreatedListener((ev) => {
       if (capRooms.length > 0) broadcastToRooms(capRooms, wsPayload);
     }
   }
+
+  if (ev.targetApp === 'merchant' || ev.targetApp === 'all') {
+    if (ev.recipientId) {
+      broadcastToRooms([`merchant:${ev.recipientId}`], wsPayload);
+    } else {
+      const merchantRooms = Array.from(chatRooms.keys()).filter((k) => k.startsWith('merchant:'));
+      if (merchantRooms.length > 0) broadcastToRooms(merchantRooms, wsPayload);
+    }
+  }
 });
 
 function broadcastOrderChat(orderId: string, payload: Record<string, unknown>) {
@@ -635,32 +644,57 @@ function mapOrderRowWithSections(
   auth?: AuthContext | null
 ): Record<string, unknown> {
   const base = mapOrderRow(o) as Record<string, unknown>;
-  if (auth?.role === 'merchant' && sections.length > 0) {
-    const mySections = sections.filter((s) => s.merchant_id === auth.id);
-    if (mySections.length > 0) {
-      const my = mySections[0];
-      const orderClosed = o.status === 'delivered' || o.status === 'cancelled';
-      return {
-        ...base,
-        merchant_id: my.merchant_id,
-        merchant_name: my.merchant_name,
-        merchant_type: my.merchant_type,
-        order_channel: my.order_channel,
-        items: my.items,
-        subtotal: my.subtotal,
-        delivery_fee: 0,
-        discount_amount: 0,
-        total_amount: my.subtotal,
-        free_order_text: my.free_order_text,
-        prescription_image_url: my.prescription_image_url,
-        pharmacist_notes: my.pharmacist_notes ?? base.pharmacist_notes,
-        substitution_note: my.substitution_note ?? base.substitution_note,
-        rejection_reason: my.rejection_reason ?? base.rejection_reason,
-        ready_at: my.ready_at ?? base.ready_at,
-        status: orderClosed ? String(o.status) : my.prep_status,
-        store_sections: mySections,
-      };
+  if (auth?.role === 'merchant') {
+    if (sections.length > 0) {
+      const mySections = sections.filter((s) => s.merchant_id === auth.id);
+      if (mySections.length > 0) {
+        const my = mySections[0];
+        const orderClosed = o.status === 'delivered' || o.status === 'cancelled';
+        const effectiveStatus = orderClosed ? String(o.status) : my.prep_status;
+        return {
+          ...base,
+          merchant_id: my.merchant_id,
+          merchant_name: my.merchant_name,
+          merchant_type: my.merchant_type,
+          order_channel: my.order_channel,
+          items: my.items,
+          subtotal: Number(my.subtotal || 0),
+          delivery_fee: 0,
+          discount_amount: 0,
+          total_amount: Number(my.subtotal || 0),
+          free_order_text: my.free_order_text,
+          prescription_image_url: my.prescription_image_url,
+          pharmacist_notes: my.pharmacist_notes ?? base.pharmacist_notes,
+          substitution_note: my.substitution_note ?? base.substitution_note,
+          rejection_reason: my.rejection_reason ?? base.rejection_reason,
+          ready_at: my.ready_at ?? base.ready_at,
+          status: effectiveStatus,
+          my_section_status: my.prep_status,
+          is_multi_store: sections.length > 1,
+          store_sections: mySections,
+        };
+      }
     }
+    const rawItems = Array.isArray(base.items) ? (base.items as Array<Record<string, unknown>>) : [];
+    const ownItems = rawItems.filter((it) => !it.merchant_id || String(it.merchant_id) === auth.id);
+    const ownSubtotal =
+      ownItems.length > 0
+        ? Number(
+            ownItems
+              .filter((it) => it.status !== 'rejected')
+              .reduce((sum, it) => sum + Number(it.total_price || 0), 0)
+              .toFixed(2)
+          )
+        : Number(base.subtotal || 0);
+    return {
+      ...base,
+      items: ownItems,
+      subtotal: ownSubtotal,
+      total_amount: ownSubtotal,
+      delivery_fee: 0,
+      discount_amount: 0,
+      store_sections: [],
+    };
   }
   const isUnassignedCaptain = auth?.role === 'captain' && String(o.captain_id || '') !== auth.id;
   if (isUnassignedCaptain) {
@@ -1132,7 +1166,7 @@ app.post('/api/auth/logout', (req, res) => {
   if (
     auth &&
     auth.sessionId.startsWith('ses_') &&
-    (auth.role === 'customer' || auth.role === 'captain') &&
+    (auth.role === 'customer' || auth.role === 'captain' || auth.role === 'merchant') &&
     (fcmToken || deviceId)
   ) {
     unregisterDeviceToken({
@@ -2148,18 +2182,34 @@ app.get('/api/orders', allowAnyUserOrGuest, (req, res) => {
   const limit = Math.min(maxLimit, Math.max(1, parseInt(String(req.query.limit || defaultLimit), 10) || defaultLimit));
   const offset = (page - 1) * limit;
   const statusFilter = typeof req.query.status === 'string' ? req.query.status.trim() : '';
-  const merchantFilter = typeof req.query.merchant_id === 'string' ? req.query.merchant_id.trim() : '';
+  const requestedMerchantFilter = typeof req.query.merchant_id === 'string' ? req.query.merchant_id.trim() : '';
+  const scopeParam = typeof req.query.scope === 'string' ? req.query.scope.trim() : '';
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+  const isMerchantCaller = auth.role === 'merchant';
+  const isMerchantScopedView = isMerchantCaller || (scopeParam === 'merchant' && Boolean(requestedMerchantFilter) && requestedMerchantFilter !== 'all');
+  const effectiveMerchantId = isMerchantCaller
+    ? auth.id
+    : requestedMerchantFilter && requestedMerchantFilter !== 'all'
+    ? requestedMerchantFilter
+    : '';
 
   const clauses: string[] = [];
   const params: unknown[] = [];
   if (statusFilter && statusFilter !== 'all') {
-    clauses.push('o.status = ?');
-    params.push(statusFilter);
+    if (isMerchantScopedView && effectiveMerchantId) {
+      clauses.push(
+        '(o.status = ? OR EXISTS (SELECT 1 FROM order_stores os_st WHERE os_st.order_id = o.id AND os_st.merchant_id = ? AND os_st.prep_status = ?))'
+      );
+      params.push(statusFilter, effectiveMerchantId, statusFilter);
+    } else {
+      clauses.push('o.status = ?');
+      params.push(statusFilter);
+    }
   }
-  if (merchantFilter && merchantFilter !== 'all') {
-    clauses.push('o.merchant_id = ?');
-    params.push(merchantFilter);
+  if (effectiveMerchantId) {
+    clauses.push('(o.merchant_id = ? OR EXISTS (SELECT 1 FROM order_stores os WHERE os.order_id = o.id AND os.merchant_id = ?))');
+    params.push(effectiveMerchantId, effectiveMerchantId);
   }
   if (q) {
     const like = `%${q}%`;
@@ -2187,8 +2237,10 @@ app.get('/api/orders', allowAnyUserOrGuest, (req, res) => {
     .all(...params, limit, offset) as Array<Record<string, unknown>>;
 
   const sectionsMap = getOrderStoreSectionsMap(rows.map((r) => String(r.id)));
-  const adminViewAuth = { ...auth, role: 'super_admin' as const, permissions: ['*'] };
-  const mapped = rows.map((row) => mapOrderRowWithSections(row, sectionsMap.get(String(row.id)) || [], adminViewAuth));
+  const viewAuth: AuthContext = isMerchantScopedView && effectiveMerchantId
+    ? { ...auth, role: 'merchant' as const, id: effectiveMerchantId }
+    : auth;
+  const mapped = rows.map((row) => mapOrderRowWithSections(row, sectionsMap.get(String(row.id)) || [], viewAuth));
 
   if (paginated) {
     const total = (
@@ -2238,17 +2290,28 @@ app.get('/api/orders/:id/tracking', allowAnyUserOrGuest, (req, res) => {
   const etaArrivalTime = etaMin !== null ? new Date(Date.now() + etaMin * 60000).toISOString() : null;
 
   const sections = getOrderStoreSections(id);
-  const activeSections = sections.filter((s) => s.prep_status !== 'cancelled');
+  const isMerchantCaller = req.auth?.role === 'merchant';
+  if (isMerchantCaller) {
+    const belongsToMerchant =
+      String(row.merchant_id || '') === req.auth!.id || sections.some((s) => s.merchant_id === req.auth!.id);
+    if (!belongsToMerchant) {
+      return res.status(403).json({ error: 'غير مصرح لك بعرض طلب يخص متجرًا آخر' });
+    }
+  }
+  const visibleSections = isMerchantCaller
+    ? sections.filter((s) => s.merchant_id === req.auth!.id)
+    : sections;
+  const activeSections = visibleSections.filter((s) => s.prep_status !== 'cancelled');
   const pickedUpCount = activeSections.filter(
     (s) => Boolean(s.captain_picked_up_at) || s.prep_status === 'on_the_way' || s.prep_status === 'delivered'
   ).length;
   const storeSummary =
-    sections.length > 0
+    visibleSections.length > 0
       ? {
           store_count: activeSections.length,
           picked_up_count: pickedUpCount,
           all_picked_up: activeSections.length > 0 && pickedUpCount === activeSections.length,
-          stores: sections,
+          stores: visibleSections,
         }
       : null;
 
@@ -2290,8 +2353,12 @@ app.get('/api/orders/:id/chat', allowAnyUserOrGuest, (req, res) => {
   const messages = db
     .prepare('SELECT * FROM order_chat_messages WHERE order_id = ? ORDER BY created_at ASC, rowid ASC')
     .all(id) as Array<Record<string, unknown>>;
+  const chatOrderAuth =
+    req.auth?.role === 'merchant'
+      ? req.auth
+      : { ...req.auth!, role: 'super_admin' as const, permissions: ['*'] };
   res.json({
-    order: mapOrderRowWithSections(order, sections, { ...req.auth!, role: 'super_admin', permissions: ['*'] }),
+    order: mapOrderRowWithSections(order, sections, chatOrderAuth),
     messages: messages.map((m) => ({ ...m, is_delivery_proof: Boolean(m.is_delivery_proof) })),
   });
 });
@@ -2793,6 +2860,27 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
     sentBy: 'النظام',
   });
 
+  if (merchant_id) {
+    const storeItemCount = Array.isArray(sanitizedItems) ? sanitizedItems.length : 0;
+    const merchantBody =
+      storeItemCount > 0
+        ? `وصلك طلب جديد (${storeItemCount} صنف) بقيمة ${resolvedSubtotal} ج.م من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لتجهيزه الآن.`
+        : `وصلك طلب جديد${resolvedChannel === 'pharmacy_prescription' ? ' (روشتة)' : ''} من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لمراجعته وتجهيزه الآن.`;
+    enqueueSystemPushNotification({
+      targetApp: 'merchant',
+      targetZone: String(zone.name_ar || 'all'),
+      recipientId: String(merchant_id),
+      category: 'operational',
+      titleAr: `طلب جديد لمتجرك #${orderNum}`,
+      bodyAr: merchantBody,
+      deepLink: 'order',
+      orderId: id,
+      status: initialStatus,
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: 'النظام',
+    });
+  }
+
   res.status(201).json({ id, order_number: orderNum });
 });
 
@@ -3217,6 +3305,30 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
     sentBy: 'النظام',
   });
 
+  // Notify EACH merchant separately with ONLY their own isolated items count & subtotal (never leaking other stores' items/totals)
+  for (const p of preparedStores) {
+    const storeMerchantId = String(p.merchant.id || '').trim();
+    if (!storeMerchantId) continue;
+    const myItemsCount = Array.isArray(p.sanitizedItems) ? p.sanitizedItems.length : 0;
+    const storeBody =
+      myItemsCount > 0
+        ? `وصلك طلب جديد (${myItemsCount} صنف) بقيمة ${p.subtotal} ج.م من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لتجهيز أصناف متجرك.`
+        : `وصلك طلب جديد${p.channel === 'pharmacy_prescription' || p.channel === 'prescription' ? ' (روشتة)' : ''} من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لمراجعة طلب متجرك.`;
+    enqueueSystemPushNotification({
+      targetApp: 'merchant',
+      targetZone: String(zone.name_ar || 'all'),
+      recipientId: storeMerchantId,
+      category: 'operational',
+      titleAr: `طلب جديد لمتجرك #${orderNum}`,
+      bodyAr: storeBody,
+      deepLink: 'order',
+      orderId: orderId,
+      status: p.initialStatus,
+      channelId: 'otlobha_dispatch_channel',
+      sentBy: 'النظام',
+    });
+  }
+
   res.status(201).json({
     ok: true,
     id: orderId,
@@ -3395,7 +3507,24 @@ app.patch(
       rejection_reason?: string | null;
     }>;
 
-    let nextSecSubtotal = subtotal !== undefined ? Number(subtotal) : Number(targetSec.subtotal);
+    const acceptedSecSum = Number(
+      secItems
+        .filter((it) => it.status !== 'rejected')
+        .reduce((sum, it) => sum + Number(it.total_price || 0), 0)
+        .toFixed(2)
+    );
+    const hasItemizedCatalog = secItems.length > 0;
+    const parsedSubtotal =
+      subtotal !== undefined && Number.isFinite(Number(subtotal)) && Number(subtotal) >= 0
+        ? Number(Number(subtotal).toFixed(2))
+        : null;
+
+    // Never allow client-supplied subtotal to overwrite or inflate itemized catalog sections.
+    let nextSecSubtotal = hasItemizedCatalog
+      ? acceptedSecSum
+      : parsedSubtotal !== null
+      ? parsedSubtotal
+      : Number(targetSec.subtotal || 0);
     let nextSecStatus = status ?? targetSec.prep_status;
     let nextSecSubNote = substitution_note !== undefined ? substitution_note : targetSec.substitution_note;
     let nextSecRejectReason = targetSec.rejection_reason;
@@ -3461,10 +3590,13 @@ app.patch(
       notifyTitle = `اعتذار متجر ${targetSec.merchant_name} بالطلب #${String(order.order_number)}`;
       notifyBody = `السبب: ${cleanReason}`;
     } else if (action === 'ready' || nextSecStatus === 'ready_for_pickup') {
+      const wasAlreadyReady = targetSec.prep_status === 'ready_for_pickup';
       nextSecStatus = 'ready_for_pickup';
-      nextSecReadyAt = new Date().toISOString();
-      notifyTitle = `تجهيز قسم ${targetSec.merchant_name} بالطلب #${String(order.order_number)}`;
-      notifyBody = `أعلن متجر ${targetSec.merchant_name} أن طلباته جاهزة الآن للاستلام.`;
+      nextSecReadyAt = targetSec.ready_at || new Date().toISOString();
+      if (!wasAlreadyReady) {
+        notifyTitle = `تجهيز قسم ${targetSec.merchant_name} بالطلب #${String(order.order_number)}`;
+        notifyBody = `أعلن متجر ${targetSec.merchant_name} أن طلباته جاهزة الآن للاستلام.`;
+      }
     }
 
     let captainId = order.captain_id ? String(order.captain_id) : null;
@@ -3589,7 +3721,23 @@ app.patch(
     rejection_reason?: string | null;
   }>;
 
-  let nextSubtotal = subtotal !== undefined ? Number(subtotal) : Number(order.subtotal);
+  const legacyAcceptedSum = Number(
+    items
+      .filter((it) => it.status !== 'rejected')
+      .reduce((sum, it) => sum + Number(it.total_price || 0), 0)
+      .toFixed(2)
+  );
+  const legacyHasItemizedCatalog = items.length > 0;
+  const legacyParsedSubtotal =
+    subtotal !== undefined && Number.isFinite(Number(subtotal)) && Number(subtotal) >= 0
+      ? Number(Number(subtotal).toFixed(2))
+      : null;
+
+  let nextSubtotal = legacyHasItemizedCatalog
+    ? legacyAcceptedSum
+    : legacyParsedSubtotal !== null
+    ? legacyParsedSubtotal
+    : Number(order.subtotal || 0);
   const deliveryFee = Number(order.delivery_fee || 0);
   const discount = Number(order.discount_amount || 0);
   let nextTotal = Math.max(0, Number((nextSubtotal + deliveryFee - discount).toFixed(2)));
@@ -7170,7 +7318,7 @@ app.get('/api/notifications/fcm-status', requireAuth, requireRole(...ALL_ADMIN_R
   res.json(status);
 });
 
-app.post('/api/mobile/push/register', requireAuth, requireRole('customer', 'captain'), (req, res) => {
+app.post('/api/mobile/push/register', requireAuth, requireRole('customer', 'captain', 'merchant'), (req, res) => {
   const auth = req.auth!;
   if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
     return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب فعلي لتفعيل الإشعارات' });
@@ -7202,7 +7350,8 @@ app.post('/api/mobile/push/register-guest', (req, res) => {
   if (!cleanDeviceId || cleanDeviceId.length < 4) {
     return res.status(400).json({ error: 'معرّف الجهاز مطلوب' });
   }
-  const role: PushUserRole = String(app || '').toLowerCase() === 'captain' ? 'captain' : 'customer';
+  const rawApp = String(app || '').toLowerCase();
+  const role: PushUserRole = rawApp === 'captain' ? 'captain' : rawApp === 'merchant' ? 'merchant' : 'customer';
   const result = registerGuestDeviceToken({
     fcmToken: cleanToken,
     deviceId: cleanDeviceId,
@@ -7214,7 +7363,7 @@ app.post('/api/mobile/push/register-guest', (req, res) => {
   res.json({ ok: true, ...result });
 });
 
-app.post('/api/mobile/push/unregister', requireAuth, requireRole('customer', 'captain'), (req, res) => {
+app.post('/api/mobile/push/unregister', requireAuth, requireRole('customer', 'captain', 'merchant'), (req, res) => {
   const auth = req.auth!;
   if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
     return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب فعلي لإلغاء ربط الجهاز' });
@@ -7229,7 +7378,7 @@ app.post('/api/mobile/push/unregister', requireAuth, requireRole('customer', 'ca
   res.json({ ok: true, ...result });
 });
 
-app.get('/api/mobile/push/devices', requireAuth, requireRole('customer', 'captain'), (req, res) => {
+app.get('/api/mobile/push/devices', requireAuth, requireRole('customer', 'captain', 'merchant'), (req, res) => {
   const auth = req.auth!;
   if (!auth.sessionId || !auth.sessionId.startsWith('ses_')) {
     return res.status(401).json({ error: 'يجب تسجيل الدخول بحساب فعلي لعرض الأجهزة المسجلة' });
@@ -7402,7 +7551,9 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
 
 app.get('/api/mobile/notifications/background-poll', (req, res) => {
   const auth = optionalAuth(req);
-  const requestedApp = String(req.query.app || '').toLowerCase() === 'captain' ? 'captain' : 'customer';
+  const rawRequested = String(req.query.app || '').toLowerCase();
+  const requestedApp =
+    rawRequested === 'captain' ? 'captain' : rawRequested === 'merchant' ? 'merchant' : 'customer';
   const limit = Math.min(Math.max(Number(req.query.limit || 12) || 12, 1), 25);
 
   let appName = requestedApp;
@@ -7411,7 +7562,7 @@ app.get('/api/mobile/notifications/background-poll', (req, res) => {
   let customerEmail = '';
 
   if (auth && !isAdminAuth(auth)) {
-    appName = auth.role === 'captain' ? 'captain' : 'customer';
+    appName = auth.role === 'captain' ? 'captain' : auth.role === 'merchant' ? 'merchant' : 'customer';
     recipientId = auth.id;
     if (auth.role === 'customer') {
       const custRow = db

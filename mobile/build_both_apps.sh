@@ -12,7 +12,7 @@ if command -v java >/dev/null 2>&1; then
   fi
 fi
 
-for APP in otlobha_customer otlobha_captain; do
+for APP in otlobha_customer otlobha_captain otlobha_merchant; do
   echo "=== Preparing & Building $APP ==="
   cd "$ROOT_DIR/$APP"
   if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
@@ -31,6 +31,8 @@ for APP in otlobha_customer otlobha_captain; do
     fi
     if [ -f "/tmp/${APP}_analysis_options.yaml" ]; then cp "/tmp/${APP}_analysis_options.yaml" analysis_options.yaml; fi
   fi
+
+  REQUIRE_GOOGLE_SERVICES=0 EXPECTED_ANDROID_PACKAGE="com.otlobha.$APP" bash ../configure_firebase_android.sh .
 
   if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
     printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties

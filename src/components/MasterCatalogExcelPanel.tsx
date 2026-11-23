@@ -16,6 +16,14 @@ import {
   XCircle,
 } from 'lucide-react';
 import { api } from '../lib/api';
+import {
+  applyExcelColumnWidths,
+  parseMasterSpreadsheetFile,
+  parseMasterSpreadsheetWithMeta,
+  rebuildRowsWithCategoryColumns,
+  type ParsedMasterExcelRow,
+  type ParsedMasterSpreadsheetResult,
+} from '../lib/masterExcelParser';
 import type { CategoryRecord, MerchantRecord } from '../shared/types';
 
 interface Props {
@@ -24,23 +32,6 @@ interface Props {
   initialMode?: 'import' | 'compare';
   onImported: () => void;
   onToast: (msg: string) => void;
-}
-
-interface ParsedMasterExcelRow {
-  row_index: number;
-  name_ar: string;
-  name_en: string;
-  brand: string;
-  size_label: string;
-  barcode: string;
-  category: string;
-  image_url: string;
-  description: string;
-  usage_notes: string;
-  ingredients: string;
-  price: string;
-  sale_price?: string;
-  stock_quantity?: string;
 }
 
 interface CompareRowResult {
@@ -81,277 +72,8 @@ interface CompareSummary {
   duplicate_in_file_count: number;
 }
 
-function normalizeHeaderCell(raw: unknown): string {
-  return String(raw ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
-    .replace(/[أإآ]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي')
-    .replace(/[_\-\/\\()[\]:*]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function cleanCellText(raw: unknown): string {
-  if (raw === null || raw === undefined) return '';
-  if (typeof raw === 'number') {
-    // Avoid scientific notation for long barcodes like 6221000000000
-    if (Number.isInteger(raw)) return raw.toFixed(0);
-    return String(raw);
-  }
-  return String(raw).trim();
-}
-
-async function parseMasterSpreadsheetFile(file: File): Promise<ParsedMasterExcelRow[]> {
-  const buf = await file.arrayBuffer();
-  const bytes = new Uint8Array(buf);
-  const isZipMagic = bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b;
-  const isOleMagic = bytes.length >= 4 && bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
-
-  let wb: XLSX.WorkBook;
-  if (isZipMagic || isOleMagic) {
-    wb = XLSX.read(buf, { type: 'array', raw: false });
-  } else {
-    let text = new TextDecoder('utf-8').decode(bytes);
-    if (text.includes('\uFFFD')) {
-      try {
-        text = new TextDecoder('windows-1256').decode(bytes);
-      } catch {
-        // fallback to utf-8 text
-      }
-    }
-    // Semicolon CSV normalization common in Arabic Windows Excel
-    const firstLine = text.split(/\r?\n/, 1)[0] || '';
-    if (!firstLine.includes(',') && firstLine.includes(';') && !firstLine.trim().startsWith('<')) {
-      text = text.replace(/;/g, ',');
-    }
-    wb = XLSX.read(text, { type: 'string', raw: false });
-  }
-
-  const nameArKeys = [
-    'اسم المنتج',
-    'الاسم العربي',
-    'الاسم',
-    'المنتج',
-    'الصنف',
-    'اسم الصنف',
-    'اسم المنتج الرسمي',
-    'product name',
-    'product',
-    'name ar',
-    'canonical name ar',
-    'name',
-    'title',
-    'item',
-    'item name',
-  ].map(normalizeHeaderCell);
-
-  const nameEnKeys = [
-    'الاسم الانجليزي',
-    'الاسم بالانجليزيه',
-    'اسم انجليزي',
-    'name en',
-    'english name',
-    'canonical name en',
-    'title en',
-  ].map(normalizeHeaderCell);
-
-  const brandKeys = [
-    'العلامه التجاريه',
-    'العلامه',
-    'الماركه',
-    'الشركه',
-    'الشركه المنتجه',
-    'البراند',
-    'brand',
-    'manufacturer',
-    'company',
-  ].map(normalizeHeaderCell);
-
-  const sizeKeys = [
-    'الحجم',
-    'الوزن',
-    'الحجم او الوزن',
-    'الحجم الوزن',
-    'العبوه',
-    'المقاس',
-    'الوحده',
-    'السعه',
-    'size',
-    'weight',
-    'size label',
-    'unit',
-    'volume',
-    'pack size',
-  ].map(normalizeHeaderCell);
-
-  const barcodeKeys = [
-    'الباركود',
-    'باركود',
-    'كود الصنف',
-    'كود المنتج',
-    'الكود',
-    'barcode',
-    'ean',
-    'ean13',
-    'upc',
-    'gtin',
-    'sku',
-    'code',
-  ].map(normalizeHeaderCell);
-
-  const categoryKeys = [
-    'القسم',
-    'مسار القسم',
-    'القسم والمسار',
-    'الاقسام',
-    'التصنيف',
-    'مسار التصنيف',
-    'الفئه',
-    'المجموعه',
-    'category',
-    'category name',
-    'category path',
-    'category id',
-    'department',
-    'group',
-  ].map(normalizeHeaderCell);
-
-  const imageKeys = [
-    'صوره المنتج',
-    'رابط الصوره',
-    'الصوره',
-    'صوره',
-    'image',
-    'image url',
-    'photo',
-    'picture',
-    'img',
-  ].map(normalizeHeaderCell);
-
-  const descKeys = [
-    'الوصف',
-    'وصف المنتج',
-    'تفاصيل',
-    'ملاحظات',
-    'description',
-    'details',
-    'notes',
-  ].map(normalizeHeaderCell);
-
-  const usageKeys = ['الاستخدامات', 'طريقه الاستخدام', 'usage', 'usage notes'].map(normalizeHeaderCell);
-  const ingredientsKeys = ['المكونات', 'ingredients'].map(normalizeHeaderCell);
-  const priceKeys = ['السعر', 'سعر', 'السعر الاساسي', 'السعر الحالي', 'سعر البيع', 'سعر المنتج', 'price', 'base price'].map(normalizeHeaderCell);
-  const salePriceKeys = ['سعر العرض', 'سعر الخصم', 'الخصم', 'عرض', 'sale price', 'discount price', 'offer price'].map(normalizeHeaderCell);
-  const stockKeys = ['المخزون', 'الكميه', 'الكميه بالمخزون', 'الرصيد', 'stock', 'qty', 'quantity', 'stock quantity'].map(normalizeHeaderCell);
-
-  const findCol = (headers: string[], keys: string[]): number => {
-    for (let i = 0; i < headers.length; i++) {
-      if (keys.includes(headers[i])) return i;
-    }
-    for (let i = 0; i < headers.length; i++) {
-      const h = headers[i];
-      if (!h) continue;
-      if (keys.some((k) => k.length >= 3 && (h.includes(k) || k.includes(h)))) return i;
-    }
-    return -1;
-  };
-
-  for (const sheetName of wb.SheetNames) {
-    const sheet = wb.Sheets[sheetName];
-    if (!sheet) continue;
-    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' });
-    if (!matrix || matrix.length === 0) continue;
-
-    let headerRowIdx = -1;
-    let colNameAr = -1;
-    let colNameEn = -1;
-    let colBrand = -1;
-    let colSize = -1;
-    let colBarcode = -1;
-    let colCategory = -1;
-    let colImage = -1;
-    let colDesc = -1;
-    let colUsage = -1;
-    let colIngredients = -1;
-    let colPrice = -1;
-    let colSalePrice = -1;
-    let colStock = -1;
-
-    const scanLimit = Math.min(matrix.length, 12);
-    for (let r = 0; r < scanLimit; r++) {
-      const row = matrix[r] || [];
-      const normHeaders = row.map(normalizeHeaderCell);
-      const foundName = findCol(normHeaders, nameArKeys);
-      const foundBarcode = findCol(normHeaders, barcodeKeys);
-      const foundBrand = findCol(normHeaders, brandKeys);
-      if (foundName !== -1 || (foundBarcode !== -1 && foundBrand !== -1)) {
-        headerRowIdx = r;
-        colNameAr = foundName;
-        colNameEn = findCol(normHeaders, nameEnKeys);
-        colBrand = foundBrand;
-        colSize = findCol(normHeaders, sizeKeys);
-        colBarcode = foundBarcode;
-        colCategory = findCol(normHeaders, categoryKeys);
-        colImage = findCol(normHeaders, imageKeys);
-        colDesc = findCol(normHeaders, descKeys);
-        colUsage = findCol(normHeaders, usageKeys);
-        colIngredients = findCol(normHeaders, ingredientsKeys);
-        colPrice = findCol(normHeaders, priceKeys);
-        colSalePrice = findCol(normHeaders, salePriceKeys);
-        colStock = findCol(normHeaders, stockKeys);
-        break;
-      }
-    }
-
-    // Positional fallback if spreadsheet has no header row
-    if (headerRowIdx === -1) {
-      headerRowIdx = -1;
-      colNameAr = 0;
-      colBrand = 1;
-      colSize = 2;
-      colBarcode = 3;
-      colCategory = 4;
-      colImage = 5;
-    }
-
-    const parsed: ParsedMasterExcelRow[] = [];
-    for (let r = headerRowIdx + 1; r < matrix.length; r++) {
-      const row = matrix[r] || [];
-      if (!row.some((cell) => cleanCellText(cell) !== '')) continue;
-
-      const nameAr = colNameAr >= 0 ? cleanCellText(row[colNameAr]) : '';
-      const nameEn = colNameEn >= 0 ? cleanCellText(row[colNameEn]) : '';
-      if (!nameAr && !nameEn) continue;
-
-      parsed.push({
-        row_index: r + 1,
-        name_ar: nameAr || nameEn,
-        name_en: nameEn,
-        brand: colBrand >= 0 ? cleanCellText(row[colBrand]) : '',
-        size_label: colSize >= 0 ? cleanCellText(row[colSize]) : '',
-        barcode: colBarcode >= 0 ? cleanCellText(row[colBarcode]) : '',
-        category: colCategory >= 0 ? cleanCellText(row[colCategory]) : '',
-        image_url: colImage >= 0 ? cleanCellText(row[colImage]) : '',
-        description: colDesc >= 0 ? cleanCellText(row[colDesc]) : '',
-        usage_notes: colUsage >= 0 ? cleanCellText(row[colUsage]) : '',
-        ingredients: colIngredients >= 0 ? cleanCellText(row[colIngredients]) : '',
-        price: colPrice >= 0 ? cleanCellText(row[colPrice]) : '',
-        sale_price: colSalePrice >= 0 ? cleanCellText(row[colSalePrice]) : '',
-        stock_quantity: colStock >= 0 ? cleanCellText(row[colStock]) : '',
-      });
-    }
-
-    if (parsed.length > 0) return parsed;
-  }
-
-  return [];
-}
-
 function applyColumnWidths(ws: XLSX.WorkSheet, widths: number[]) {
-  ws['!cols'] = widths.map((wch) => ({ wch }));
+  applyExcelColumnWidths(ws, widths);
 }
 
 export const MasterCatalogExcelPanel: React.FC<Props> = ({
@@ -366,6 +88,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
   // Import state
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [importFileName, setImportFileName] = useState('');
+  const [importMeta, setImportMeta] = useState<ParsedMasterSpreadsheetResult | null>(null);
+  const [selectedImportCatCols, setSelectedImportCatCols] = useState<number[]>([]);
   const [importRows, setImportRows] = useState<ParsedMasterExcelRow[]>([]);
   const [defaultCategoryId, setDefaultCategoryId] = useState('');
   const [targetMerchantId, setTargetMerchantId] = useState('');
@@ -500,21 +224,49 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const parsed = await parseMasterSpreadsheetFile(file);
-      if (parsed.length === 0) {
+      const meta = await parseMasterSpreadsheetWithMeta(file);
+      if (meta.rows.length === 0) {
         onToast('لم يتم العثور على صفوف منتجات صالحة داخل الملف. تأكد من وجود عمود "اسم المنتج".');
         return;
       }
       setImportFileName(file.name);
-      setImportRows(parsed);
+      setImportMeta(meta);
+      setSelectedImportCatCols(meta.detectedCategoryColIndices);
+      setImportRows(meta.rows);
       setImportReport(null);
-      onToast(`تمت قراءة ${parsed.length} صف منتج من "${file.name}" بنجاح`);
+      const distinctCats = new Set(meta.rows.map((r) => r.category.trim()).filter(Boolean)).size;
+      onToast(
+        distinctCats > 0
+          ? `تمت قراءة ${meta.rows.length} صف منتج واكتشاف ${distinctCats} قسم مختلف من "${file.name}"`
+          : `تمت قراءة ${meta.rows.length} صف — يرجى اختيار «عمود القسم» من القائمة أسفل اسم الملف قبل الرفع`
+      );
     } catch (err) {
       onToast(`تعذر قراءة الملف: ${(err as Error).message}`);
     } finally {
       if (importFileRef.current) importFileRef.current.value = '';
     }
   };
+
+  const handleChangeImportCategoryColumn = (colIdxStr: string) => {
+    if (!importMeta) return;
+    const nextCols = colIdxStr === 'AUTO'
+      ? importMeta.detectedCategoryColIndices
+      : colIdxStr === 'NONE'
+      ? []
+      : [Number(colIdxStr)];
+    setSelectedImportCatCols(nextCols);
+    setImportRows(rebuildRowsWithCategoryColumns(importMeta, nextCols));
+  };
+
+  const detectedImportCategories = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const r of importRows) {
+      const c = r.category.trim();
+      if (!c) continue;
+      map.set(c, (map.get(c) || 0) + 1);
+    }
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [importRows]);
 
   const executeBulkImportRows = async (rowsToImport: ParsedMasterExcelRow[]) => {
     if (rowsToImport.length === 0) return;
@@ -983,6 +735,8 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                     type="button"
                     onClick={() => {
                       setImportRows([]);
+                      setImportMeta(null);
+                      setSelectedImportCatCols([]);
                       setImportFileName('');
                     }}
                     disabled={importing}
@@ -1003,6 +757,78 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Explicit Category Column Mapping & Live Category Split Check */}
+              {importMeta && importMeta.columns.length > 0 && (
+                <div
+                  className={`rounded-2xl border p-3.5 space-y-2.5 ${
+                    detectedImportCategories.length === 0
+                      ? 'bg-red-50 border-red-300'
+                      : 'bg-emerald-50/60 border-emerald-200'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs">
+                      <div className="font-black text-slate-900">
+                        {detectedImportCategories.length > 0
+                          ? `تم قراءة الأقسام من الملف بنجاح: ${detectedImportCategories.length} قسم مختلف`
+                          : 'تنبيه: لم يتم اكتشاف عمود القسم تلقائيًا! اختر عمود القسم من ملفك هنا قبل الرفع:'}
+                      </div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        العمود المستخدم حاليًا للقسم:{' '}
+                        <b>
+                          {selectedImportCatCols.length > 0
+                            ? selectedImportCatCols.map((idx) => importMeta.columns[idx]?.header || `عمود ${idx + 1}`).join(' > ')
+                            : 'غير محدد (سيتم استخدام القسم الافتراضي)'}
+                        </b>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-bold text-slate-700 whitespace-nowrap">عمود القسم بالملف:</label>
+                      <select
+                        value={
+                          selectedImportCatCols.length === 0
+                            ? 'NONE'
+                            : selectedImportCatCols.length === 1
+                            ? String(selectedImportCatCols[0])
+                            : 'AUTO'
+                        }
+                        onChange={(e) => handleChangeImportCategoryColumn(e.target.value)}
+                        className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-900 max-w-[280px]"
+                      >
+                        {importMeta.detectedCategoryColIndices.length > 1 && (
+                          <option value="AUTO">
+                            تلقائي ({importMeta.detectedCategoryColIndices.map((i) => importMeta.columns[i]?.header).join(' > ')})
+                          </option>
+                        )}
+                        <option value="NONE">بدون عمود قسم (استخدم القسم الافتراضي)</option>
+                        {importMeta.columns.map((col) => (
+                          <option key={col.index} value={String(col.index)}>
+                            {col.header} {col.sample ? `— مثال: ${col.sample}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  {detectedImportCategories.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pt-1">
+                      {detectedImportCategories.slice(0, 25).map(([catName, count]) => (
+                        <span
+                          key={catName}
+                          className="px-2 py-0.5 rounded-lg bg-white border border-emerald-200 text-[11px] font-bold text-emerald-900"
+                        >
+                          {catName.replace(/;+\s*$/, '')} ({count})
+                        </span>
+                      ))}
+                      {detectedImportCategories.length > 25 && (
+                        <span className="px-2 py-0.5 rounded-lg bg-emerald-100 text-[11px] font-bold text-emerald-900">
+                          +{detectedImportCategories.length - 25} قسم آخر
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {importing && importProgress.total > 0 && (
                 <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">

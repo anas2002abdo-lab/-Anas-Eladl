@@ -295,6 +295,55 @@ jobs:
           ls -lh build/app/outputs/flutter-apk/app-release.apk
           if [ -x android/gradlew ]; then (cd android && ./gradlew --stop) || true; fi
 
+      - name: Prepare & Build Otlobha Merchant APK
+        env:
+          FIREBASE_GOOGLE_SERVICES_JSON_B64: ${{ secrets.FIREBASE_MERCHANT_GOOGLE_SERVICES_JSON_B64 }}
+          FIREBASE_SECRET_NAME: "FIREBASE_MERCHANT_GOOGLE_SERVICES_JSON_B64"
+          EXPECTED_ANDROID_PACKAGE: "com.otlobha.otlobha_merchant"
+          REQUIRE_GOOGLE_SERVICES: "0"
+        run: |
+          set -euo pipefail
+          cd mobile/otlobha_merchant
+
+          if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
+            if [ -f android/app/src/main/AndroidManifest.xml ]; then cp android/app/src/main/AndroidManifest.xml /tmp/mer_manifest.xml; fi
+            if [ -f android/app/google-services.json ]; then cp android/app/google-services.json /tmp/mer_google_services.json; fi
+            if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/mer_info.plist; fi
+            if [ -d test ]; then rm -rf /tmp/mer_test && cp -r test /tmp/mer_test; fi
+            if [ -f analysis_options.yaml ]; then cp analysis_options.yaml /tmp/mer_analysis_options.yaml; fi
+
+            flutter create . --project-name otlobha_merchant --org com.otlobha --platforms=android,ios
+
+            if [ -f /tmp/mer_manifest.xml ]; then cp /tmp/mer_manifest.xml android/app/src/main/AndroidManifest.xml; fi
+            if [ -f /tmp/mer_google_services.json ]; then cp /tmp/mer_google_services.json android/app/google-services.json; fi
+            if [ -f /tmp/mer_info.plist ]; then cp /tmp/mer_info.plist ios/Runner/Info.plist; fi
+            if [ -d /tmp/mer_test ]; then
+              rm -rf test
+              cp -r /tmp/mer_test test
+            fi
+            if [ -f /tmp/mer_analysis_options.yaml ]; then cp /tmp/mer_analysis_options.yaml analysis_options.yaml; fi
+          fi
+
+          bash ../configure_firebase_android.sh .
+
+          if [ -f android/gradle.properties ] && ! grep -q '^org\.gradle\.vfs\.watch=' android/gradle.properties; then
+            printf '\norg.gradle.vfs.watch=false\n' >> android/gradle.properties
+          fi
+
+          flutter pub get
+          dart run flutter_launcher_icons
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
+
+          RESOLVED_API_URL="${{ github.event.inputs.api_base_url || vars.OTLOBHA_API_BASE_URL || 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app' }}"
+          echo "Using Merchant API_BASE_URL=$RESOLVED_API_URL"
+
+          flutter build apk --release --dart-define="API_BASE_URL=$RESOLVED_API_URL"
+
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+          if [ -x android/gradlew ]; then (cd android && ./gradlew --stop) || true; fi
+
       - name: Upload Customer APK
         uses: actions/upload-artifact@v4
         with:
@@ -307,6 +356,13 @@ jobs:
         with:
           name: otlobha-captain-apk
           path: mobile/otlobha_captain/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload Merchant APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: otlobha-merchant-apk
+          path: mobile/otlobha_merchant/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
   build_ios_unsigned:
@@ -323,7 +379,7 @@ jobs:
       - name: Build Unsigned iOS Runners
         run: |
           set -euo pipefail
-          for app in otlobha_customer otlobha_captain; do
+          for app in otlobha_customer otlobha_captain otlobha_merchant; do
             cd "$GITHUB_WORKSPACE/mobile/$app"
             if [ ! -d ios/Runner.xcodeproj ]; then
               if [ -f ios/Runner/Info.plist ]; then cp ios/Runner/Info.plist /tmp/info.plist; fi

@@ -300,6 +300,8 @@ export interface ProductMatchingRequestRecord {
   brand: string;
   category_id: string | null;
   category_name?: string;
+  category_path?: string;
+  resolved_category_path?: string;
   barcode: string | null;
   size_label: string;
   image_url: string;
@@ -311,7 +313,12 @@ export interface ProductMatchingRequestRecord {
   suggested_master_id: string | null;
   suggested_master_name?: string;
   suggested_master_size?: string;
+  suggested_master_image?: string;
+  suggested_master_category_name?: string;
   match_confidence: 'exact' | 'possible' | 'none';
+  batch_id?: string;
+  source_file_name?: string;
+  enriched_from_master?: number | boolean;
   status: 'pending' | 'approved_new' | 'linked_existing' | 'rejected';
   admin_note: string;
   reviewed_by: string | null;
@@ -464,6 +471,7 @@ export interface OrderStoreSectionRecord {
   merchant_id: string;
   merchant_name: string;
   merchant_type: string;
+  order_channel?: string;
   merchant_lat?: number | null;
   merchant_lng?: number | null;
   items: OrderItemRecord[];

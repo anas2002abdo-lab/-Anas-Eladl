@@ -185,7 +185,13 @@ export const api = {
     request<{ ok: boolean; id: string; deleted_business_name: string }>('/api/merchants/' + id, {
       method: 'DELETE',
     }),
-  getOrders: () => request<any[]>('/api/orders'),
+  getOrders: (opts?: { merchantId?: string; scope?: 'merchant' }) => {
+    const qs = new URLSearchParams();
+    if (opts?.merchantId) qs.set('merchant_id', opts.merchantId);
+    if (opts?.scope) qs.set('scope', opts.scope);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<any[]>(`/api/orders${suffix}`);
+  },
   deleteOrder: (id: string) =>
     request<{ ok: boolean; id: string; message?: string }>('/api/orders/' + encodeURIComponent(id), {
       method: 'DELETE',
@@ -978,6 +984,97 @@ export const api = {
     request<any[]>(
       `/api/merchant/master-catalog/my-requests${merchantId ? `?merchant_id=${encodeURIComponent(merchantId)}` : ''}`
     ),
+  previewMerchantExcelMasterCatalog: (body: {
+    rows: Array<Record<string, unknown>>;
+    default_category_path?: string;
+  }) =>
+    request<{
+      summary: {
+        total_rows: number;
+        valid_rows: number;
+        skipped_empty_rows: number;
+        matched_existing_count: number;
+        matched_possible_count: number;
+        new_products_count: number;
+        images_completed_from_master: number;
+        categories_completed_from_master: number;
+        products_enriched_count: number;
+        categories_count: number;
+        new_categories_count: number;
+      };
+      categories_breakdown: Array<{
+        category_path: string;
+        display_label: string;
+        count: number;
+        matched_count: number;
+        new_count: number;
+        images_completed_count: number;
+        is_new_category: boolean;
+      }>;
+      rows: Array<{
+        row_index: number;
+        product_name_ar: string;
+        product_name_en: string;
+        brand: string;
+        size_label: string;
+        barcode: string;
+        description: string;
+        image_url: string;
+        image_source: 'excel' | 'master_catalog' | 'none';
+        category_path: string;
+        category_display: string;
+        category_id: string | null;
+        category_source: 'excel' | 'master_catalog' | 'default';
+        is_new_category: boolean;
+        proposed_price: number;
+        proposed_sale_price: number | null;
+        proposed_stock: number;
+        merchant_sku: string;
+        match_status: 'existing' | 'possible' | 'not_found';
+        confidence_score: number;
+        suggested_master_id: string | null;
+        suggested_master_name: string | null;
+        suggested_master_size: string | null;
+        suggested_master_image: string | null;
+        suggested_master_category: string | null;
+        enriched_from_master: boolean;
+        enriched_fields: string[];
+        size_conflict_warning: string | null;
+      }>;
+    }>('/api/merchant/master-catalog/excel-preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  submitMerchantExcelMasterCatalog: (body: {
+    merchant_id?: string;
+    file_name?: string;
+    batch_id?: string;
+    default_category_path?: string;
+    rows: Array<Record<string, unknown>>;
+  }) =>
+    request<{
+      ok: boolean;
+      batch_id: string;
+      file_name: string;
+      submitted_count: number;
+      skipped_count: number;
+      matched_in_master_count: number;
+      images_completed_from_master: number;
+      categories_completed_from_master: number;
+      categories_breakdown: Array<{
+        category_path: string;
+        display_label: string;
+        count: number;
+        matched_count: number;
+        new_count: number;
+        images_completed_count: number;
+        is_new_category: boolean;
+      }>;
+      request_ids: string[];
+    }>('/api/merchant/master-catalog/excel-submit', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   getProductDeals: (params?: { merchant_id?: string; product_id?: string }) => {
     const qs = new URLSearchParams();
     if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
@@ -1062,7 +1159,7 @@ export const api = {
   reviewAdminMatchingRequest: (
     requestId: string,
     body: {
-      decision: 'approve_new' | 'link_existing' | 'reject';
+      decision: 'approve_smart' | 'approve_new' | 'link_existing' | 'reject';
       target_master_id?: string | null;
       auto_create_listing?: boolean;
       admin_note?: string;
@@ -1075,6 +1172,27 @@ export const api = {
         body: JSON.stringify(body),
       }
     ),
+  bulkReviewAdminMatchingRequests: (body: {
+    request_ids?: string[];
+    batch_id?: string;
+    merchant_id?: string;
+    category_path?: string;
+    decision: 'approve_smart' | 'approve_new' | 'link_existing' | 'reject';
+    admin_note?: string;
+  }) =>
+    request<{
+      ok: boolean;
+      processed_count: number;
+      approved_new_count: number;
+      linked_existing_count: number;
+      rejected_count: number;
+      categories_created_count: number;
+      error_count: number;
+      errors: Array<{ id: string; error: string }>;
+    }>('/api/admin/matching-requests/bulk-review', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   getMasterCatalogAudit: () => request<any[]>('/api/admin/master-catalog/audit'),
   getAdminStorefrontBanners: () => request<any[]>('/api/admin/storefront-banners'),
   createAdminStorefrontBanner: (body: Record<string, unknown>) =>

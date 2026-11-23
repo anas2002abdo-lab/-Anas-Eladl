@@ -79,12 +79,12 @@ export const PWAInstallButton: React.FC<Props> = ({ lang, onNotify }) => {
                 <div>
                   <h3 className="text-base font-bold text-slate-900">
                     {isAr
-                      ? 'مركز استخراج ملفات APK وتثبيت تطبيقات الموبايل (العميل & الطيارين)'
+                      ? 'مركز استخراج ملفات APK وتثبيت تطبيقات الموبايل (العميل & الطيارين & التجار)'
                       : 'Android APK Builder & PWA Mobile Installer'}
                   </h3>
                   <p className="text-xs text-slate-500">
                     {isAr
-                      ? 'ثبّت التطبيق فورًا على هاتفك أو استخرج ملفات Android APK الأصلية (Flutter & TWA)'
+                      ? 'ثبّت التطبيق فورًا على هاتفك أو استخرج ملفات Android APK الأصلية (العميل، الكابتن، والتاجر)'
                       : 'Install directly as a standalone mobile app or build native Android APKs'}
                   </p>
                 </div>
@@ -142,7 +142,7 @@ export const PWAInstallButton: React.FC<Props> = ({ lang, onNotify }) => {
                   },
                   {
                     key: 'mer',
-                    title: isAr ? '3. رابط بوابة التاجر والصيدلي المستقلة:' : '3. Merchant Portal Standalone URL:',
+                    title: isAr ? '3. رابط تطبيق التاجر والصيدلي المستقل (Otlobha Merchant):' : '3. Merchant App Standalone URL:',
                     url: merchantAppUrl,
                     icon: ExternalLink,
                   },
@@ -208,8 +208,8 @@ export const PWAInstallButton: React.FC<Props> = ({ lang, onNotify }) => {
 
               <p className="text-xs text-slate-300 leading-relaxed">
                 {isAr
-                  ? 'يحتوي المشروع على الكود المصدري الكامل لتطبيقي الموبايل بـ Flutter داخل مجلد /mobile (تطبيق العميل otlobha_customer وتطبيق الطيارين otlobha_captain) بالإضافة إلى بناء سحابي تلقائي عبر GitHub Actions:'
-                  : 'Full native Flutter source code is included under /mobile/otlobha_customer and /mobile/otlobha_captain:'}
+                  ? 'يحتوي المشروع على الكود المصدري الكامل لـ 3 تطبيقات موبايل بـ Flutter داخل مجلد /mobile (تطبيق العميل otlobha_customer، تطبيق الطيارين otlobha_captain، وتطبيق التجار otlobha_merchant) بالإضافة إلى بناء سحابي تلقائي عبر GitHub Actions:'
+                  : 'Full native Flutter source code is included under /mobile for Customer, Captain, and Merchant apps:'}
               </p>
 
               <div className="space-y-2 text-xs">
@@ -221,7 +221,7 @@ export const PWAInstallButton: React.FC<Props> = ({ lang, onNotify }) => {
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
                     {isAr
-                      ? 'ارفع المشروع إلى حسابك في GitHub ثم افتح تبويب Actions وشغّل Build Otlobha Android & iOS Apps لتحصل فورًا على ملفي:'
+                      ? 'ارفع المشروع إلى حسابك في GitHub ثم افتح تبويب Actions وشغّل Build Otlobha Android & iOS Apps لتحصل فورًا على ملفات APK الجاهزة:'
                       : 'Push repository to GitHub and run the Actions workflow to download:'}
                   </p>
                   <div className="flex flex-wrap gap-2 pt-1 font-mono-num text-[11px]">
@@ -230,6 +230,9 @@ export const PWAInstallButton: React.FC<Props> = ({ lang, onNotify }) => {
                     </span>
                     <span className="px-2 py-1 rounded bg-slate-950 text-teal-300 border border-slate-700">
                       otlobha-captain-apk (app-release.apk)
+                    </span>
+                    <span className="px-2 py-1 rounded bg-slate-950 text-rose-300 border border-slate-700">
+                      otlobha-merchant-apk (app-release.apk)
                     </span>
                   </div>
                 </div>

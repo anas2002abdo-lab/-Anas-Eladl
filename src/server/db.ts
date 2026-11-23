@@ -1239,6 +1239,7 @@ export function initDatabase(): void {
       product_name_en TEXT NOT NULL DEFAULT '',
       brand TEXT NOT NULL DEFAULT '',
       category_id TEXT REFERENCES categories(id),
+      category_path TEXT NOT NULL DEFAULT '',
       barcode TEXT,
       size_value REAL,
       size_unit TEXT NOT NULL DEFAULT '',
@@ -1251,6 +1252,9 @@ export function initDatabase(): void {
       merchant_sku TEXT NOT NULL DEFAULT '',
       suggested_master_id TEXT,
       match_confidence TEXT NOT NULL DEFAULT 'none',
+      batch_id TEXT NOT NULL DEFAULT '',
+      source_file_name TEXT NOT NULL DEFAULT '',
+      enriched_from_master INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending',
       admin_note TEXT NOT NULL DEFAULT '',
       reviewed_by TEXT,
@@ -1350,6 +1354,21 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id, sort_order);
     UPDATE categories SET full_path_ar = name_ar || ';' WHERE TRIM(COALESCE(full_path_ar, '')) = '' AND parent_id IS NULL;
   `);
+
+  // Non-destructive columns for merchant Excel upload batches & category path enrichment in product_matching_requests
+  const pmrCols = db.prepare("PRAGMA table_info('product_matching_requests')").all() as Array<{ name: string }>;
+  if (!pmrCols.some((c) => c.name === 'category_path')) {
+    db.exec("ALTER TABLE product_matching_requests ADD COLUMN category_path TEXT NOT NULL DEFAULT ''");
+  }
+  if (!pmrCols.some((c) => c.name === 'batch_id')) {
+    db.exec("ALTER TABLE product_matching_requests ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!pmrCols.some((c) => c.name === 'source_file_name')) {
+    db.exec("ALTER TABLE product_matching_requests ADD COLUMN source_file_name TEXT NOT NULL DEFAULT ''");
+  }
+  if (!pmrCols.some((c) => c.name === 'enriched_from_master')) {
+    db.exec('ALTER TABLE product_matching_requests ADD COLUMN enriched_from_master INTEGER NOT NULL DEFAULT 0');
+  }
 
   // Indexes & unique constraints for Master Product Catalog & Multi-Store Price Comparison
   db.exec(`

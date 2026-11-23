@@ -10,7 +10,9 @@ import {
 import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
+  formatCategoryExcelPath,
   getCategoryAndDescendantIds,
+  parseCategoryHierarchyPath,
   recomputeAllCategoryPaths,
   resolveOrCreateCategoryPath,
 } from './categoryHierarchy.ts';
@@ -1542,6 +1544,7 @@ export function submitMerchantProductRequestRecord(input: {
   product_name_en?: string;
   brand?: string;
   category_id?: string | null;
+  category_path?: string | null;
   barcode?: string | null;
   size_value?: number | null;
   size_unit?: string | null;
@@ -1552,6 +1555,9 @@ export function submitMerchantProductRequestRecord(input: {
   proposed_sale_price?: number | null;
   proposed_stock?: number;
   merchant_sku?: string;
+  batch_id?: string;
+  source_file_name?: string;
+  enriched_from_master?: boolean;
 }): { request: Record<string, any>; match_preview: MatchMasterResult } {
   const nameAr = String(input.product_name_ar || '').trim();
   if (!nameAr) throw new Error('اسم المنتج مطلوب');
@@ -1574,27 +1580,63 @@ export function submitMerchantProductRequestRecord(input: {
     size_label: input.size_label || parsedSize?.displayLabel || '',
   });
 
+  const bestMaster = matchPreview.exact_match || matchPreview.candidates[0] || null;
+  const normalizedCatPath = (() => {
+    const rawPath = String(input.category_path || '').trim();
+    if (rawPath) {
+      const segs = parseCategoryHierarchyPath(rawPath);
+      return segs.length > 0 ? formatCategoryExcelPath(segs) : rawPath;
+    }
+    if (input.category_id) {
+      const row = db
+        .prepare('SELECT name_ar, full_path_ar FROM categories WHERE id = ?')
+        .get(input.category_id) as { name_ar?: string; full_path_ar?: string } | undefined;
+      if (row) return String(row.full_path_ar || `${row.name_ar || ''};`).trim();
+    }
+    if (bestMaster?.category_id) {
+      const row = db
+        .prepare('SELECT name_ar, full_path_ar FROM categories WHERE id = ?')
+        .get(bestMaster.category_id) as { name_ar?: string; full_path_ar?: string } | undefined;
+      if (row) return String(row.full_path_ar || `${row.name_ar || ''};`).trim();
+    }
+    return '';
+  })();
+
+  const finalImageUrl = String(input.image_url || '').trim() || String(bestMaster?.image_url || '').trim();
+  const finalBrand = String(input.brand || '').trim() || String(bestMaster?.brand || '').trim();
+  const finalCatId = input.category_id || bestMaster?.category_id || null;
+  const enrichedFlag =
+    input.enriched_from_master ||
+    Boolean(
+      bestMaster &&
+        ((!String(input.image_url || '').trim() && bestMaster.image_url) ||
+          (!String(input.category_path || '').trim() && !input.category_id && bestMaster.category_id))
+    )
+      ? 1
+      : 0;
+
   const id = uid('pmr');
   db.prepare(`
     INSERT INTO product_matching_requests (
-      id, merchant_id, requested_by, product_name_ar, product_name_en, brand, category_id,
+      id, merchant_id, requested_by, product_name_ar, product_name_en, brand, category_id, category_path,
       barcode, size_value, size_unit, size_label, image_url, description,
       proposed_price, proposed_sale_price, proposed_stock, merchant_sku,
-      suggested_master_id, match_confidence, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+      suggested_master_id, match_confidence, batch_id, source_file_name, enriched_from_master, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
   `).run(
     id,
     input.merchant_id,
     String(input.requested_by || ''),
     nameAr,
     String(input.product_name_en || '').trim(),
-    String(input.brand || '').trim(),
-    input.category_id || null,
+    finalBrand,
+    finalCatId,
+    normalizedCatPath,
     String(input.barcode || '').trim() || null,
     parsedSize?.canonicalValue ?? (input.size_value ?? null),
     parsedSize?.canonicalUnit ?? String(input.size_unit || '').trim(),
     String(input.size_label || '').trim() || parsedSize?.displayLabel || '',
-    String(input.image_url || '').trim(),
+    finalImageUrl,
     String(input.description || '').trim(),
     Math.max(0, Number(input.proposed_price || 0)),
     input.proposed_sale_price !== undefined && input.proposed_sale_price !== null
@@ -1602,8 +1644,11 @@ export function submitMerchantProductRequestRecord(input: {
       : null,
     Math.max(0, Math.floor(Number(input.proposed_stock ?? 10))),
     String(input.merchant_sku || '').trim(),
-    matchPreview.exact_match?.id || matchPreview.candidates[0]?.id || null,
-    matchPreview.match_status
+    bestMaster?.id || null,
+    matchPreview.match_status,
+    String(input.batch_id || '').trim(),
+    String(input.source_file_name || '').trim(),
+    enrichedFlag
   );
 
   const request = db.prepare('SELECT * FROM product_matching_requests WHERE id = ?').get(id) as Record<string, any>;
@@ -1612,7 +1657,7 @@ export function submitMerchantProductRequestRecord(input: {
 
 export function reviewMerchantProductRequestRecord(input: {
   request_id: string;
-  decision: 'approve_new' | 'link_existing' | 'reject';
+  decision: 'approve_smart' | 'approve_new' | 'link_existing' | 'reject';
   target_master_id?: string | null;
   auto_create_listing?: boolean;
   admin_note?: string;
@@ -1622,15 +1667,19 @@ export function reviewMerchantProductRequestRecord(input: {
     canonical_name_en?: string;
     brand?: string;
     category_id?: string | null;
+    category_path?: string | null;
     barcode?: string | null;
     size_label?: string | null;
     image_url?: string;
     description?: string;
   };
+  _sharedCatResolver?: ReturnType<typeof createCategoryPathResolver>;
+  _skipRecomputePaths?: boolean;
 }): {
   request: Record<string, any>;
   master?: Record<string, any> | null;
   listing?: Record<string, any> | null;
+  categories_created?: number;
 } {
   const reqRow = db
     .prepare('SELECT * FROM product_matching_requests WHERE id = ?')
@@ -1648,19 +1697,54 @@ export function reviewMerchantProductRequestRecord(input: {
       WHERE id = ?
     `).run(note || 'تم رفض الطلب بعد المراجعة', actor, reqRow.id);
     const updated = db.prepare('SELECT * FROM product_matching_requests WHERE id = ?').get(reqRow.id) as Record<string, any>;
-    return { request: updated, master: null, listing: null };
+    return { request: updated, master: null, listing: null, categories_created: 0 };
+  }
+
+  // Resolve smart decision: link to existing approved master if exact match exists, else create & approve new master
+  let effectiveDecision: 'approve_new' | 'link_existing' =
+    input.decision === 'link_existing' ? 'link_existing' : 'approve_new';
+  let resolvedTargetMasterId = String(input.target_master_id || reqRow.suggested_master_id || '').trim();
+
+  if (input.decision === 'approve_smart') {
+    if (resolvedTargetMasterId && reqRow.match_confidence === 'exact') {
+      const existingApproved = db
+        .prepare("SELECT id FROM master_products WHERE id = ? AND approval_status = 'approved'")
+        .get(resolvedTargetMasterId) as { id: string } | undefined;
+      if (existingApproved) {
+        effectiveDecision = 'link_existing';
+      } else {
+        effectiveDecision = 'approve_new';
+      }
+    } else {
+      effectiveDecision = 'approve_new';
+    }
+  }
+
+  // Resolve or create the category hierarchy ONLY upon Admin approval so pending uploads never pollute live categories
+  const ov = input.overrides || {};
+  const rawCatPath = String(ov.category_path ?? reqRow.category_path ?? '').trim();
+  let resolvedCatId: string | null = (ov.category_id ?? reqRow.category_id ?? null) || null;
+  let categoriesCreated = 0;
+
+  if (rawCatPath) {
+    const resolver = input._sharedCatResolver || createCategoryPathResolver({ scope: 'merchant', merchantId: null });
+    const resolved = resolveOrCreateCategoryPath(resolver, rawCatPath, resolvedCatId);
+    if (resolved.category_id) resolvedCatId = resolved.category_id;
+    categoriesCreated += resolved.created_count;
+    if (!input._skipRecomputePaths && resolved.created_count > 0) {
+      recomputeAllCategoryPaths();
+    }
   }
 
   let master: Record<string, any> | null = null;
   let listing: Record<string, any> | null = null;
 
-  if (input.decision === 'approve_new') {
-    const ov = input.overrides || {};
+  if (effectiveDecision === 'approve_new') {
     const created = createMasterProductRecord({
       canonical_name_ar: ov.canonical_name_ar || reqRow.product_name_ar,
       canonical_name_en: ov.canonical_name_en ?? reqRow.product_name_en,
       brand: ov.brand ?? reqRow.brand,
-      category_id: ov.category_id ?? reqRow.category_id,
+      category_id: resolvedCatId,
       barcode: ov.barcode ?? reqRow.barcode,
       size_value: reqRow.size_value,
       size_unit: reqRow.size_unit,
@@ -1672,11 +1756,12 @@ export function reviewMerchantProductRequestRecord(input: {
     });
     master = created.master;
 
+    const finalListingCatId = resolvedCatId || master.category_id || null;
     if (input.auto_create_listing !== false && Number(reqRow.proposed_price || 0) >= 0) {
       const linked = linkMerchantListingToMaster({
         merchant_id: reqRow.merchant_id,
         master_product_id: master.id,
-        category_id: master.category_id || reqRow.category_id,
+        category_id: finalListingCatId,
         base_price: Number(reqRow.proposed_price || 0),
         sale_price: reqRow.proposed_sale_price !== null ? Number(reqRow.proposed_sale_price) : null,
         stock_quantity: Number(reqRow.proposed_stock ?? 10),
@@ -1689,20 +1774,39 @@ export function reviewMerchantProductRequestRecord(input: {
 
     db.prepare(`
       UPDATE product_matching_requests
-      SET status = 'approved_new', suggested_master_id = ?, admin_note = ?, reviewed_by = ?, reviewed_at = datetime('now')
+      SET status = 'approved_new',
+          category_id = COALESCE(?, category_id),
+          suggested_master_id = ?,
+          admin_note = ?,
+          reviewed_by = ?,
+          reviewed_at = datetime('now')
       WHERE id = ?
-    `).run(master.id, note || 'تم اعتماد المنتج وإضافته للكتالوج المركزي', actor, reqRow.id);
-  } else if (input.decision === 'link_existing') {
-    const targetId = String(input.target_master_id || reqRow.suggested_master_id || '').trim();
+    `).run(finalListingCatId, master.id, note || 'تم اعتماد المنتج وإضافته للكتالوج المركزي ونشره في المنصة حسب القسم', actor, reqRow.id);
+  } else if (effectiveDecision === 'link_existing') {
+    const targetId = resolvedTargetMasterId;
     if (!targetId) throw new Error('يجب تحديد المنتج المركزي المراد الربط به');
-    master = db.prepare('SELECT * FROM master_products WHERE id = ?').get(targetId) as Record<string, any> | undefined || null;
+    master = (db.prepare('SELECT * FROM master_products WHERE id = ?').get(targetId) as Record<string, any> | undefined) || null;
     if (!master) throw new Error('المنتج المركزي المحدد غير موجود');
 
+    // Fill missing master image/category from approved request if master lacked them
+    const reqImg = String(ov.image_url ?? reqRow.image_url ?? '').trim();
+    if ((!master.image_url && reqImg) || (!master.category_id && resolvedCatId)) {
+      db.prepare(`
+        UPDATE master_products
+        SET image_url = CASE WHEN TRIM(COALESCE(image_url, '')) = '' AND ? != '' THEN ? ELSE image_url END,
+            category_id = COALESCE(category_id, ?),
+            updated_at = datetime('now')
+        WHERE id = ?
+      `).run(reqImg, reqImg, resolvedCatId, master.id);
+      master = (db.prepare('SELECT * FROM master_products WHERE id = ?').get(master.id) as Record<string, any>) || master;
+    }
+
+    const finalListingCatId = resolvedCatId || master.category_id || null;
     if (input.auto_create_listing !== false) {
       const linked = linkMerchantListingToMaster({
         merchant_id: reqRow.merchant_id,
         master_product_id: master.id,
-        category_id: master.category_id || reqRow.category_id,
+        category_id: finalListingCatId,
         base_price: Number(reqRow.proposed_price || 0),
         sale_price: reqRow.proposed_sale_price !== null ? Number(reqRow.proposed_sale_price) : null,
         stock_quantity: Number(reqRow.proposed_stock ?? 10),
@@ -1715,13 +1819,119 @@ export function reviewMerchantProductRequestRecord(input: {
 
     db.prepare(`
       UPDATE product_matching_requests
-      SET status = 'linked_existing', suggested_master_id = ?, admin_note = ?, reviewed_by = ?, reviewed_at = datetime('now')
+      SET status = 'linked_existing',
+          category_id = COALESCE(?, category_id),
+          suggested_master_id = ?,
+          admin_note = ?,
+          reviewed_by = ?,
+          reviewed_at = datetime('now')
       WHERE id = ?
-    `).run(master.id, note || `تم ربط الطلب بالمنتج المركزي (${master.canonical_name_ar})`, actor, reqRow.id);
+    `).run(
+      finalListingCatId,
+      master.id,
+      note || `تمت الموافقة والربط بالمنتج المركزي (${master.canonical_name_ar}) ونشره في المنصة حسب القسم`,
+      actor,
+      reqRow.id
+    );
   }
 
   const updated = db.prepare('SELECT * FROM product_matching_requests WHERE id = ?').get(reqRow.id) as Record<string, any>;
-  return { request: updated, master, listing };
+  return { request: updated, master, listing, categories_created: categoriesCreated };
+}
+
+export function bulkReviewMerchantProductRequests(input: {
+  request_ids?: string[];
+  batch_id?: string | null;
+  merchant_id?: string | null;
+  category_path?: string | null;
+  decision: 'approve_smart' | 'approve_new' | 'link_existing' | 'reject';
+  admin_note?: string;
+  reviewed_by?: string;
+}): {
+  ok: true;
+  processed_count: number;
+  approved_new_count: number;
+  linked_existing_count: number;
+  rejected_count: number;
+  categories_created_count: number;
+  failed_count: number;
+  errors: Array<{ request_id: string; error: string }>;
+} {
+  const where: string[] = ["status = 'pending'"];
+  const params: unknown[] = [];
+
+  if (Array.isArray(input.request_ids) && input.request_ids.length > 0) {
+    const cleanIds = input.request_ids.map((s) => String(s || '').trim()).filter(Boolean).slice(0, 2000);
+    if (cleanIds.length === 0) throw new Error('لم يتم تحديد أي طلبات للمراجعة');
+    where.push(`id IN (${cleanIds.map(() => '?').join(',')})`);
+    params.push(...cleanIds);
+  } else {
+    if (input.batch_id) {
+      where.push('batch_id = ?');
+      params.push(String(input.batch_id).trim());
+    }
+    if (input.merchant_id) {
+      where.push('merchant_id = ?');
+      params.push(String(input.merchant_id).trim());
+    }
+    if (input.category_path) {
+      where.push('TRIM(COALESCE(category_path, \'\')) = ?');
+      params.push(String(input.category_path).trim());
+    }
+  }
+
+  const pendingRows = db
+    .prepare(`SELECT id FROM product_matching_requests WHERE ${where.join(' AND ')} ORDER BY created_at ASC LIMIT 2000`)
+    .all(...params) as Array<{ id: string }>;
+
+  if (pendingRows.length === 0) {
+    throw new Error('لا توجد طلبات معلّقة مطابقة لهذا الاختيار');
+  }
+
+  const sharedResolver = createCategoryPathResolver({ scope: 'merchant', merchantId: null });
+  let approvedNew = 0;
+  let linkedExisting = 0;
+  let rejected = 0;
+  let categoriesCreatedTotal = 0;
+  const errors: Array<{ request_id: string; error: string }> = [];
+
+  const tx = db.transaction(() => {
+    for (const row of pendingRows) {
+      try {
+        const res = reviewMerchantProductRequestRecord({
+          request_id: row.id,
+          decision: input.decision,
+          admin_note: input.admin_note,
+          reviewed_by: input.reviewed_by,
+          auto_create_listing: true,
+          _sharedCatResolver: sharedResolver,
+          _skipRecomputePaths: true,
+        });
+        categoriesCreatedTotal += res.categories_created || 0;
+        if (res.request?.status === 'approved_new') approvedNew += 1;
+        else if (res.request?.status === 'linked_existing') linkedExisting += 1;
+        else if (res.request?.status === 'rejected') rejected += 1;
+      } catch (err) {
+        errors.push({ request_id: row.id, error: (err as Error).message });
+      }
+    }
+  });
+
+  tx();
+  if (categoriesCreatedTotal > 0) {
+    recomputeAllCategoryPaths();
+  }
+
+  return {
+    ok: true,
+    processed_count: approvedNew + linkedExisting + rejected,
+    approved_new_count: approvedNew,
+    linked_existing_count: linkedExisting,
+    rejected_count: rejected,
+    categories_created_count: categoriesCreatedTotal,
+    failed_count: errors.length,
+    errors: errors.slice(0, 50),
+  };
 }
 
 export function mergeMasterProductsTx(input: {
@@ -2870,14 +3080,8 @@ export function registerMasterCatalogRoutes(app: Express): void {
     const effectiveMerchantId = auth.role === 'merchant' ? auth.id : String(req.body?.merchant_id || '').trim();
     if (!effectiveMerchantId) return res.status(400).json({ error: 'معرّف المتجر مطلوب' });
     try {
-      let resolvedCatId: string | null = req.body?.category_id || null;
+      const resolvedCatId: string | null = req.body?.category_id || null;
       const rawCatPath = String(req.body?.category_path || '').trim();
-      if (rawCatPath) {
-        const resolver = createCategoryPathResolver({ scope: 'merchant', merchantId: null });
-        const resolved = resolveOrCreateCategoryPath(resolver, rawCatPath, resolvedCatId);
-        if (resolved.category_id) resolvedCatId = resolved.category_id;
-        if (resolved.created_count > 0) recomputeAllCategoryPaths();
-      }
       const result = submitMerchantProductRequestRecord({
         merchant_id: effectiveMerchantId,
         requested_by: auth.fullName,
@@ -2885,6 +3089,7 @@ export function registerMasterCatalogRoutes(app: Express): void {
         product_name_en: req.body?.product_name_en,
         brand: req.body?.brand,
         category_id: resolvedCatId,
+        category_path: rawCatPath || null,
         barcode: req.body?.barcode || null,
         size_value: req.body?.size_value ?? null,
         size_unit: req.body?.size_unit ?? null,
@@ -2905,31 +3110,81 @@ export function registerMasterCatalogRoutes(app: Express): void {
     }
   });
 
+  app.post('/api/merchant/master-catalog/excel-preview', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLES), (req, res) => {
+    try {
+      const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      if (rows.length === 0) {
+        return res.status(400).json({ error: 'لا توجد صفوف منتجات في الملف' });
+      }
+      if (rows.length > 10000) {
+        return res.status(400).json({ error: 'الحد الأقصى للدفعة الواحدة هو 10,000 صف' });
+      }
+      const result = previewMerchantExcelWithMasterCatalog(rows, {
+        default_category_path: String(req.body?.default_category_path || '').trim() || undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/api/merchant/master-catalog/excel-submit', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLES), (req, res) => {
+    const auth = req.auth!;
+    const effectiveMerchantId = auth.role === 'merchant' ? auth.id : String(req.body?.merchant_id || '').trim();
+    if (!effectiveMerchantId) return res.status(400).json({ error: 'معرّف المتجر مطلوب' });
+    if (auth.role === 'merchant' && req.body?.merchant_id && String(req.body.merchant_id) !== auth.id) {
+      return res.status(403).json({ error: 'غير مصرح لك برفع ملف لمتجر آخر' });
+    }
+    try {
+      const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      if (rows.length === 0) {
+        return res.status(400).json({ error: 'لا توجد منتجات لرفعها للمراجعة' });
+      }
+      if (rows.length > 5000) {
+        return res.status(400).json({ error: 'الحد الأقصى للدفعة الواحدة هو 5,000 منتج' });
+      }
+      const result = submitMerchantExcelToApprovalQueue({
+        merchant_id: effectiveMerchantId,
+        requested_by: auth.fullName || auth.email || 'merchant',
+        file_name: String(req.body?.file_name || 'ملف Excel').trim(),
+        batch_id: String(req.body?.batch_id || '').trim() || undefined,
+        default_category_path: String(req.body?.default_category_path || '').trim() || undefined,
+        rows,
+      });
+      recordAuditLog({
+        actor_name: auth.fullName,
+        actor_role: auth.role,
+        action: 'MERCHANT_EXCEL_SUBMITTED_FOR_APPROVAL',
+        entity_type: 'product_matching_requests',
+        entity_id: result.batch_id,
+        details: `رفع تاجر (${effectiveMerchantId}) ملف Excel (${result.file_name}) بعدد ${result.submitted_count} منتج موزعة على ${result.categories_breakdown.length} قسم بانتظار موافقة الإدارة`,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   app.get('/api/merchant/master-catalog/my-requests', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLES), (req, res) => {
     const auth = req.auth!;
     const merchantId = auth.role === 'merchant' ? auth.id : String(req.query.merchant_id || '').trim();
+    const sqlBase = `
+      SELECT
+        r.*,
+        m.business_name_ar AS merchant_name,
+        c.name_ar AS category_name,
+        COALESCE(NULLIF(TRIM(r.category_path), ''), NULLIF(TRIM(c.full_path_ar), ''), c.name_ar, '') AS resolved_category_path,
+        mp.canonical_name_ar AS suggested_master_name,
+        mp.size_label AS suggested_master_size,
+        mp.image_url AS suggested_master_image
+      FROM product_matching_requests r
+      LEFT JOIN merchants m ON m.id = r.merchant_id
+      LEFT JOIN categories c ON c.id = r.category_id
+      LEFT JOIN master_products mp ON mp.id = r.suggested_master_id
+    `;
     const rows = merchantId
-      ? db
-          .prepare(`
-            SELECT r.*, m.business_name_ar AS merchant_name, mp.canonical_name_ar AS suggested_master_name
-            FROM product_matching_requests r
-            LEFT JOIN merchants m ON m.id = r.merchant_id
-            LEFT JOIN master_products mp ON mp.id = r.suggested_master_id
-            WHERE r.merchant_id = ?
-            ORDER BY r.created_at DESC
-            LIMIT 100
-          `)
-          .all(merchantId)
-      : db
-          .prepare(`
-            SELECT r.*, m.business_name_ar AS merchant_name, mp.canonical_name_ar AS suggested_master_name
-            FROM product_matching_requests r
-            LEFT JOIN merchants m ON m.id = r.merchant_id
-            LEFT JOIN master_products mp ON mp.id = r.suggested_master_id
-            ORDER BY r.created_at DESC
-            LIMIT 100
-          `)
-          .all();
+      ? db.prepare(`${sqlBase} WHERE r.merchant_id = ? ORDER BY r.created_at DESC LIMIT 400`).all(merchantId)
+      : db.prepare(`${sqlBase} ORDER BY r.created_at DESC LIMIT 400`).all();
     res.json(rows);
   });
 
@@ -3419,24 +3674,71 @@ export function registerMasterCatalogRoutes(app: Express): void {
 
   app.get('/api/admin/matching-requests', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
     const status = String(req.query.status || 'pending').trim();
+    const merchantId = String(req.query.merchant_id || '').trim();
+    const batchId = String(req.query.batch_id || '').trim();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (status !== 'all') {
+      where.push('r.status = ?');
+      params.push(status);
+    }
+    if (merchantId) {
+      where.push('r.merchant_id = ?');
+      params.push(merchantId);
+    }
+    if (batchId) {
+      where.push('r.batch_id = ?');
+      params.push(batchId);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
     const rows = db
       .prepare(`
         SELECT
           r.*,
           m.business_name_ar AS merchant_name,
           c.name_ar AS category_name,
+          COALESCE(NULLIF(TRIM(r.category_path), ''), NULLIF(TRIM(c.full_path_ar), ''), c.name_ar, NULLIF(TRIM(mc.full_path_ar), ''), mc.name_ar, '') AS resolved_category_path,
           mp.canonical_name_ar AS suggested_master_name,
-          mp.size_label AS suggested_master_size
+          mp.size_label AS suggested_master_size,
+          mp.image_url AS suggested_master_image,
+          mc.name_ar AS suggested_master_category_name
         FROM product_matching_requests r
         LEFT JOIN merchants m ON m.id = r.merchant_id
         LEFT JOIN categories c ON c.id = r.category_id
         LEFT JOIN master_products mp ON mp.id = r.suggested_master_id
-        ${status !== 'all' ? 'WHERE r.status = ?' : ''}
+        LEFT JOIN categories mc ON mc.id = mp.category_id
+        ${whereSql}
         ORDER BY r.created_at DESC
-        LIMIT 150
+        LIMIT 500
       `)
-      .all(...(status !== 'all' ? [status] : []));
+      .all(...params);
     res.json(rows);
+  });
+
+  app.post('/api/admin/matching-requests/bulk-review', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+    if (!ensureAdminCatalogAccess(req, res)) return;
+    try {
+      const out = bulkReviewMerchantProductRequests({
+        request_ids: Array.isArray(req.body?.request_ids) ? req.body.request_ids : undefined,
+        batch_id: req.body?.batch_id || null,
+        merchant_id: req.body?.merchant_id || null,
+        category_path: req.body?.category_path || null,
+        decision: req.body?.decision || 'approve_smart',
+        admin_note: req.body?.admin_note || '',
+        reviewed_by: req.auth!.fullName,
+      });
+      recordAuditLog({
+        actor_name: req.auth!.fullName,
+        actor_role: req.auth!.role,
+        action: 'ADMIN_BULK_REVIEW_MATCHING_REQUESTS',
+        entity_type: 'product_matching_requests',
+        entity_id: String(req.body?.batch_id || 'bulk'),
+        details: `مراجعة جماعية لطلبات التجار: تمت معالجة ${out.processed_count} منتج (جديد: ${out.approved_new_count}، مربوط: ${out.linked_existing_count}، مرفوض: ${out.rejected_count}، أقسام جديدة: ${out.categories_created_count})`,
+      });
+      res.json(out);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   });
 
   app.post('/api/admin/matching-requests/:id/review', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
@@ -3845,6 +4147,7 @@ function buildMasterCatalogMemoryIndex(): MasterCatalogMemoryIndex {
       SELECT
         mp.*,
         c.name_ar AS category_name,
+        COALESCE(NULLIF(TRIM(c.full_path_ar), ''), c.name_ar, '') AS category_path,
         (SELECT COUNT(*) FROM products p WHERE p.master_product_id = mp.id AND p.is_available = 1) AS stores_count,
         (SELECT MIN(COALESCE(p.sale_price, p.base_price)) FROM products p WHERE p.master_product_id = mp.id AND p.is_available = 1) AS lowest_price
       FROM master_products mp
@@ -4402,9 +4705,20 @@ export function bulkImportMasterProductsFromExcel(input: {
       if (match.status === 'existing' && match.best) {
         const targetId = match.best.row.id;
         let resolvedCatIdForExisting: string | null = match.best.row.category_id || fallbackCatId;
-        if (String(raw?.category || '').trim()) {
-          const resolvedCat = resolveOrCreateCategoryPath(catResolver, String(raw?.category || ''), resolvedCatIdForExisting);
-          if (resolvedCat.category_id) resolvedCatIdForExisting = resolvedCat.category_id;
+        const rawExcelCat = String(raw?.category || '').trim();
+        if (rawExcelCat) {
+          const resolvedCat = resolveOrCreateCategoryPath(catResolver, rawExcelCat, resolvedCatIdForExisting);
+          if (resolvedCat.category_id) {
+            resolvedCatIdForExisting = resolvedCat.category_id;
+            // Sync Master Product's category when Excel explicitly provides a category
+            if (resolvedCat.category_id !== match.best.row.category_id) {
+              db.prepare("UPDATE master_products SET category_id = ?, updated_at = datetime('now') WHERE id = ?").run(
+                resolvedCat.category_id,
+                targetId
+              );
+              match.best.row.category_id = resolvedCat.category_id;
+            }
+          }
           categoriesCreatedCount += resolvedCat.created_count;
         }
 
@@ -4578,3 +4892,435 @@ export function bulkImportMasterProductsFromExcel(input: {
     created_ids: createdIds,
   };
 }
+
+// ============================================================================
+// MERCHANT EXCEL -> CENTRAL CATALOG ENRICHMENT -> ADMIN APPROVAL QUEUE
+// ============================================================================
+
+export interface MerchantExcelCategoryBreakdownItem {
+  category_path: string;
+  display_label: string;
+  count: number;
+  matched_count: number;
+  new_count: number;
+  images_completed_count: number;
+  is_new_category: boolean;
+}
+
+export interface MerchantExcelEnrichedRow {
+  row_index: number;
+  product_name_ar: string;
+  product_name_en: string;
+  brand: string;
+  size_label: string;
+  barcode: string;
+  description: string;
+  image_url: string;
+  image_source: 'excel' | 'master_catalog' | 'none';
+  category_path: string;
+  category_display: string;
+  category_id: string | null;
+  category_source: 'excel' | 'master_catalog' | 'default';
+  is_new_category: boolean;
+  proposed_price: number;
+  proposed_sale_price: number | null;
+  proposed_stock: number;
+  merchant_sku: string;
+  match_status: 'existing' | 'possible' | 'not_found';
+  confidence_score: number;
+  suggested_master_id: string | null;
+  suggested_master_name: string | null;
+  suggested_master_size: string | null;
+  suggested_master_image: string | null;
+  suggested_master_category: string | null;
+  enriched_from_master: boolean;
+  enriched_fields: string[];
+  size_conflict_warning: string | null;
+}
+
+function buildReadOnlyCategoryLookup() {
+  const rows = db
+    .prepare(`
+      SELECT id, name_ar, COALESCE(NULLIF(TRIM(full_path_ar), ''), name_ar, '') AS full_path_ar
+      FROM categories
+      WHERE COALESCE(scope, 'merchant') != 'market'
+    `)
+    .all() as Array<{ id: string; name_ar: string; full_path_ar: string }>;
+
+  const byNormPath = new Map<string, { id: string; formattedPath: string }>();
+  const byNormName = new Map<string, { id: string; formattedPath: string }>();
+
+  for (const r of rows) {
+    const parts = parseCategoryHierarchyPath(r.full_path_ar || r.name_ar);
+    const formattedPath = parts.length > 0 ? formatCategoryExcelPath(parts) : `${String(r.name_ar || '').trim()};`;
+    const normFull = normalizeText(parts.join(' > '));
+    const normLeaf = normalizeText(r.name_ar || '');
+    if (normFull && !byNormPath.has(normFull)) {
+      byNormPath.set(normFull, { id: r.id, formattedPath });
+    }
+    if (normLeaf && !byNormName.has(normLeaf)) {
+      byNormName.set(normLeaf, { id: r.id, formattedPath });
+    }
+  }
+
+  return {
+    find(rawCategory: string): { id: string; formattedPath: string } | null {
+      const parts = parseCategoryHierarchyPath(rawCategory);
+      if (parts.length === 0) return null;
+      const normFull = normalizeText(parts.join(' > '));
+      const exactPath = byNormPath.get(normFull);
+      if (exactPath) return exactPath;
+      if (parts.length === 1) {
+        const byName = byNormName.get(normalizeText(parts[0]));
+        if (byName) return byName;
+      }
+      return null;
+    },
+  };
+}
+
+function formatDisplayCategory(pathStr: string): string {
+  const parts = parseCategoryHierarchyPath(pathStr);
+  return parts.length > 0 ? parts.join(' > ') : 'عام';
+}
+
+function enrichMerchantExcelRowsWithMasterCatalog(
+  rawRows: Array<Record<string, unknown>>,
+  opts?: { default_category_path?: string }
+): {
+  summary: {
+    total_rows: number;
+    valid_rows: number;
+    skipped_empty_rows: number;
+    matched_existing_count: number;
+    matched_possible_count: number;
+    new_products_count: number;
+    images_completed_from_master: number;
+    categories_completed_from_master: number;
+    products_enriched_count: number;
+    categories_count: number;
+    new_categories_count: number;
+  };
+  categories_breakdown: MerchantExcelCategoryBreakdownItem[];
+  rows: MerchantExcelEnrichedRow[];
+} {
+  const index = buildMasterCatalogMemoryIndex();
+  const catLookup = buildReadOnlyCategoryLookup();
+  const defaultParts = parseCategoryHierarchyPath(opts?.default_category_path || '');
+  const defaultFormattedPath = defaultParts.length > 0 ? formatCategoryExcelPath(defaultParts) : 'عام;';
+
+  const enrichedRows: MerchantExcelEnrichedRow[] = [];
+  const catStatsMap = new Map<string, MerchantExcelCategoryBreakdownItem>();
+
+  let skippedEmptyRows = 0;
+  let matchedExistingCount = 0;
+  let matchedPossibleCount = 0;
+  let newProductsCount = 0;
+  let imagesCompletedFromMaster = 0;
+  let categoriesCompletedFromMaster = 0;
+  let productsEnrichedCount = 0;
+
+  for (let i = 0; i < rawRows.length; i++) {
+    const raw = rawRows[i] || {};
+    const rowIndex = Number(raw.row_index || i + 2);
+    const rawNameAr = String(raw.name_ar || '').trim();
+    const rawNameEn = String(raw.name_en || '').trim();
+    const rawBrand = String(raw.brand || '').trim();
+    const rawSize = String(raw.size_label || '').trim();
+    const rawBarcode = String(raw.barcode || '').trim();
+    const rawImage = String(raw.image_url || '').trim();
+    const rawCategory = String(raw.category || raw.category_path || '').trim();
+    const rawDescription = String(raw.description || '').trim();
+    const rawSku = String(raw.merchant_sku || raw.sku || '').trim();
+
+    if (!rawNameAr && !rawNameEn && !rawBarcode) {
+      skippedEmptyRows++;
+      continue;
+    }
+
+    const match = matchAgainstMemoryIndex(index, {
+      name_ar: rawNameAr || rawNameEn,
+      name_en: rawNameEn,
+      brand: rawBrand,
+      barcode: rawBarcode,
+      size_label: rawSize,
+    });
+
+    const usableMaster =
+      match.best &&
+      !match.size_conflict_warning &&
+      (match.status === 'existing' || (match.status === 'possible' && match.confidence_score >= 70))
+        ? match.best.row
+        : null;
+
+    if (match.status === 'existing' && usableMaster) matchedExistingCount++;
+    else if (match.status === 'possible' && usableMaster) matchedPossibleCount++;
+    else newProductsCount++;
+
+    const enrichedFields: string[] = [];
+
+    // 1. Complete Product metadata from Central Catalog
+    const finalNameAr = rawNameAr || usableMaster?.canonical_name_ar || rawNameEn;
+    if (!rawNameAr && usableMaster?.canonical_name_ar) enrichedFields.push('الاسم');
+
+    const finalNameEn = rawNameEn || usableMaster?.canonical_name_en || '';
+    if (!rawNameEn && usableMaster?.canonical_name_en) enrichedFields.push('الاسم الإنجليزي');
+
+    const finalBrand = rawBrand || usableMaster?.brand || '';
+    if (!rawBrand && usableMaster?.brand) enrichedFields.push('العلامة');
+
+    const finalSizeLabel =
+      rawSize || usableMaster?.size_label || match.parsed_size?.displayLabel || '';
+    if (!rawSize && usableMaster?.size_label) enrichedFields.push('الحجم');
+
+    const finalBarcode = rawBarcode || usableMaster?.barcode || '';
+    if (!rawBarcode && usableMaster?.barcode) enrichedFields.push('الباركود');
+
+    const finalDescription = rawDescription || usableMaster?.description || '';
+    if (!rawDescription && usableMaster?.description) enrichedFields.push('الوصف');
+
+    // 2. Complete Image from Central Catalog if missing in merchant Excel
+    let finalImage = rawImage;
+    let imageSource: 'excel' | 'master_catalog' | 'none' = rawImage ? 'excel' : 'none';
+    if (!finalImage && usableMaster?.image_url) {
+      finalImage = String(usableMaster.image_url).trim();
+      if (finalImage) {
+        imageSource = 'master_catalog';
+        imagesCompletedFromMaster++;
+        enrichedFields.push('الصورة');
+      }
+    }
+
+    // 3. Split & Complete Category (Excel category takes priority; otherwise complete from Central Catalog)
+    let categorySource: 'excel' | 'master_catalog' | 'default' = 'default';
+    let categoryPath = defaultFormattedPath;
+    let categoryId: string | null = null;
+    let isNewCategory = false;
+
+    const excelCatParts = parseCategoryHierarchyPath(rawCategory);
+    if (excelCatParts.length > 0) {
+      categorySource = 'excel';
+      const existing = catLookup.find(rawCategory);
+      if (existing) {
+        categoryId = existing.id;
+        categoryPath = existing.formattedPath;
+        isNewCategory = false;
+      } else {
+        categoryPath = formatCategoryExcelPath(excelCatParts);
+        isNewCategory = true;
+      }
+    } else if (usableMaster && (usableMaster.category_path || usableMaster.category_name || usableMaster.category_id)) {
+      categorySource = 'master_catalog';
+      const masterCatRaw = String(usableMaster.category_path || usableMaster.category_name || '').trim();
+      const masterParts = parseCategoryHierarchyPath(masterCatRaw);
+      const existing = masterCatRaw ? catLookup.find(masterCatRaw) : null;
+      categoryId = existing?.id || (usableMaster.category_id ? String(usableMaster.category_id) : null);
+      categoryPath = existing?.formattedPath || (masterParts.length > 0 ? formatCategoryExcelPath(masterParts) : defaultFormattedPath);
+      isNewCategory = !categoryId;
+      categoriesCompletedFromMaster++;
+      enrichedFields.push('القسم');
+    } else {
+      categorySource = 'default';
+      const existing = catLookup.find(defaultFormattedPath);
+      categoryId = existing?.id || null;
+      categoryPath = existing?.formattedPath || defaultFormattedPath;
+      isNewCategory = !categoryId;
+    }
+
+    const categoryDisplay = formatDisplayCategory(categoryPath);
+
+    // 4. Parse merchant price, sale price, stock
+    const parsedPrice = parseFlexibleMoney(raw.price ?? raw.base_price);
+    const parsedSale = parseFlexibleMoney(raw.sale_price);
+    const parsedStock = parseFlexibleMoney(raw.stock_quantity ?? raw.stock);
+    const proposedPrice = parsedPrice !== null ? parsedPrice : 0;
+    const proposedSalePrice =
+      parsedSale !== null && parsedSale > 0 && (proposedPrice <= 0 || parsedSale < proposedPrice)
+        ? parsedSale
+        : null;
+    const proposedStock = parsedStock !== null ? Math.max(0, Math.round(parsedStock)) : 20;
+
+    const enrichedFromMaster = Boolean(usableMaster);
+    if (enrichedFromMaster) productsEnrichedCount++;
+
+    const enriched: MerchantExcelEnrichedRow = {
+      row_index: rowIndex,
+      product_name_ar: finalNameAr,
+      product_name_en: finalNameEn,
+      brand: finalBrand,
+      size_label: finalSizeLabel,
+      barcode: finalBarcode,
+      description: finalDescription,
+      image_url: finalImage,
+      image_source: imageSource,
+      category_path: categoryPath,
+      category_display: categoryDisplay,
+      category_id: categoryId,
+      category_source: categorySource,
+      is_new_category: isNewCategory,
+      proposed_price: proposedPrice,
+      proposed_sale_price: proposedSalePrice,
+      proposed_stock: proposedStock,
+      merchant_sku: rawSku,
+      match_status: usableMaster ? match.status : 'not_found',
+      confidence_score: usableMaster ? match.confidence_score : 0,
+      suggested_master_id: usableMaster ? String(usableMaster.id) : null,
+      suggested_master_name: usableMaster ? String(usableMaster.canonical_name_ar || '') : null,
+      suggested_master_size: usableMaster ? String(usableMaster.size_label || '') : null,
+      suggested_master_image: usableMaster?.image_url ? String(usableMaster.image_url) : null,
+      suggested_master_category: usableMaster
+        ? formatDisplayCategory(String(usableMaster.category_path || usableMaster.category_name || ''))
+        : null,
+      enriched_from_master: enrichedFromMaster,
+      enriched_fields: enrichedFields,
+      size_conflict_warning: match.size_conflict_warning || null,
+    };
+
+    enrichedRows.push(enriched);
+
+    const catKey = normalizeText(categoryDisplay) || 'عام';
+    const existingStat = catStatsMap.get(catKey);
+    if (existingStat) {
+      existingStat.count++;
+      if (usableMaster) existingStat.matched_count++;
+      else existingStat.new_count++;
+      if (imageSource === 'master_catalog') existingStat.images_completed_count++;
+    } else {
+      catStatsMap.set(catKey, {
+        category_path: categoryPath,
+        display_label: categoryDisplay,
+        count: 1,
+        matched_count: usableMaster ? 1 : 0,
+        new_count: usableMaster ? 0 : 1,
+        images_completed_count: imageSource === 'master_catalog' ? 1 : 0,
+        is_new_category: isNewCategory,
+      });
+    }
+  }
+
+  const categoriesBreakdown = Array.from(catStatsMap.values()).sort((a, b) => b.count - a.count);
+
+  return {
+    summary: {
+      total_rows: rawRows.length,
+      valid_rows: enrichedRows.length,
+      skipped_empty_rows: skippedEmptyRows,
+      matched_existing_count: matchedExistingCount,
+      matched_possible_count: matchedPossibleCount,
+      new_products_count: newProductsCount,
+      images_completed_from_master: imagesCompletedFromMaster,
+      categories_completed_from_master: categoriesCompletedFromMaster,
+      products_enriched_count: productsEnrichedCount,
+      categories_count: categoriesBreakdown.length,
+      new_categories_count: categoriesBreakdown.filter((c) => c.is_new_category).length,
+    },
+    categories_breakdown: categoriesBreakdown,
+    rows: enrichedRows,
+  };
+}
+
+export function previewMerchantExcelWithMasterCatalog(
+  rows: Array<Record<string, unknown>>,
+  opts?: { default_category_path?: string }
+) {
+  return enrichMerchantExcelRowsWithMasterCatalog(rows, opts);
+}
+
+export function submitMerchantExcelToApprovalQueue(input: {
+  merchant_id: string;
+  requested_by: string;
+  file_name: string;
+  batch_id?: string;
+  default_category_path?: string;
+  rows: Array<Record<string, unknown>>;
+}) {
+  const merchant = db.prepare('SELECT id FROM merchants WHERE id = ?').get(input.merchant_id) as
+    | { id: string }
+    | undefined;
+  if (!merchant) {
+    throw new Error('المتجر غير موجود');
+  }
+
+  const enriched = enrichMerchantExcelRowsWithMasterCatalog(input.rows, {
+    default_category_path: input.default_category_path,
+  });
+
+  if (enriched.rows.length === 0) {
+    throw new Error('لا توجد صفوف صالحة للإرسال في ملف Excel');
+  }
+
+  const batchId = input.batch_id || uid('xbatch');
+  const fileName = String(input.file_name || 'ملف Excel').trim() || 'ملف Excel';
+
+  const insertStmt = db.prepare(`
+    INSERT INTO product_matching_requests (
+      id, merchant_id, requested_by, product_name_ar, product_name_en, brand,
+      category_id, category_path, barcode, size_value, size_unit, size_label,
+      image_url, description, proposed_price, proposed_sale_price, proposed_stock,
+      merchant_sku, suggested_master_id, match_confidence, batch_id, source_file_name,
+      enriched_from_master, status, admin_note
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, 'pending', ''
+    )
+  `);
+
+  const createdIds: string[] = [];
+
+  const tx = db.transaction(() => {
+    for (const row of enriched.rows) {
+      const parsedSize = extractSize({
+        size_label: row.size_label,
+        name_ar: row.product_name_ar,
+        name_en: row.product_name_en,
+      });
+      const reqId = uid('pmr');
+      insertStmt.run(
+        reqId,
+        input.merchant_id,
+        input.requested_by || 'merchant',
+        row.product_name_ar,
+        row.product_name_en,
+        row.brand,
+        row.category_id,
+        row.category_path,
+        row.barcode || null,
+        parsedSize?.canonicalValue ?? null,
+        parsedSize?.canonicalUnit ?? '',
+        row.size_label,
+        row.image_url,
+        row.description,
+        row.proposed_price,
+        row.proposed_sale_price,
+        row.proposed_stock,
+        row.merchant_sku,
+        row.suggested_master_id,
+        row.confidence_score,
+        batchId,
+        fileName,
+        row.enriched_from_master ? 1 : 0
+      );
+      createdIds.push(reqId);
+    }
+  });
+
+  tx();
+
+  return {
+    ok: true,
+    batch_id: batchId,
+    file_name: fileName,
+    submitted_count: createdIds.length,
+    skipped_count: enriched.summary.skipped_empty_rows,
+    matched_in_master_count:
+      enriched.summary.matched_existing_count + enriched.summary.matched_possible_count,
+    images_completed_from_master: enriched.summary.images_completed_from_master,
+    categories_completed_from_master: enriched.summary.categories_completed_from_master,
+    categories_breakdown: enriched.categories_breakdown,
+    request_ids: createdIds,
+  };
+}
+

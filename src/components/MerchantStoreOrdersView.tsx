@@ -1,10 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Ban,
+  Bell,
+  BellRing,
   CheckCircle2,
   ClipboardList,
   Clock,
+  FileSpreadsheet,
   FileWarning,
   MapPin,
   Package,
@@ -14,13 +17,15 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
-import type { Language, MerchantRecord, OrderItemRecord, OrderRecord } from '../shared/types.ts';
+import type { CategoryRecord, Language, MerchantRecord, OrderItemRecord, OrderRecord } from '../shared/types.ts';
 import { CatalogSection } from './CatalogSection.tsx';
+import { MerchantMasterLinkPanel } from './MerchantMasterLinkPanel.tsx';
 
 interface Props {
   lang: Language;
   merchant: MerchantRecord;
   orders: OrderRecord[];
+  categories?: CategoryRecord[];
   onRefresh: () => Promise<void>;
   onNotify: (msg: string) => void;
 }
@@ -41,11 +46,12 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
   lang,
   merchant,
   orders,
+  categories = [],
   onRefresh,
   onNotify,
 }) => {
   const isAr = lang === 'ar';
-  const [merchantSubTab, setMerchantSubTab] = useState<'orders' | 'catalog'>('orders');
+  const [merchantSubTab, setMerchantSubTab] = useState<'orders' | 'excel' | 'catalog'>('orders');
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [quoteMap, setQuoteMap] = useState<Record<string, number>>({});
   const [rxNoteMap, setRxNoteMap] = useState<Record<string, string>>({});
@@ -59,6 +65,94 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
   const [rejectInvoiceOrder, setRejectInvoiceOrder] = useState<OrderRecord | null>(null);
   const [invoiceRejectReason, setInvoiceRejectReason] = useState('');
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+
+  // Live in-app + OS/Browser notification state for incoming merchant orders
+  const [incomingAlert, setIncomingAlert] = useState<{ title: string; body: string } | null>(null);
+  const [notifPermission, setNotifPermission] = useState<string>(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      return window.Notification.permission;
+    }
+    return 'unsupported';
+  });
+  const knownOrderIdsRef = useRef<Set<string>>(new Set());
+  const initializedOrdersRef = useRef(false);
+  const shownNotifIdsRef = useRef<Set<string>>(new Set());
+
+  const playOrderAlertSound = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+      const playTone = (freq: number, startOffset: number, duration: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now + startOffset);
+        gain.gain.setValueAtTime(0.001, now + startOffset);
+        gain.gain.exponentialRampToValueAtTime(0.22, now + startOffset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + startOffset + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + startOffset);
+        osc.stop(now + startOffset + duration + 0.02);
+      };
+      playTone(880, 0, 0.18);
+      playTone(1174.66, 0.2, 0.28);
+      setTimeout(() => ctx.close().catch(() => {}), 900);
+    } catch {
+      // Ignore autoplay restrictions before user interaction
+    }
+  };
+
+  const triggerMerchantAlert = (title: string, body: string, dedupeKey?: string) => {
+    if (dedupeKey) {
+      if (shownNotifIdsRef.current.has(dedupeKey)) return;
+      shownNotifIdsRef.current.add(dedupeKey);
+    }
+    setIncomingAlert({ title, body });
+    playOrderAlertSound();
+    onNotify(`${title} — ${body}`);
+
+    if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
+      try {
+        const osNotif = new window.Notification(title, {
+          body,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          tag: dedupeKey || `merchant_order_${Date.now()}`,
+          requireInteraction: true,
+        });
+        osNotif.onclick = () => {
+          window.focus();
+          setMerchantSubTab('orders');
+          setFilter('active');
+          osNotif.close();
+        };
+      } catch {
+        // Fallback already shown via in-app banner
+      }
+    }
+  };
+
+  const handleRequestBrowserNotifications = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      const perm = await window.Notification.requestPermission();
+      setNotifPermission(perm);
+      if (perm === 'granted') {
+        triggerMerchantAlert(
+          'تم تفعيل إشعارات الطلبات الجديدة ✓',
+          'ستصلك تنبيهات فورية بصوت وإشعار خارج المتصفح فور وصول أي طلب لمتجرك.',
+          `perm_ok_${Date.now()}`
+        );
+      } else {
+        onNotify(isAr ? 'يرجى السماح بالإشعارات من إعدادات المتصفح لتصلك تنبيهات الطلبات' : 'Please allow browser notifications');
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -74,7 +168,18 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
 
       try {
         ws = new WebSocket(wsUrl);
-        ws.onmessage = () => {
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(String(event.data || '{}'));
+            if (payload?.type === 'notification:new' && payload?.notification) {
+              const n = payload.notification;
+              const title = String(n.title_ar || 'طلب جديد لمتجرك');
+              const body = String(n.body_ar || 'وصلك طلب جديد — افتح لتجهيز أصناف متجرك الآن.');
+              triggerMerchantAlert(title, body, String(n.id || `${title}_${body}`));
+            }
+          } catch {
+            // ignore non-json frames
+          }
           onRefresh().catch(() => {});
         };
         ws.onclose = (ev) => {
@@ -99,6 +204,62 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
     };
   }, [merchant.id]);
 
+  const getMerchantOrderView = (order: OrderRecord) => {
+    const sections = Array.isArray(order.store_sections) ? order.store_sections : [];
+    const mySection = sections.find((s) => s.merchant_id === merchant.id) || null;
+    const rawItems: OrderItemRecord[] = mySection
+      ? Array.isArray(mySection.items)
+        ? mySection.items
+        : []
+      : Array.isArray(order.items)
+      ? order.items.filter((it) => {
+          const itemMerchantId = (it as OrderItemRecord & { merchant_id?: string }).merchant_id;
+          return !itemMerchantId || itemMerchantId === merchant.id;
+        })
+      : [];
+
+    const acceptedItemsSum = Number(
+      rawItems
+        .filter((it) => it.status !== 'rejected')
+        .reduce((sum, it) => sum + Number(it.total_price || 0), 0)
+        .toFixed(2)
+    );
+
+    const mySubtotal = mySection
+      ? rawItems.length > 0
+        ? acceptedItemsSum
+        : Number(mySection.subtotal || 0)
+      : rawItems.length > 0
+      ? acceptedItemsSum
+      : Number(order.subtotal || 0);
+
+    const orderClosed = order.status === 'delivered' || order.status === 'cancelled';
+    const myStatus = mySection
+      ? orderClosed
+        ? order.status
+        : mySection.prep_status
+      : ((order as OrderRecord & { my_section_status?: string }).my_section_status && !orderClosed
+          ? (order as OrderRecord & { my_section_status?: string }).my_section_status!
+          : order.status);
+
+    const isMultiStore =
+      Boolean((order as OrderRecord & { is_multi_store?: boolean }).is_multi_store) || sections.length > 1;
+
+    return {
+      mySection,
+      myItems: rawItems,
+      mySubtotal,
+      myStatus,
+      myChannel: mySection?.order_channel || order.order_channel,
+      myFreeText: mySection ? mySection.free_order_text : order.free_order_text,
+      myRxImage: mySection ? mySection.prescription_image_url : order.prescription_image_url,
+      myNotes: mySection?.pharmacist_notes ?? order.pharmacist_notes,
+      mySubNote: mySection?.substitution_note ?? order.substitution_note,
+      myRejectionReason: mySection?.rejection_reason ?? order.rejection_reason,
+      isMultiStore,
+    };
+  };
+
   const myOrders = useMemo(
     () =>
       orders.filter(
@@ -107,27 +268,55 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
     [orders, merchant.id]
   );
 
+  // Detect brand-new active orders even if a WS notification frame was missed
+  useEffect(() => {
+    const currentIds = new Set(myOrders.map((o) => o.id));
+    if (!initializedOrdersRef.current) {
+      knownOrderIdsRef.current = currentIds;
+      initializedOrdersRef.current = true;
+      return;
+    }
+    for (const o of myOrders) {
+      if (!knownOrderIdsRef.current.has(o.id)) {
+        const view = getMerchantOrderView(o);
+        if (['awaiting_quote', 'pending_merchant', 'preparing'].includes(view.myStatus)) {
+          triggerMerchantAlert(
+            `طلب جديد لمتجرك #${o.order_number}`,
+            view.myItems.length > 0
+              ? `وصلك طلب جديد (${view.myItems.length} صنف) بقيمة ${view.mySubtotal} ج.م من ${o.customer_name}.`
+              : `وصلك طلب جديد من ${o.customer_name} — راجعه وجهّزه الآن.`,
+            `order_arrival_${o.id}`
+          );
+        }
+      }
+    }
+    knownOrderIdsRef.current = currentIds;
+  }, [myOrders, merchant.id]);
+
   const filteredOrders = useMemo(() => {
     return myOrders.filter((o) => {
+      const { myStatus } = getMerchantOrderView(o);
       if (filter === 'all') return true;
       if (filter === 'active') {
-        return ['awaiting_quote', 'pending_merchant', 'preparing'].includes(o.status);
+        return ['awaiting_quote', 'pending_merchant', 'preparing'].includes(myStatus);
       }
       if (filter === 'ready') {
-        return ['ready_for_pickup', 'on_the_way'].includes(o.status);
+        return ['ready_for_pickup', 'on_the_way'].includes(myStatus);
       }
-      if (filter === 'delivered') return o.status === 'delivered';
-      if (filter === 'cancelled') return o.status === 'cancelled';
+      if (filter === 'delivered') return myStatus === 'delivered';
+      if (filter === 'cancelled') return myStatus === 'cancelled';
       return true;
     });
-  }, [myOrders, filter]);
+  }, [myOrders, filter, merchant.id]);
 
-  const activeCount = myOrders.filter((o) =>
-    ['awaiting_quote', 'pending_merchant', 'preparing'].includes(o.status)
-  ).length;
-  const readyCount = myOrders.filter((o) =>
-    ['ready_for_pickup', 'on_the_way'].includes(o.status)
-  ).length;
+  const activeCount = myOrders.filter((o) => {
+    const { myStatus } = getMerchantOrderView(o);
+    return ['awaiting_quote', 'pending_merchant', 'preparing'].includes(myStatus);
+  }).length;
+  const readyCount = myOrders.filter((o) => {
+    const { myStatus } = getMerchantOrderView(o);
+    return ['ready_for_pickup', 'on_the_way'].includes(myStatus);
+  }).length;
 
   const toggleItemReject = (orderId: string, itemId: string) => {
     setItemRejectState((prev) => {
@@ -217,7 +406,7 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
       setRejectInvoiceOrder(null);
       setInvoiceRejectReason('');
       await onRefresh();
-      onNotify(isAr ? `تم رفض وإلغاء الفاتورة #${ordNum} وإرسال السبب للعميل` : 'Invoice rejected');
+      onNotify(isAr ? `تم رفض وإلغاء طلب متجرك من الفاتورة #${ordNum} وإرسال السبب للعميل` : 'Invoice rejected');
     } catch (err) {
       onNotify((err as Error).message);
     } finally {
@@ -226,22 +415,32 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
   };
 
   const handleMarkOrderReady = async (order: OrderRecord) => {
+    const view = getMerchantOrderView(order);
+    if (['ready_for_pickup', 'on_the_way', 'delivered', 'cancelled'].includes(view.myStatus)) {
+      return;
+    }
     setBusyOrderId(order.id);
     try {
-      const subtotalVal = quoteMap[order.id] ?? order.subtotal;
-      const res = await api.merchantOrderAction(order.id, {
+      const payload: Record<string, unknown> = {
         action: 'ready',
         merchant_id: merchant.id,
-        subtotal: subtotalVal,
-        pharmacist_notes: rxNoteMap[order.id] ?? order.pharmacist_notes,
-        prescription_status: order.merchant_type === 'pharmacy' ? 'reviewed' : order.prescription_status,
+        pharmacist_notes: rxNoteMap[order.id] ?? view.myNotes,
+        prescription_status: merchant.merchant_type === 'pharmacy' ? 'reviewed' : order.prescription_status,
         assign_best_captain: true,
-      });
+      };
+      // Only send a merchant-entered quote for free-text / prescription orders with no catalog items.
+      if (view.myItems.length === 0) {
+        const quoteVal = quoteMap[order.id] ?? view.mySubtotal;
+        if (Number.isFinite(Number(quoteVal)) && Number(quoteVal) >= 0) {
+          payload.subtotal = Number(quoteVal);
+        }
+      }
+      const res = await api.merchantOrderAction(order.id, payload);
       await onRefresh();
       onNotify(
         res.assigned_captain
           ? isAr
-            ? `تم تأكيد أن الطلب #${order.order_number} جاهز وإسناده للطيار: ${res.assigned_captain}`
+            ? `تم تأكيد أن طلب متجرك #${order.order_number} جاهز وإسناده للطيار: ${res.assigned_captain}`
             : `Order ready & assigned to ${res.assigned_captain}`
           : isAr
           ? `تم تأكيد جاهزية طلب متجرك للطلب #${order.order_number} ✓ — سيتم إسناد الطيار فور جاهزية باقي المتاجر إذا كان الطلب مشتركًا`
@@ -255,24 +454,25 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
   };
 
   const renderOrderItems = (order: OrderRecord) => {
-    const items: OrderItemRecord[] = Array.isArray(order.items) ? order.items : [];
-    const canModify = !['delivered', 'cancelled', 'on_the_way'].includes(order.status);
+    const view = getMerchantOrderView(order);
+    const items = view.myItems;
+    const canModify = !['ready_for_pickup', 'delivered', 'cancelled', 'on_the_way'].includes(view.myStatus);
     const selectedMap = itemRejectState[order.id] || {};
     const selectedCount = Object.values(selectedMap).filter((v) => v.selected).length;
 
     if (items.length === 0) {
       return (
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
-          {order.prescription_image_url && (
+          {view.myRxImage && (
             <div className="flex items-start gap-3">
               <a
-                href={order.prescription_image_url}
+                href={view.myRxImage}
                 target="_blank"
                 rel="noreferrer"
                 className="shrink-0 border border-slate-200 rounded-lg overflow-hidden bg-white"
               >
                 <img
-                  src={order.prescription_image_url}
+                  src={view.myRxImage}
                   alt={order.order_number}
                   referrerPolicy="no-referrer"
                   className="w-20 h-20 object-cover"
@@ -282,8 +482,8 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
             </div>
           )}
           <p className="text-xs text-slate-800 leading-relaxed">
-            <strong>{order.order_channel === 'prescription' ? 'تفاصيل الروشتة:' : 'محتويات الطلب:'}</strong>{' '}
-            {order.free_order_text || 'طلب كتالوج مسعّر'}
+            <strong>{view.myChannel === 'prescription' ? 'تفاصيل الروشتة:' : 'محتويات طلب متجرك:'}</strong>{' '}
+            {view.myFreeText || 'طلب كتالوج مسعّر'}
           </p>
         </div>
       );
@@ -292,7 +492,7 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
     return (
       <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2.5">
         <div className="flex items-center justify-between text-xs font-bold text-slate-800">
-          <span>أصناف الفاتورة ({items.length})</span>
+          <span>أصناف متجرك فقط ({items.length})</span>
           {canModify && (
             <span className="text-[11px] font-normal text-slate-500">
               يمكنك رفض أي صنف غير متوفر مع كتابة السبب
@@ -387,9 +587,45 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
 
   return (
     <div className="space-y-5">
+      {/* Live In-App Incoming Order Alert Banner */}
+      {incomingAlert && (
+        <div className="bg-red-700 text-white rounded-2xl p-3.5 shadow-lg border border-red-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+              <BellRing className="w-5 h-5 text-white animate-bounce" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-black truncate">{incomingAlert.title}</p>
+              <p className="text-xs text-red-100 leading-snug">{incomingAlert.body}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setMerchantSubTab('orders');
+                setFilter('active');
+                setIncomingAlert(null);
+              }}
+              className="px-3 py-1.5 bg-white text-red-700 hover:bg-red-50 rounded-xl text-xs font-extrabold"
+            >
+              {isAr ? 'عرض الطلب' : 'View'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIncomingAlert(null)}
+              className="p-1.5 rounded-lg hover:bg-white/15 text-white"
+              aria-label="إغلاق التنبيه"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Merchant Portal Navigation Switcher */}
       <div className="bg-white border border-slate-200 rounded-2xl p-2 flex flex-wrap items-center justify-between gap-3 shadow-sm">
-        <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
           <button
             type="button"
             onClick={() => setMerchantSubTab('orders')}
@@ -409,24 +645,71 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
           </button>
           <button
             type="button"
+            onClick={() => setMerchantSubTab('excel')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-black transition-all cursor-pointer ${
+              merchantSubTab === 'excel'
+                ? 'bg-[#A92224] text-white shadow-sm'
+                : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200'
+            }`}
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>{isAr ? 'رفع ملف Excel للإدارة للاعتماد' : 'Upload Excel for Approval'}</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setMerchantSubTab('catalog')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
               merchantSubTab === 'catalog'
                 ? 'bg-slate-900 text-white shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
             <Package className="w-4 h-4" />
-            <span>{isAr ? 'إدارة المنتجات والأقسام (إضافة وتعديل)' : 'Products & Catalog'}</span>
+            <span>{isAr ? 'إدارة المنتجات والأقسام' : 'Products & Catalog'}</span>
           </button>
         </div>
 
-        <div className="text-xs text-slate-500 px-3 font-semibold">
-          {merchant.business_name_ar} · <span className="text-teal-700 font-bold">{merchant.branch_name}</span>
+        <div className="flex flex-wrap items-center gap-2 px-2">
+          {notifPermission !== 'unsupported' && (
+            <button
+              type="button"
+              onClick={handleRequestBrowserNotifications}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                notifPermission === 'granted'
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                  : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+              }`}
+              title={isAr ? 'تنبيهات فورية خارج المتصفح وداخله عند وصول طلب جديد' : 'Order notifications'}
+            >
+              {notifPermission === 'granted' ? (
+                <>
+                  <BellRing className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>{isAr ? 'إشعارات الطلبات مفعّلة ✓' : 'Alerts Active'}</span>
+                </>
+              ) : (
+                <>
+                  <Bell className="w-3.5 h-3.5 text-amber-700" />
+                  <span>{isAr ? 'تفعيل إشعارات الطلبات' : 'Enable Order Alerts'}</span>
+                </>
+              )}
+            </button>
+          )}
+          <div className="text-xs text-slate-500 px-1 font-semibold">
+            {merchant.business_name_ar} · <span className="text-teal-700 font-bold">{merchant.branch_name}</span>
+          </div>
         </div>
       </div>
 
-      {merchantSubTab === 'catalog' ? (
+      {merchantSubTab === 'excel' ? (
+        <MerchantMasterLinkPanel
+          merchantId={merchant.id}
+          categories={categories}
+          merchantProducts={[]}
+          initialSubTab="excel"
+          onRefresh={() => void onRefresh()}
+          onToast={onNotify}
+        />
+      ) : merchantSubTab === 'catalog' ? (
         <CatalogSection
           lang={lang}
           merchants={[merchant]}
@@ -449,8 +732,8 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                 </h2>
                 <p className="text-xs text-slate-500">
                   {isAr
-                    ? 'تظهر هنا فقط الطلبات الموجهة لمتجرك؛ يمكنك تأكيد جاهزية الطلب أو رفض أصناف محددة أو رفض الفاتورة مع ذكر السبب.'
-                    : 'Incoming orders for your store only.'}
+                    ? 'تظهر هنا منتجات متجرك فقط لكل طلب؛ وفي الطلبات المجمعة يتم عزل أصناف ومستحقات متجرك بالكامل.'
+                    : 'Only your store items and subtotal are shown for every order.'}
                 </p>
               </div>
             </div>
@@ -507,17 +790,19 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
       ) : (
         <div className="space-y-4">
           {filteredOrders.map((order) => {
-            const canAct = !['delivered', 'cancelled'].includes(order.status);
-            const isReadyOrFurther = ['ready_for_pickup', 'on_the_way', 'delivered'].includes(order.status);
-            const statusText = STATUS_AR[order.status] || order.status;
+            const view = getMerchantOrderView(order);
+            const isSectionClosed = ['delivered', 'cancelled'].includes(view.myStatus);
+            const isSectionReadyOrFurther = ['ready_for_pickup', 'on_the_way', 'delivered'].includes(view.myStatus);
+            const canAct = !isSectionClosed && !isSectionReadyOrFurther;
+            const statusText = STATUS_AR[view.myStatus] || view.myStatus;
 
             return (
               <div
                 key={order.id}
                 className={`bg-white border rounded-2xl p-4 sm:p-5 space-y-4 shadow-sm ${
-                  order.status === 'cancelled'
+                  view.myStatus === 'cancelled'
                     ? 'border-rose-200 bg-rose-50/20'
-                    : isReadyOrFurther
+                    : isSectionReadyOrFurther
                     ? 'border-teal-200'
                     : 'border-slate-200'
                 }`}
@@ -531,17 +816,22 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                       </span>
                       <span
                         className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${
-                          order.status === 'cancelled'
+                          view.myStatus === 'cancelled'
                             ? 'bg-rose-100 text-rose-800'
-                            : order.status === 'ready_for_pickup'
+                            : view.myStatus === 'ready_for_pickup'
                             ? 'bg-teal-100 text-teal-800'
-                            : order.status === 'delivered'
+                            : view.myStatus === 'delivered'
                             ? 'bg-emerald-100 text-emerald-800'
                             : 'bg-amber-100 text-amber-900'
                         }`}
                       >
                         {statusText}
                       </span>
+                      {view.isMultiStore && (
+                        <span className="px-2 py-0.5 bg-indigo-50 text-indigo-800 border border-indigo-200 rounded text-[11px] font-bold">
+                          طلب مشترك (منتجات متجرك فقط)
+                        </span>
+                      )}
                       {order.is_express && (
                         <span className="px-2 py-0.5 bg-orange-100 text-orange-800 rounded text-[11px] font-bold">
                           عاجل Express
@@ -579,11 +869,8 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                   </div>
 
                   <div className="text-end tabular-nums">
-                    <p className="text-xs text-slate-500">قيمة الأصناف</p>
-                    <p className="text-base font-bold text-slate-900">{order.subtotal} ج.م</p>
-                    <p className="text-[11px] text-slate-500">
-                      إجمالي الفاتورة بالعميل: {order.total_amount} ج.م
-                    </p>
+                    <p className="text-xs text-slate-500">قيمة أصناف متجرك</p>
+                    <p className="text-base font-bold text-slate-900">{view.mySubtotal} ج.م</p>
                   </div>
                 </div>
 
@@ -591,40 +878,40 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                 {renderOrderItems(order)}
 
                 {/* Cancellation / Partial Rejection Notes */}
-                {(order.rejection_reason || order.substitution_note) && (
+                {(view.myRejectionReason || view.mySubNote) && (
                   <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 flex items-start gap-2">
                     <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <div>
-                      <strong>{order.status === 'cancelled' ? 'سبب رفض الفاتورة:' : 'تحديث الأصناف:'}</strong>{' '}
-                      {order.rejection_reason || order.substitution_note}
+                      <strong>{view.myStatus === 'cancelled' ? 'سبب رفض الفاتورة:' : 'تحديث الأصناف:'}</strong>{' '}
+                      {view.myRejectionReason || view.mySubNote}
                     </div>
                   </div>
                 )}
 
                 {/* Quote field if awaiting_quote (Free text or Pharmacy Rx) */}
-                {canAct && order.status === 'awaiting_quote' && (
+                {canAct && view.myStatus === 'awaiting_quote' && view.myItems.length === 0 && (
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-amber-50/70 border border-amber-200 rounded-xl p-3">
                     <div>
                       <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                        سعر الأصناف بالـ ج.م *
+                        سعر أصناف متجرك بالـ ج.م *
                       </label>
                       <input
                         type="number"
                         min={0}
-                        value={quoteMap[order.id] ?? order.subtotal}
+                        value={quoteMap[order.id] ?? view.mySubtotal}
                         onChange={(e) => setQuoteMap({ ...quoteMap, [order.id]: Number(e.target.value) })}
                         className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-mono-num"
                       />
                     </div>
                     <div className="sm:col-span-2">
                       <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                        {order.merchant_type === 'pharmacy'
+                        {merchant.merchant_type === 'pharmacy'
                           ? 'ملاحظات الصيدلي / بديل مقترح (اختياري)'
                           : 'ملاحظات التجهيز (اختياري)'}
                       </label>
                       <input
                         type="text"
-                        value={rxNoteMap[order.id] ?? order.pharmacist_notes ?? ''}
+                        value={rxNoteMap[order.id] ?? view.myNotes ?? ''}
                         onChange={(e) => setRxNoteMap({ ...rxNoteMap, [order.id]: e.target.value })}
                         placeholder="أدخل أي ملاحظة للعميل..."
                         className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs"
@@ -634,37 +921,44 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                 )}
 
                 {/* Action Bar: "الطلب جاهز" & "رفض الفاتورة بالكامل" */}
-                {canAct && (
+                {!isSectionClosed && (
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
-                    <button
-                      type="button"
-                      disabled={busyOrderId === order.id}
-                      onClick={() => {
-                        setRejectInvoiceOrder(order);
-                        setInvoiceRejectReason('');
-                      }}
-                      className="px-4 py-2.5 border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
-                    >
-                      <Ban className="w-4 h-4" />
-                      <span>رفض الفاتورة بالكامل (مع السبب)</span>
-                    </button>
+                    {canAct ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={busyOrderId === order.id}
+                          onClick={() => {
+                            setRejectInvoiceOrder(order);
+                            setInvoiceRejectReason('');
+                          }}
+                          className="px-4 py-2.5 border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 rounded-xl text-xs font-bold inline-flex items-center gap-1.5"
+                        >
+                          <Ban className="w-4 h-4" />
+                          <span>رفض طلب متجري (مع السبب)</span>
+                        </button>
 
-                    {order.status !== 'ready_for_pickup' && order.status !== 'on_the_way' ? (
-                      <button
-                        type="button"
-                        disabled={busyOrderId === order.id}
-                        onClick={() => handleMarkOrderReady(order)}
-                        className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 text-white rounded-xl text-sm font-bold inline-flex items-center gap-2 shadow-sm min-h-[42px]"
-                      >
-                        <PackageCheck className="w-4 h-4" />
-                        <span>{busyOrderId === order.id ? 'جاري التأكيد...' : 'الطلب جاهز'}</span>
-                      </button>
+                        <button
+                          type="button"
+                          disabled={busyOrderId === order.id}
+                          onClick={() => handleMarkOrderReady(order)}
+                          className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 text-white rounded-xl text-sm font-bold inline-flex items-center gap-2 shadow-sm min-h-[42px]"
+                        >
+                          <PackageCheck className="w-4 h-4" />
+                          <span>{busyOrderId === order.id ? 'جاري التأكيد...' : 'الطلب جاهز'}</span>
+                        </button>
+                      </>
                     ) : (
-                      <div className="inline-flex items-center gap-2 px-3.5 py-2 bg-teal-50 border border-teal-200 rounded-xl text-xs font-bold text-teal-800">
-                        <CheckCircle2 className="w-4 h-4 text-teal-600" />
-                        <span>
-                          تم تأكيد جاهزية الطلب
-                          {order.captain_name ? ` · الطيار: ${order.captain_name}` : ' · بانتظار استلام الطيار'}
+                      <div className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 bg-teal-50 border border-teal-200 rounded-xl text-xs font-bold text-teal-800">
+                        <span className="inline-flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+                          <span>
+                            تم تأكيد تجهيز طلب متجرك ✓
+                            {order.captain_name ? ` · الطيار: ${order.captain_name}` : ' · بانتظار استلام الطيار'}
+                          </span>
+                        </span>
+                        <span className="text-[11px] font-mono-num text-teal-700 shrink-0">
+                          {view.mySubtotal} ج.م
                         </span>
                       </div>
                     )}

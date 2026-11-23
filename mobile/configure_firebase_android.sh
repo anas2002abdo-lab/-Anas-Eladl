@@ -398,7 +398,8 @@ if manifest_path.exists():
     expected_pkg = os.environ.get("EXPECTED_PKG", "").strip().lower()
     cwd_name = Path.cwd().name.lower()
     is_captain_app = "captain" in expected_pkg or "captain" in cwd_name
-    default_channel = "otlobha_dispatch_channel" if is_captain_app else "otlobha_orders_channel"
+    is_merchant_app = "merchant" in expected_pkg or "merchant" in cwd_name
+    default_channel = "otlobha_dispatch_channel" if (is_captain_app or is_merchant_app) else "otlobha_orders_channel"
 
     required_permissions = [
         "android.permission.INTERNET",
@@ -482,13 +483,35 @@ if manifest_path.exists():
 expected_pkg_raw = os.environ.get("EXPECTED_PKG", "").strip()
 cwd_name_lower = Path.cwd().name.lower()
 is_captain = "captain" in expected_pkg_raw.lower() or "captain" in cwd_name_lower
-app_role = "captain" if is_captain else "customer"
-default_channel_bg = "otlobha_dispatch_channel" if is_captain else "otlobha_admin_channel"
-access_token_key = "flutter.otlobha_cap_access_token" if is_captain else "flutter.otlobha_cust_access_token"
-refresh_token_key = "flutter.otlobha_cap_refresh_token" if is_captain else "flutter.otlobha_cust_refresh_token"
-sound_pref_key = "flutter.otlobha_captain_push_sound_v1" if is_captain else "flutter.otlobha_customer_push_sound_v1"
-vib_pref_key = "flutter.otlobha_captain_push_vibration_v1" if is_captain else "flutter.otlobha_customer_push_vibration_v1"
-default_app_title = "اطلبها كابتن" if is_captain else "اطلبها"
+is_merchant = "merchant" in expected_pkg_raw.lower() or "merchant" in cwd_name_lower
+app_role = "captain" if is_captain else ("merchant" if is_merchant else "customer")
+default_channel_bg = "otlobha_dispatch_channel" if (is_captain or is_merchant) else "otlobha_admin_channel"
+access_token_key = (
+    "flutter.otlobha_cap_access_token"
+    if is_captain
+    else ("flutter.otlobha_merchant_access_token" if is_merchant else "flutter.otlobha_cust_access_token")
+)
+refresh_token_key = (
+    "flutter.otlobha_cap_refresh_token"
+    if is_captain
+    else ("flutter.otlobha_merchant_refresh_token" if is_merchant else "flutter.otlobha_cust_refresh_token")
+)
+sound_pref_key = (
+    "flutter.otlobha_captain_push_sound_v1"
+    if is_captain
+    else ("flutter.otlobha_merchant_push_sound_v1" if is_merchant else "flutter.otlobha_customer_push_sound_v1")
+)
+vib_pref_key = (
+    "flutter.otlobha_captain_push_vibration_v1"
+    if is_captain
+    else ("flutter.otlobha_merchant_push_vibration_v1" if is_merchant else "flutter.otlobha_customer_push_vibration_v1")
+)
+default_app_title = "اطلبها كابتن" if is_captain else ("اطلبها للتجار" if is_merchant else "اطلبها")
+fallback_pkg = (
+    "com.otlobha.otlobha_captain"
+    if is_captain
+    else ("com.otlobha.otlobha_merchant" if is_merchant else "com.otlobha.otlobha_customer")
+)
 
 kotlin_root = Path("android/app/src/main/kotlin")
 existing_mains = list(kotlin_root.rglob("MainActivity.kt")) if kotlin_root.exists() else []
@@ -496,10 +519,10 @@ if existing_mains:
     main_kt_path = existing_mains[0]
     m_kt_text = main_kt_path.read_text(encoding="utf-8")
     pkg_match = re.search(r"^\s*package\s+([A-Za-z0-9_.]+)", m_kt_text, flags=re.MULTILINE)
-    pkg_name = pkg_match.group(1) if pkg_match else (expected_pkg_raw or ("com.otlobha.otlobha_captain" if is_captain else "com.otlobha.otlobha_customer"))
+    pkg_name = pkg_match.group(1) if pkg_match else (expected_pkg_raw or fallback_pkg)
     pkg_dir = main_kt_path.parent
 else:
-    pkg_name = expected_pkg_raw or ("com.otlobha.otlobha_captain" if is_captain else "com.otlobha.otlobha_customer")
+    pkg_name = expected_pkg_raw or fallback_pkg
     pkg_dir = kotlin_root / Path(*pkg_name.split("."))
     pkg_dir.mkdir(parents=True, exist_ok=True)
     main_kt_path = pkg_dir / "MainActivity.kt"

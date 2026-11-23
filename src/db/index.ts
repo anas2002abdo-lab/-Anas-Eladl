@@ -28,14 +28,29 @@ export const createPool = (): Pool => {
       // - 20s idle timeout retires sockets before Cloud SQL suspends them
       // - TCP keepAlive detects half-open sockets early
       connectionTimeoutMillis: 30000,
-      idleTimeoutMillis: 20000,
+      idleTimeoutMillis: 10000,
       keepAlive: true,
-      keepAliveInitialDelayMillis: 10000,
+      keepAliveInitialDelayMillis: 5000,
       allowExitOnIdle: false,
     });
 
     global._postgresPool.on('error', (err) => {
-      console.error('[CloudSQL] Unexpected error on idle SQL pool client:', err instanceof Error ? err.message : err);
+      const code = String((err as { code?: string })?.code || '');
+      const msg = err instanceof Error ? err.message : String(err || '');
+      const lower = msg.toLowerCase();
+      const isExpectedIdleDrop =
+        ['57P01', '57P02', '57P03', '08000', '08003', '08006', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(code) ||
+        lower.includes('connection terminated') ||
+        lower.includes('terminating connection') ||
+        lower.includes('connection ended unexpectedly') ||
+        lower.includes('econnreset') ||
+        lower.includes('socket hang up');
+
+      if (isExpectedIdleDrop) {
+        console.warn('[CloudSQL] Idle pool connection recycled after server sleep/reset:', msg);
+        return;
+      }
+      console.error('[CloudSQL] Unexpected error on idle SQL pool client:', msg);
     });
   }
   return global._postgresPool;

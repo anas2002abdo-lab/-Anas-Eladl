@@ -1,15 +1,18 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Barcode,
   CheckCircle2,
   Eye,
   FileSpreadsheet,
+  FolderTree,
   GitCompare,
   GitMerge,
   History,
+  Image as ImageIcon,
   Layers,
   Link2,
+  Loader2,
   Package,
   Plus,
   RefreshCw,
@@ -89,6 +92,9 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
   const [reqFilter, setReqFilter] = useState<'pending' | 'all' | 'approved_new' | 'linked_existing' | 'rejected'>('pending');
   const [requests, setRequests] = useState<ProductMatchingRequestRecord[]>([]);
   const [linkTargetByReq, setLinkTargetByReq] = useState<Record<string, string>>({});
+  const [reqCategoryFilter, setReqCategoryFilter] = useState<string>('ALL');
+  const [reqBatchFilter, setReqBatchFilter] = useState<string>('ALL');
+  const [bulkReviewing, setBulkReviewing] = useState(false);
 
   // Duplicates tab
   const [duplicates, setDuplicates] = useState<any[]>([]);
@@ -259,7 +265,7 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
 
   const handleReviewRequest = async (
     reqId: string,
-    decision: 'approve_new' | 'link_existing' | 'reject',
+    decision: 'approve_smart' | 'approve_new' | 'link_existing' | 'reject',
     targetMasterId?: string | null
   ) => {
     try {
@@ -269,10 +275,12 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
         auto_create_listing: true,
       });
       onToast(
-        decision === 'approve_new'
-          ? 'تم اعتماد المنتج المركزي الجديد وربط عرض التاجر تلقائيًا'
+        decision === 'approve_smart'
+          ? 'تمت الموافقة ونشر المنتج في المنصة وفقًا لقسمه بنجاح'
+          : decision === 'approve_new'
+          ? 'تم اعتماد المنتج المركزي الجديد ونشره بالقسم بنجاح'
           : decision === 'link_existing'
-          ? 'تم ربط طلب التاجر بالمنتج المركزي الموجود'
+          ? 'تم ربط طلب التاجر بالمنتج المركزي ونشره بالقسم بنجاح'
           : 'تم رفض الطلب'
       );
       await Promise.all([loadRequests(), loadMasters()]);
@@ -281,6 +289,118 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
       onToast((err as Error).message);
     }
   };
+
+  const handleBulkReview = async (payload: {
+    request_ids?: string[];
+    batch_id?: string;
+    category_path?: string;
+    decision: 'approve_smart' | 'approve_new' | 'link_existing' | 'reject';
+    label: string;
+  }) => {
+    setBulkReviewing(true);
+    try {
+      const res = await api.bulkReviewAdminMatchingRequests({
+        request_ids: payload.request_ids,
+        batch_id: payload.batch_id,
+        category_path: payload.category_path,
+        decision: payload.decision,
+      });
+      if (payload.decision === 'reject') {
+        onToast(`تم رفض ${res.rejected_count} طلب من ${payload.label}`);
+      } else {
+        onToast(
+          `تمت الموافقة والنشر بالمنصة (${res.processed_count} منتج: ${res.linked_existing_count} مرتبط بالمركزي، ${res.approved_new_count} مركزي جديد${
+            res.categories_created_count > 0 ? `، ${res.categories_created_count} قسم جديد` : ''
+          })`
+        );
+      }
+      setReqCategoryFilter('ALL');
+      setReqBatchFilter('ALL');
+      await Promise.all([loadRequests(), loadMasters()]);
+      onRefresh();
+    } catch (err) {
+      onToast((err as Error).message);
+    } finally {
+      setBulkReviewing(false);
+    }
+  };
+
+  const getReqCategoryLabel = (r: ProductMatchingRequestRecord) => {
+    const raw = String(
+      r.resolved_category_path || r.category_path || r.category_name || r.suggested_master_category_name || ''
+    )
+      .replace(/;+\s*$/g, '')
+      .trim();
+    return raw || 'عام';
+  };
+
+  const pendingBatches = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        batch_id: string;
+        file_name: string;
+        merchant_name: string;
+        count: number;
+        enriched_count: number;
+        categories: Map<string, number>;
+      }
+    >();
+    for (const r of requests) {
+      if (r.status !== 'pending' || !r.batch_id) continue;
+      let entry = map.get(r.batch_id);
+      if (!entry) {
+        entry = {
+          batch_id: r.batch_id,
+          file_name: r.source_file_name || 'ملف Excel',
+          merchant_name: r.merchant_name || r.merchant_id,
+          count: 0,
+          enriched_count: 0,
+          categories: new Map(),
+        };
+        map.set(r.batch_id, entry);
+      }
+      entry.count++;
+      if (r.enriched_from_master || r.suggested_master_id) entry.enriched_count++;
+      const catLabel = getReqCategoryLabel(r);
+      entry.categories.set(catLabel, (entry.categories.get(catLabel) || 0) + 1);
+    }
+    return Array.from(map.values());
+  }, [requests]);
+
+  const requestCategoryBreakdown = useMemo(() => {
+    const map = new Map<string, { label: string; rawPath: string; count: number; pendingIds: string[] }>();
+    for (const r of requests) {
+      if (reqBatchFilter !== 'ALL' && r.batch_id !== reqBatchFilter) continue;
+      const label = getReqCategoryLabel(r);
+      const existing = map.get(label);
+      if (existing) {
+        existing.count++;
+        if (r.status === 'pending') existing.pendingIds.push(r.id);
+      } else {
+        map.set(label, {
+          label,
+          rawPath: r.category_path || label,
+          count: 1,
+          pendingIds: r.status === 'pending' ? [r.id] : [],
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+  }, [requests, reqBatchFilter]);
+
+  const visibleRequests = useMemo(() => {
+    return requests.filter((r) => {
+      if (reqBatchFilter !== 'ALL' && r.batch_id !== reqBatchFilter) return false;
+      if (reqCategoryFilter !== 'ALL' && getReqCategoryLabel(r) !== reqCategoryFilter) return false;
+      return true;
+    });
+  }, [requests, reqBatchFilter, reqCategoryFilter]);
+
+  const visiblePendingIds = useMemo(
+    () => visibleRequests.filter((r) => r.status === 'pending').map((r) => r.id),
+    [visibleRequests]
+  );
 
   const handleMergeMasters = async (sourceId: string, targetId: string) => {
     if (!sourceId || !targetId || sourceId === targetId) {
@@ -657,114 +777,327 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
         </div>
       )}
 
-      {/* TAB 2: MERCHANT MATCHING REQUESTS */}
+      {/* TAB 2: MERCHANT MATCHING & EXCEL APPROVAL REQUESTS */}
       {tab === 'requests' && (
         <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            {[
-              { id: 'pending', label: 'قيد المراجعة' },
-              { id: 'approved_new', label: 'تم اعتمادها كجديدة' },
-              { id: 'linked_existing', label: 'تم ربطها بموجود' },
-              { id: 'rejected', label: 'مرفوضة' },
-              { id: 'all', label: 'الكل' },
-            ].map((f) => (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { id: 'pending', label: 'قيد الموافقة' },
+                { id: 'approved_new', label: 'تم اعتمادها كجديدة' },
+                { id: 'linked_existing', label: 'تم ربطها بالمركزي' },
+                { id: 'rejected', label: 'مرفوضة' },
+                { id: 'all', label: 'الكل' },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => {
+                    setReqFilter(f.id as any);
+                    setReqCategoryFilter('ALL');
+                    setReqBatchFilter('ALL');
+                  }}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold cursor-pointer ${
+                    reqFilter === f.id ? 'bg-[#A92224] text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {visiblePendingIds.length > 0 && (
               <button
-                key={f.id}
-                onClick={() => setReqFilter(f.id as any)}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold cursor-pointer ${
-                  reqFilter === f.id ? 'bg-[#A92224] text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
+                type="button"
+                disabled={bulkReviewing}
+                onClick={() =>
+                  void handleBulkReview({
+                    request_ids: visiblePendingIds,
+                    decision: 'approve_smart',
+                    label: reqCategoryFilter !== 'ALL' ? `قسم ${reqCategoryFilter}` : 'جميع الطلبات المعروضة',
+                  })
+                }
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
               >
-                {f.label}
+                {bulkReviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                {reqCategoryFilter !== 'ALL'
+                  ? `موافقة ونشر قسم «${reqCategoryFilter}» بالكامل (${visiblePendingIds.length})`
+                  : `موافقة ونشر الكل بالمنصة حسب الأقسام (${visiblePendingIds.length})`}
               </button>
-            ))}
+            )}
           </div>
 
-          {requests.length === 0 ? (
+          {/* Excel Batches Pending Approval */}
+          {reqFilter === 'pending' && pendingBatches.length > 0 && (
+            <div className="space-y-2.5">
+              <div className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                <FileSpreadsheet className="w-4 h-4 text-[#A92224]" />
+                ملفات Excel مرفوعة من التجار بانتظار موافقة الإدارة:
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {pendingBatches.map((batch) => {
+                  const isFiltered = reqBatchFilter === batch.batch_id;
+                  return (
+                    <div
+                      key={batch.batch_id}
+                      className={`rounded-2xl border-2 p-4 space-y-3 transition ${
+                        isFiltered ? 'border-[#A92224] bg-red-50/40' : 'border-amber-200 bg-amber-50/50'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <div className="font-black text-slate-900 text-sm flex items-center gap-1.5">
+                            <FileSpreadsheet className="w-4 h-4 text-[#A92224]" />
+                            {batch.file_name}
+                          </div>
+                          <div className="text-xs text-slate-600 mt-0.5">
+                            التاجر: <b>{batch.merchant_name}</b> · <b>{batch.count}</b> منتج ·{' '}
+                            <span className="text-emerald-700 font-bold">{batch.enriched_count} مطابق ومُستكمل من المركزي</span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReqBatchFilter(isFiltered ? 'ALL' : batch.batch_id);
+                            setReqCategoryFilter('ALL');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-[11px] font-bold text-slate-700 cursor-pointer"
+                        >
+                          {isFiltered ? 'إظهار الكل' : 'عرض منتجات الملف'}
+                        </button>
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5">
+                        {Array.from(batch.categories.entries()).map(([cat, cnt]) => (
+                          <button
+                            key={cat}
+                            type="button"
+                            onClick={() => {
+                              setReqBatchFilter(batch.batch_id);
+                              setReqCategoryFilter(cat);
+                            }}
+                            className="px-2 py-0.5 rounded-lg bg-white border border-amber-200 text-[11px] font-bold text-slate-800 hover:border-[#A92224] cursor-pointer"
+                          >
+                            {cat} ({cnt})
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          disabled={bulkReviewing}
+                          onClick={() =>
+                            void handleBulkReview({
+                              batch_id: batch.batch_id,
+                              decision: 'approve_smart',
+                              label: batch.file_name,
+                            })
+                          }
+                          className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                          موافقة ونشر الدفعة كاملة حسب الأقسام ({batch.count})
+                        </button>
+                        <button
+                          type="button"
+                          disabled={bulkReviewing}
+                          onClick={() =>
+                            void handleBulkReview({
+                              batch_id: batch.batch_id,
+                              decision: 'reject',
+                              label: batch.file_name,
+                            })
+                          }
+                          className="px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <XCircle className="w-3.5 h-3.5" />
+                          رفض الدفعة
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Category Filter Chips */}
+          {requestCategoryBreakdown.length > 0 && (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+              <div className="text-[11px] font-black text-slate-700 flex items-center gap-1.5">
+                <FolderTree className="w-3.5 h-3.5 text-[#A92224]" />
+                تصفية ومراجعة حسب القسم:
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setReqCategoryFilter('ALL')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold border cursor-pointer ${
+                    reqCategoryFilter === 'ALL'
+                      ? 'bg-[#A92224] text-white border-[#A92224]'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  كل الأقسام ({requests.filter((r) => reqBatchFilter === 'ALL' || r.batch_id === reqBatchFilter).length})
+                </button>
+                {requestCategoryBreakdown.map((cat) => (
+                  <button
+                    key={cat.label}
+                    type="button"
+                    onClick={() => setReqCategoryFilter(cat.label)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border cursor-pointer ${
+                      reqCategoryFilter === cat.label
+                        ? 'bg-[#A92224] text-white border-[#A92224]'
+                        : 'bg-white text-slate-800 border-slate-200 hover:border-red-300'
+                    }`}
+                  >
+                    {cat.label} ({cat.count})
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {visibleRequests.length === 0 ? (
             <div className="text-center py-10 text-slate-500 text-sm font-bold">
               لا توجد طلبات منتجات جديدة في هذه الحالة حاليًا.
             </div>
           ) : (
             <div className="space-y-3">
-              {requests.map((r) => (
-                <div key={r.id} className="rounded-2xl border border-slate-200 p-4 bg-slate-50/60 space-y-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-black text-slate-900 text-base">{r.product_name_ar}</span>
-                        {r.size_label && (
-                          <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 text-xs font-bold">
-                            {r.size_label}
-                          </span>
+              {visibleRequests.map((r) => {
+                const thumb = r.image_url || r.suggested_master_image;
+                const catLabel = getReqCategoryLabel(r);
+                return (
+                  <div key={r.id} className="rounded-2xl border border-slate-200 p-4 bg-slate-50/60 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="flex items-start gap-3">
+                        {thumb ? (
+                          <img
+                            src={thumb}
+                            alt={r.product_name_ar}
+                            className="w-14 h-14 rounded-2xl object-cover border border-slate-200 bg-white shrink-0"
+                          />
+                        ) : (
+                          <div className="w-14 h-14 rounded-2xl bg-slate-200/70 flex items-center justify-center text-slate-400 shrink-0">
+                            <ImageIcon className="w-5 h-5" />
+                          </div>
                         )}
-                        <span className="px-2 py-0.5 rounded-lg bg-slate-200 text-slate-700 text-xs font-bold">
-                          {r.status}
-                        </span>
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-black text-slate-900 text-base">{r.product_name_ar}</span>
+                            {r.size_label && (
+                              <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 text-xs font-bold">
+                                {r.size_label}
+                              </span>
+                            )}
+                            <span className="px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-900 text-xs font-bold inline-flex items-center gap-1">
+                              <FolderTree className="w-3 h-3" />
+                              {catLabel}
+                            </span>
+                            {r.source_file_name && (
+                              <span className="px-2 py-0.5 rounded-lg bg-slate-200/80 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1">
+                                <FileSpreadsheet className="w-3 h-3" />
+                                {r.source_file_name}
+                              </span>
+                            )}
+                            {Boolean(r.enriched_from_master) && (
+                              <span className="px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 text-[11px] font-bold">
+                                مُستكمل من الكتالوج المركزي
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-600 mt-1 flex flex-wrap gap-3">
+                            <span>المتجر: <b>{r.merchant_name || r.merchant_id}</b></span>
+                            <span>العلامة: <b>{r.brand || '—'}</b></span>
+                            <span>الباركود: <b className="font-mono">{r.barcode || '—'}</b></span>
+                            <span>السعر المقترح: <b className="text-[#A92224]">{r.proposed_price} ج.م</b></span>
+                            <span>المخزون: <b>{r.proposed_stock}</b></span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-xs text-slate-600 mt-1 flex flex-wrap gap-3">
-                        <span>المتجر: <b>{r.merchant_name || r.merchant_id}</b></span>
-                        <span>العلامة: <b>{r.brand || '—'}</b></span>
-                        <span>الباركود: <b className="font-mono">{r.barcode || '—'}</b></span>
-                        <span>السعر المقترح: <b className="text-[#A92224]">{r.proposed_price} ج.م</b></span>
-                        <span>المخزون: <b>{r.proposed_stock}</b></span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {r.suggested_master_id && (
-                    <div className="rounded-xl bg-amber-50 border border-amber-200 p-2.5 text-xs text-amber-900 flex items-center justify-between gap-2">
-                      <span>
-                        <Sparkles className="w-3.5 h-3.5 inline ml-1" />
-                        اقتراح المطابقة الذكية: <b>{r.suggested_master_name}</b> ({r.suggested_master_size || 'نفس المواصفات'}) · درجة الثقة: <b>{r.match_confidence}</b>
+                      <span
+                        className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                          r.status === 'pending'
+                            ? 'bg-amber-100 text-amber-800'
+                            : r.status === 'rejected'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-emerald-100 text-emerald-700'
+                        }`}
+                      >
+                        {r.status === 'pending'
+                          ? 'قيد الموافقة'
+                          : r.status === 'approved_new'
+                          ? 'تم اعتماده ونشره ✓'
+                          : r.status === 'linked_existing'
+                          ? 'تم ربطه ونشره ✓'
+                          : 'مرفوض'}
                       </span>
                     </div>
-                  )}
 
-                  {r.status === 'pending' && (
-                    <div className="flex flex-wrap items-center gap-2 pt-1">
-                      <button
-                        onClick={() => void handleReviewRequest(r.id, 'approve_new')}
-                        className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <CheckCircle2 className="w-4 h-4" />
-                        اعتماد كمنتج مركزي جديد + ربط المتجر
-                      </button>
+                    {r.suggested_master_id && (
+                      <div className="rounded-xl bg-amber-50 border border-amber-200 p-2.5 text-xs text-amber-900 flex items-center justify-between gap-2">
+                        <span>
+                          <Sparkles className="w-3.5 h-3.5 inline ml-1" />
+                          مطابقة الكتالوج المركزي: <b>{r.suggested_master_name}</b> ({r.suggested_master_size || 'نفس المواصفات'}) · درجة الثقة: <b>{r.match_confidence}%</b>
+                        </span>
+                      </div>
+                    )}
 
-                      <div className="flex items-center gap-1.5">
-                        <select
-                          value={linkTargetByReq[r.id] || r.suggested_master_id || ''}
-                          onChange={(e) => setLinkTargetByReq((prev) => ({ ...prev, [r.id]: e.target.value }))}
-                          className="px-2.5 py-2 rounded-xl border border-slate-300 text-xs bg-white"
-                        >
-                          <option value="">اختر منتجًا مركزيًا للربط...</option>
-                          {masters.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.canonical_name_ar} {m.size_label ? `(${m.size_label})` : ''}
-                            </option>
-                          ))}
-                        </select>
+                    {r.status === 'pending' && (
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
                         <button
-                          onClick={() =>
-                            void handleReviewRequest(r.id, 'link_existing', linkTargetByReq[r.id] || r.suggested_master_id)
-                          }
-                          className="px-3 py-2 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                          onClick={() => void handleReviewRequest(r.id, 'approve_smart', r.suggested_master_id)}
+                          className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer"
                         >
-                          <Link2 className="w-3.5 h-3.5" />
-                          ربط بموجود
+                          <CheckCircle2 className="w-4 h-4" />
+                          {r.suggested_master_id
+                            ? 'موافقة ونشر بالقسم (ربط تلقائي بالمركزي)'
+                            : 'موافقة ونشر بالقسم (إضافة للمركزي)'}
+                        </button>
+
+                        <button
+                          onClick={() => void handleReviewRequest(r.id, 'approve_new')}
+                          className="px-3 py-2 rounded-xl bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-800 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          اعتماد كمنتج جديد منفصل
+                        </button>
+
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={linkTargetByReq[r.id] || r.suggested_master_id || ''}
+                            onChange={(e) => setLinkTargetByReq((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                            className="px-2.5 py-2 rounded-xl border border-slate-300 text-xs bg-white max-w-[220px]"
+                          >
+                            <option value="">اختر منتجًا مركزيًا للربط...</option>
+                            {masters.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.canonical_name_ar} {m.size_label ? `(${m.size_label})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() =>
+                              void handleReviewRequest(r.id, 'link_existing', linkTargetByReq[r.id] || r.suggested_master_id)
+                            }
+                            className="px-3 py-2 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Link2 className="w-3.5 h-3.5" />
+                            ربط بموجود
+                          </button>
+                        </div>
+
+                        <button
+                          onClick={() => void handleReviewRequest(r.id, 'reject')}
+                          className="px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <XCircle className="w-3.5 h-3.5" />
+                          رفض
                         </button>
                       </div>
-
-                      <button
-                        onClick={() => void handleReviewRequest(r.id, 'reject')}
-                        className="px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        <XCircle className="w-3.5 h-3.5" />
-                        رفض
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

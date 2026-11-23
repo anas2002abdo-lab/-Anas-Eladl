@@ -8,6 +8,7 @@ import {
   Clock,
   Eye,
   FileCheck2,
+  FileSpreadsheet,
   Mail,
   MapPin,
   MessageSquare,
@@ -28,11 +29,13 @@ import {
   isStorePrepared,
 } from '../lib/orderBundles.ts';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
+import { MerchantMasterLinkPanel } from './MerchantMasterLinkPanel.tsx';
 import { OrderChatPage } from './OrderChatPage.tsx';
 import { TripChatPage } from './TripChatPage.tsx';
 import type {
   AdminMerchantDetail,
   CaptainRecord,
+  CategoryRecord,
   Language,
   MerchantRecord,
   OrderRecord,
@@ -48,6 +51,7 @@ interface Props {
   orders: OrderRecord[];
   zones: ServiceZone[];
   captains?: CaptainRecord[];
+  categories?: CategoryRecord[];
   onRefresh: () => Promise<void>;
   onNotify: (msg: string) => void;
 }
@@ -92,10 +96,13 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
   orders,
   zones,
   captains = [],
+  categories = [],
   onRefresh,
   onNotify,
 }) => {
   const isAr = lang === 'ar';
+  const [showMerchantExcelPanel, setShowMerchantExcelPanel] = useState(false);
+  const [excelMerchantId, setExcelMerchantId] = useState<string>(merchants[0]?.id || '');
   const [quoteMap, setQuoteMap] = useState<Record<string, number>>({});
   const [rxNoteMap, setRxNoteMap] = useState<Record<string, string>>({});
   const [subNoteMap, setSubNoteMap] = useState<Record<string, string>>({});
@@ -1131,10 +1138,58 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
                   : 'Click any merchant row to inspect complete profile, GPS location, wallet, and orders.'}
               </p>
             </div>
-            <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full">
-              {merchants.length} {isAr ? 'تاجر / صيدلية' : 'Merchants'}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              {merchants.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!excelMerchantId && merchants[0]?.id) setExcelMerchantId(merchants[0].id);
+                    setShowMerchantExcelPanel((v) => !v);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>
+                    {showMerchantExcelPanel
+                      ? 'إغلاق لوحة رفع Excel للتاجر'
+                      : 'رفع ملف Excel لتاجر للمراجعة والاعتماد'}
+                  </span>
+                </button>
+              )}
+              <span className="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-full">
+                {merchants.length} {isAr ? 'تاجر / صيدلية' : 'Merchants'}
+              </span>
+            </div>
           </div>
+
+          {showMerchantExcelPanel && merchants.length > 0 && (
+            <div className="mb-4 space-y-3 rounded-2xl border-2 border-red-200 bg-red-50/30 p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-black text-slate-900">
+                  اختر التاجر الذي سيتم رفع ملف Excel باسمه وتحويله للإدارة للمراجعة والاعتماد:
+                </div>
+                <select
+                  value={excelMerchantId || merchants[0]?.id || ''}
+                  onChange={(e) => setExcelMerchantId(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-900 min-w-[220px]"
+                >
+                  {merchants.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.business_name_ar} ({m.zone_name})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <MerchantMasterLinkPanel
+                merchantId={excelMerchantId || merchants[0].id}
+                categories={categories}
+                merchantProducts={[]}
+                initialSubTab="excel"
+                onRefresh={() => void onRefresh()}
+                onToast={onNotify}
+              />
+            </div>
+          )}
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-200 text-xs text-slate-500">

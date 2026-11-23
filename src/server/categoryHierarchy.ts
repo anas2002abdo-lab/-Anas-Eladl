@@ -28,19 +28,24 @@ function cleanDisplaySegment(input: string): string {
 export function parseCategoryHierarchyPath(raw: string): string[] {
   const cleaned = String(raw || '')
     .replace(/\u00A0/g, ' ')
+    .replace(/&gt;/gi, '>')
+    .replace(/&lt;/gi, '<')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
     .trim();
   if (!cleaned) return [];
 
   // Take first non-empty semicolon-delimited path if multiple paths were pasted in one cell
   const pathParts = cleaned
-    .split(/[;؛]+/)
+    .split(/[;؛\r\n]+/)
     .map((p) => p.trim())
     .filter(Boolean);
   const primaryPath = pathParts[0] || '';
   if (!primaryPath) return [];
 
   return primaryPath
-    .split(/\s*(?:>|»|›|\/|\\|<-|->)\s*/)
+    .split(/\s*(?:>|»|›|\||←|→|\/|\\|<-|->)\s*/)
     .map(cleanDisplaySegment)
     .filter(Boolean);
 }

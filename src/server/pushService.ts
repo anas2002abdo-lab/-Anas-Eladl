@@ -10,7 +10,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
 import { db, uid } from './db.ts';
 
-export type PushUserRole = 'customer' | 'captain';
+export type PushUserRole = 'customer' | 'captain' | 'merchant';
 
 export type PushChannelId =
   | 'otlobha_orders_channel'
@@ -258,6 +258,7 @@ export function getFcmStatus(): {
     total: number;
     customer: number;
     captain: number;
+    merchant: number;
   };
 } {
   const app = ensureFirebaseAdmin();
@@ -274,13 +275,18 @@ export function getFcmStatus(): {
       .prepare("SELECT COUNT(*) as c FROM push_device_tokens WHERE is_active = 1 AND user_role = 'captain'")
       .get() as { c: number }
   ).c;
+  const merchant = (
+    db
+      .prepare("SELECT COUNT(*) as c FROM push_device_tokens WHERE is_active = 1 AND user_role = 'merchant'")
+      .get() as { c: number }
+  ).c;
 
   return {
     configured: Boolean(app || customTransportForTests),
     source: customTransportForTests ? 'test_transport' : initSource,
     project_id: initProjectId,
     last_error: lastFcmError,
-    registered_devices: { total, customer, captain },
+    registered_devices: { total, customer, captain, merchant },
   };
 }
 
@@ -290,7 +296,7 @@ export function resolveChannelId(category?: string, deepLink?: string, targetApp
   if (dl.includes('chat')) return 'otlobha_chat_channel';
   if (cat === 'promo' || dl === 'offers' || dl === 'promo') return 'otlobha_admin_channel';
   if (
-    targetApp === 'captain' &&
+    (targetApp === 'captain' || targetApp === 'merchant') &&
     (cat === 'operational' || dl === 'orders' || dl === 'order' || dl === 'trip' || dl === 'rides' || dl === 'parcels')
   ) {
     return 'otlobha_dispatch_channel';
@@ -401,7 +407,8 @@ export function registerGuestDeviceToken(params: {
   userRole?: PushUserRole;
 }): { id: string; user_id: string; user_role: PushUserRole; device_id: string | null; active_devices: number } {
   const cleanDeviceId = String(params.deviceId || '').trim().slice(0, 100);
-  const role: PushUserRole = params.userRole === 'captain' ? 'captain' : 'customer';
+  const role: PushUserRole =
+    params.userRole === 'captain' ? 'captain' : params.userRole === 'merchant' ? 'merchant' : 'customer';
   const existing = db
     .prepare('SELECT user_id, user_role FROM push_device_tokens WHERE fcm_token = ? LIMIT 1')
     .get(String(params.fcmToken || '').trim()) as { user_id?: string; user_role?: PushUserRole } | undefined;
@@ -474,7 +481,13 @@ export function getActiveTokensForAudience(params: {
 
   if (recipientId) {
     const roles: PushUserRole[] =
-      app === 'captain' ? ['captain'] : app === 'customer' ? ['customer'] : ['customer', 'captain'];
+      app === 'captain'
+        ? ['captain']
+        : app === 'merchant'
+        ? ['merchant']
+        : app === 'customer'
+        ? ['customer']
+        : ['customer', 'captain', 'merchant'];
     const placeholders = roles.map(() => '?').join(', ');
     const rows = db
       .prepare(
@@ -533,6 +546,26 @@ export function getActiveTokensForAudience(params: {
           .prepare(
             `SELECT DISTINCT fcm_token FROM push_device_tokens
              WHERE is_active = 1 AND user_role = 'customer'`
+          )
+          .all() as Array<{ fcm_token: string }>);
+    for (const r of rows) tokens.add(r.fcm_token);
+  }
+
+  if (app === 'merchant' || app === 'all') {
+    const rows = zone
+      ? (db
+          .prepare(
+            `SELECT DISTINCT t.fcm_token
+             FROM push_device_tokens t
+             JOIN merchants m ON m.id = t.user_id
+             WHERE t.is_active = 1 AND t.user_role = 'merchant'
+               AND (m.zone_name = ? OR m.zone_name LIKE ?)`
+          )
+          .all(zone, `%${zone}%`) as Array<{ fcm_token: string }>)
+      : (db
+          .prepare(
+            `SELECT DISTINCT fcm_token FROM push_device_tokens
+             WHERE is_active = 1 AND user_role = 'merchant'`
           )
           .all() as Array<{ fcm_token: string }>);
     for (const r of rows) tokens.add(r.fcm_token);
@@ -832,15 +865,12 @@ export async function createAndSendNotification(params: {
   const bodyClean = String(params.bodyAr || '').trim();
   const resolvedChannel = params.channelId || resolveChannelId(category, deepLink, appTarget);
 
-  const tokens =
-    appTarget === 'merchant'
-      ? []
-      : getActiveTokensForAudience({
-          targetApp: appTarget,
-          recipientId: params.recipientId,
-          targetZone: zoneTarget,
-          category,
-        });
+  const tokens = getActiveTokensForAudience({
+    targetApp: appTarget,
+    recipientId: params.recipientId,
+    targetZone: zoneTarget,
+    category,
+  });
 
   const audienceCount =
     params.audienceCount !== undefined
@@ -906,11 +936,10 @@ export async function createAndSendNotification(params: {
   let fcmDelivery = await sendPushToTokens(tokens, pushPayload);
 
   // For global broadcasts with 0 registered tokens OR 0 successful direct token sends,
-  // also send to the FCM broadcast topic so phones subscribed to otlobha_customer_all / otlobha_captain_all / otlobha_all receive background pushes.
+  // also send to the FCM broadcast topic so phones subscribed to otlobha_customer_all / otlobha_captain_all / otlobha_merchant_all / otlobha_all receive background pushes.
   if (
     !params.recipientId &&
     zoneTarget === 'all' &&
-    appTarget !== 'merchant' &&
     (tokens.length === 0 || fcmDelivery.sent_count === 0)
   ) {
     const targetTopic =
@@ -918,6 +947,8 @@ export async function createAndSendNotification(params: {
         ? 'otlobha_all'
         : appTarget === 'captain'
         ? 'otlobha_captain_all'
+        : appTarget === 'merchant'
+        ? 'otlobha_merchant_all'
         : 'otlobha_customer_all';
     const topicRes = await sendPushToTopic(targetTopic, pushPayload);
     if (topicRes.ok) {
