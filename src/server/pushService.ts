@@ -26,6 +26,9 @@ export interface PushDeliverySummary {
   sent_count: number;
   failed_count: number;
   deactivated_tokens: number;
+  topic_sent?: boolean;
+  topic_name?: string;
+  topic_message_id?: string;
 }
 
 export interface PushPayloadInput {
@@ -670,6 +673,67 @@ export async function sendPushToTokens(
   };
 }
 
+export async function sendPushToTopic(
+  topic: string,
+  payload: PushPayloadInput
+): Promise<{ ok: boolean; topic: string; messageId?: string; errorCode?: string; errorMessage?: string }> {
+  const cleanTopic = String(topic || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9-_.~%]/g, '_');
+  if (!cleanTopic) {
+    return { ok: false, topic: '', errorCode: 'invalid_topic', errorMessage: 'Empty FCM topic' };
+  }
+  const channelId = payload.channelId || resolveChannelId(payload.category, payload.deepLink, payload.targetApp);
+  const app = customTransportForTests ? null : ensureFirebaseAdmin();
+  if (!app) {
+    return { ok: false, topic: cleanTopic, errorCode: 'fcm_not_configured', errorMessage: 'FCM Admin not configured' };
+  }
+  const dataMap = buildFcmDataMap(payload, channelId);
+  try {
+    const messageId = await getMessaging(app).send({
+      topic: cleanTopic,
+      notification: {
+        title: payload.title,
+        body: payload.body,
+      },
+      data: dataMap,
+      android: {
+        priority: 'high',
+        ttl: 3600 * 1000,
+        notification: {
+          channelId,
+          sound: 'default',
+          defaultSound: true,
+          defaultVibrateTimings: true,
+          visibility: 'public',
+          priority: 'max',
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+          tag: payload.notificationId || undefined,
+        },
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10',
+        },
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+            contentAvailable: true,
+          },
+        },
+      },
+    });
+    return { ok: true, topic: cleanTopic, messageId };
+  } catch (err: any) {
+    const code = String(err?.code || 'fcm_topic_error');
+    const msg = err instanceof Error ? err.message : String(err);
+    lastFcmError = { code, message: msg, at: new Date().toISOString() };
+    console.error(`[FCM] Topic send error (${cleanTopic}) [${code}]:`, msg);
+    return { ok: false, topic: cleanTopic, errorCode: code, errorMessage: msg };
+  }
+}
+
 /**
  * Persists a notification into the existing `notifications` table AND dispatches real FCM Push Notifications
  * to all active devices matching the target audience. Preserves 100% of existing in-app notifications behavior.
@@ -787,7 +851,7 @@ export async function createAndSendNotification(params: {
     console.warn('[PushService] NotificationCreatedListener error:', err instanceof Error ? err.message : err);
   }
 
-  const fcmDelivery = await sendPushToTokens(tokens, {
+  const pushPayload: PushPayloadInput = {
     title: titleClean,
     body: bodyClean,
     channelId: resolvedChannel,
@@ -800,7 +864,39 @@ export async function createAndSendNotification(params: {
     status: params.status,
     targetApp: appTarget,
     extraData: params.extraData,
-  });
+  };
+
+  let fcmDelivery = await sendPushToTokens(tokens, pushPayload);
+
+  // For global broadcasts with 0 registered device tokens yet, also attempt FCM Topic delivery
+  // so phones subscribed to otlobha_customer_all / otlobha_captain_all / otlobha_all receive background pushes.
+  if (!params.recipientId && zoneTarget === 'all' && appTarget !== 'merchant' && tokens.length === 0) {
+    const targetTopic =
+      appTarget === 'all'
+        ? 'otlobha_all'
+        : appTarget === 'captain'
+        ? 'otlobha_captain_all'
+        : 'otlobha_customer_all';
+    const topicRes = await sendPushToTopic(targetTopic, pushPayload);
+    if (topicRes.ok) {
+      fcmDelivery = {
+        ...fcmDelivery,
+        fcm_enabled: true,
+        reason: undefined,
+        sent_count: Math.max(fcmDelivery.sent_count, 1),
+        topic_sent: true,
+        topic_name: targetTopic,
+        topic_message_id: topicRes.messageId,
+      };
+    } else if (topicRes.errorCode && topicRes.errorCode !== 'fcm_not_configured') {
+      fcmDelivery = {
+        ...fcmDelivery,
+        reason: topicRes.errorCode,
+        topic_sent: false,
+        topic_name: targetTopic,
+      };
+    }
+  }
 
   return {
     id,

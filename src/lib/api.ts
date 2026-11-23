@@ -548,13 +548,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ delivery_id, otp }),
     }),
-  getFcmStatus: () =>
+  getFcmStatus: (probe?: boolean) =>
     request<{
       configured: boolean;
       source: string;
       project_id: string | null;
       registered_devices: { total: number; customer: number; captain: number };
-    }>('/api/notifications/fcm-status'),
+      auth_probe?: { ok: boolean; code?: string; message?: string };
+    }>(`/api/notifications/fcm-status${probe ? '?probe=1' : ''}`),
   getNotifications: (targetApp?: string) =>
     request<any[]>(`/api/notifications${targetApp ? `?target_app=${targetApp}` : ''}`),
   sendNotification: (body: Record<string, unknown>) =>
@@ -569,6 +570,9 @@ export const api = {
         sent_count: number;
         failed_count: number;
         deactivated_tokens: number;
+        topic_sent?: boolean;
+        topic_name?: string;
+        topic_message_id?: string;
       };
     }>('/api/notifications', {
       method: 'POST',
@@ -578,6 +582,11 @@ export const api = {
     request<any[]>(`/api/mobile/notifications?app=${app}${recipientId ? `&recipient_id=${recipientId}` : ''}`),
   markNotificationRead: (id: string) =>
     request('/api/mobile/notifications/' + id + '/read', { method: 'PATCH' }),
+  markAllNotificationsRead: (opts?: { ids?: string[]; app?: 'customer' | 'captain' | 'merchant'; recipient_id?: string }) =>
+    request<{ ok: boolean; updated: number }>('/api/mobile/notifications/read-all', {
+      method: 'PATCH',
+      body: JSON.stringify(opts || {}),
+    }),
   validateCoupon: (code: string, subtotal: number, service_type: string) =>
     request<{ ok: boolean; code: string; discount_amount: number }>('/api/mobile/coupons/validate', {
       method: 'POST',

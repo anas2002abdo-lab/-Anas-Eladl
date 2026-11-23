@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Bell, Send, Smartphone, Truck, Store, Users } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Bell, Send, Smartphone, Truck, Store, Users, ExternalLink, Compass } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import type { CaptainRecord, Language, NotificationRecord, NotificationTargetApp, ServiceZone } from '../shared/types.ts';
 
@@ -8,6 +8,50 @@ interface Props {
   zones: ServiceZone[];
   captains: CaptainRecord[];
   onNotify: (msg: string) => void;
+}
+
+type RedirectKind =
+  | 'home'
+  | 'categories'
+  | 'category'
+  | 'merchant'
+  | 'product'
+  | 'offers'
+  | 'stores'
+  | 'pharmacy'
+  | 'rides'
+  | 'parcels'
+  | 'market'
+  | 'free_order'
+  | 'cart'
+  | 'orders'
+  | 'profile'
+  | 'wallet'
+  | 'support'
+  | 'verify_email'
+  | 'kyc_upload'
+  | 'notifications'
+  | 'url';
+
+interface SimpleCategory {
+  id: string;
+  name_ar: string;
+  name_en?: string;
+  full_path_ar?: string;
+}
+
+interface SimpleMerchant {
+  id: string;
+  name_ar: string;
+  zone_name?: string;
+}
+
+interface SimpleProduct {
+  id: string;
+  name_ar: string;
+  merchant_name?: string;
+  base_price?: number;
+  sale_price?: number | null;
 }
 
 export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, onNotify }) => {
@@ -22,8 +66,18 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
   const [customers, setCustomers] = useState<
     Array<{ id: string; full_name: string; email?: string | null; is_email_verified?: boolean | number }>
   >([]);
+  const [categories, setCategories] = useState<SimpleCategory[]>([]);
+  const [merchants, setMerchants] = useState<SimpleMerchant[]>([]);
+  const [products, setProducts] = useState<SimpleProduct[]>([]);
+  const [productSearch, setProductSearch] = useState<string>('');
+
   const [category, setCategory] = useState<'promo' | 'operational' | 'compliance' | 'alert'>('promo');
-  const [deepLink, setDeepLink] = useState<string>('stores');
+  const [redirectKind, setRedirectKind] = useState<RedirectKind>('home');
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('');
+  const [selectedMerchantId, setSelectedMerchantId] = useState<string>('');
+  const [selectedProductId, setSelectedProductId] = useState<string>('');
+  const [customUrl, setCustomUrl] = useState<string>('');
+
   const [titleAr, setTitleAr] = useState<string>('');
   const [bodyAr, setBodyAr] = useState<string>('');
   const [sending, setSending] = useState<boolean>(false);
@@ -32,14 +86,44 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     source: string;
     project_id: string | null;
     registered_devices: { total: number; customer: number; captain: number };
+    auth_probe?: { ok: boolean; code?: string; message?: string };
   } | null>(null);
 
   const unverifiedCustomersCount = customers.filter((c) => !Boolean(c.is_email_verified)).length;
 
+  const computedDeepLink = useMemo(() => {
+    if (redirectKind === 'category') {
+      return selectedCategoryId ? `category:${selectedCategoryId}` : 'categories';
+    }
+    if (redirectKind === 'merchant') {
+      return selectedMerchantId ? `merchant:${selectedMerchantId}` : 'stores';
+    }
+    if (redirectKind === 'product') {
+      return selectedProductId ? `product:${selectedProductId}` : 'home';
+    }
+    if (redirectKind === 'url') {
+      const trimmed = customUrl.trim();
+      return trimmed ? `url:${trimmed}` : 'home';
+    }
+    return redirectKind;
+  }, [redirectKind, selectedCategoryId, selectedMerchantId, selectedProductId, customUrl]);
+
+  const filteredProducts = useMemo(() => {
+    const q = productSearch.trim().toLowerCase();
+    if (!q) return products.slice(0, 60);
+    return products
+      .filter(
+        (p) =>
+          (p.name_ar || '').toLowerCase().includes(q) ||
+          (p.merchant_name || '').toLowerCase().includes(q)
+      )
+      .slice(0, 60);
+  }, [products, productSearch]);
+
   const loadHistory = async () => {
     const [rows, status, custRows] = await Promise.all([
       api.getNotifications(filterApp === 'all_filter' ? undefined : filterApp),
-      api.getFcmStatus().catch(() => null),
+      api.getFcmStatus(true).catch(() => null),
       api.getAdminCustomers().catch(() => []),
     ]);
     setHistory(rows);
@@ -51,11 +135,28 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     loadHistory();
   }, [filterApp]);
 
-  const applyTemplate = (preset: 'cust_verify_email' | 'cust_promo' | 'cust_rx' | 'cap_peak' | 'cap_kyc') => {
+  useEffect(() => {
+    Promise.all([
+      api.getCategories().catch(() => []),
+      api.getMerchants().catch(() => []),
+      api.getProductsPaginated({ page: 1, limit: 100 }).catch(() => ({ items: [] })),
+    ]).then(([catRows, merRows, prodRes]) => {
+      if (Array.isArray(catRows)) setCategories(catRows);
+      if (Array.isArray(merRows)) setMerchants(merRows);
+      const prodList = Array.isArray((prodRes as any)?.items)
+        ? (prodRes as any).items
+        : Array.isArray((prodRes as any)?.products)
+        ? (prodRes as any).products
+        : [];
+      setProducts(prodList);
+    });
+  }, []);
+
+  const applyTemplate = (preset: 'cust_verify_email' | 'cust_promo' | 'cust_offers' | 'cust_rx' | 'cap_peak' | 'cap_kyc') => {
     if (preset === 'cust_verify_email') {
       setTargetApp('customer');
       setCategory('alert');
-      setDeepLink('verify_email');
+      setRedirectKind('verify_email');
       setRecipientId('');
       setCustomerSegment('unverified_email');
       setTitleAr('وثّق بريدك الإلكتروني الآن');
@@ -63,15 +164,23 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     } else if (preset === 'cust_promo') {
       setTargetApp('customer');
       setCategory('promo');
-      setDeepLink('stores');
+      setRedirectKind('stores');
       setRecipientId('');
       setCustomerSegment('all');
       setTitleAr('عرض نهاية الأسبوع في المنزلة: توصيل بـ 10 ج.م فقط');
       setBodyAr('اطلب من أي سوبرماركت أو مطعم في المنزلة الآن واستمتع بتوصيل مخفض لفترة محدودة.');
+    } else if (preset === 'cust_offers') {
+      setTargetApp('customer');
+      setCategory('promo');
+      setRedirectKind('offers');
+      setRecipientId('');
+      setCustomerSegment('all');
+      setTitleAr('تخفيضات اليوم متاحة الآن في قسم العروض');
+      setBodyAr('اضغط على الإشعار للانتقال مباشرة إلى أحدث العروض والكوبونات النشطة في اطلبها.');
     } else if (preset === 'cust_rx') {
       setTargetApp('customer');
       setCategory('operational');
-      setDeepLink('pharmacy');
+      setRedirectKind('pharmacy');
       setRecipientId('');
       setCustomerSegment('all');
       setTitleAr('صيدليات المنزلة المناوبة متاحة الآن');
@@ -79,7 +188,7 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     } else if (preset === 'cap_peak') {
       setTargetApp('captain');
       setCategory('operational');
-      setDeepLink('orders');
+      setRedirectKind('orders');
       setRecipientId('');
       setCustomerSegment('all');
       setTitleAr('ذروة طلبات الآن في وسط المنزلة والبصراط');
@@ -87,7 +196,7 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     } else {
       setTargetApp('captain');
       setCategory('compliance');
-      setDeepLink('kyc_upload');
+      setRedirectKind('kyc_upload');
       setRecipientId('');
       setCustomerSegment('all');
       setTitleAr('تذكير مهم بتحديث مستندات المركبة وحد الكاش');
@@ -98,6 +207,26 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!titleAr.trim() || !bodyAr.trim()) return;
+    if (redirectKind === 'category' && !selectedCategoryId) {
+      onNotify(isAr ? 'اختر القسم المستهدف أولًا' : 'Please select a target category');
+      return;
+    }
+    if (redirectKind === 'merchant' && !selectedMerchantId) {
+      onNotify(isAr ? 'اختر المتجر المستهدف أولًا' : 'Please select a target store');
+      return;
+    }
+    if (redirectKind === 'product' && !selectedProductId) {
+      onNotify(isAr ? 'اختر المنتج المستهدف أولًا' : 'Please select a target product');
+      return;
+    }
+    if (redirectKind === 'url') {
+      const trimmed = customUrl.trim();
+      if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
+        onNotify(isAr ? 'أدخل رابطًا صحيحًا يبدأ بـ https://' : 'Enter a valid URL starting with https://');
+        return;
+      }
+    }
+
     setSending(true);
     try {
       const res = await api.sendNotification({
@@ -108,26 +237,32 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
         category,
         title_ar: titleAr,
         body_ar: bodyAr,
-        deep_link: deepLink,
+        deep_link: computedDeepLink,
       });
       setTitleAr('');
       setBodyAr('');
       await loadHistory();
       const fcm = res.fcm_delivery;
       const fcmNoteAr = fcm
-        ? fcm.fcm_enabled
+        ? fcm.topic_sent
+          ? ` — تم البث عبر قناة FCM (${fcm.topic_name})`
+          : fcm.sent_count > 0
           ? ` — إرسال FCM فعلي: ${fcm.sent_count} من ${fcm.targeted_devices} جهاز`
-          : ` — محفوظ داخل التطبيق (${fcm.targeted_devices} جهاز مسجل، FCM بانتظار مفتاح الخدمة)`
+          : fcm.reason === 'messaging/mismatched-credential'
+          ? ' — تم الحفظ في التطبيق (مطلوب ربط صلاحية FCM لمشروع Firebase لإشعارات الخلفية)'
+          : ` — تم الحفظ في التطبيق (${fcm.targeted_devices} جهاز مسجل)`
         : '';
       const fcmNoteEn = fcm
-        ? fcm.fcm_enabled
+        ? fcm.topic_sent
+          ? ` — FCM topic broadcast (${fcm.topic_name})`
+          : fcm.sent_count > 0
           ? ` — FCM delivered: ${fcm.sent_count}/${fcm.targeted_devices} devices`
-          : ` — In-app saved (${fcm.targeted_devices} registered devices, FCM credentials pending)`
+          : ` — Saved to inbox (${fcm.targeted_devices} registered devices)`
         : '';
       onNotify(
         isAr
-          ? `تم بث الإشعار بنجاح (${res.fcm_topic})${fcmNoteAr}`
-          : `Notification broadcast sent (${res.fcm_topic})${fcmNoteEn}`
+          ? `تم إرسال الإشعار بنجاح${fcmNoteAr}`
+          : `Notification sent${fcmNoteEn}`
       );
     } catch (err) {
       onNotify((err as Error).message);
@@ -142,6 +277,52 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
     if (app === 'merchant') return isAr ? 'بوابة التجار والصيدليات' : 'Merchant Portal';
     return isAr ? 'جميع التطبيقات' : 'All Apps';
   };
+
+  const describeDeepLink = (dl?: string | null) => {
+    const raw = String(dl || 'notifications').trim();
+    const low = raw.toLowerCase();
+    if (low === 'home') return isAr ? 'الصفحة الرئيسية' : 'Home';
+    if (low === 'categories') return isAr ? 'صفحة الأقسام' : 'Categories';
+    if (low.startsWith('category:')) {
+      const id = raw.slice(9);
+      const found = categories.find((c) => c.id === id);
+      return isAr ? `قسم: ${found?.name_ar || id}` : `Category: ${found?.name_en || found?.name_ar || id}`;
+    }
+    if (low.startsWith('merchant:')) {
+      const id = raw.slice(9);
+      const found = merchants.find((m) => m.id === id);
+      return isAr ? `متجر: ${found?.name_ar || id}` : `Store: ${found?.name_ar || id}`;
+    }
+    if (low.startsWith('product:')) {
+      const id = raw.slice(8);
+      const found = products.find((p) => p.id === id);
+      return isAr ? `منتج: ${found?.name_ar || id}` : `Product: ${found?.name_ar || id}`;
+    }
+    if (low.startsWith('url:')) {
+      return isAr ? `رابط خارجي: ${raw.slice(4)}` : `External URL: ${raw.slice(4)}`;
+    }
+    const mapAr: Record<string, string> = {
+      offers: 'العروض والكوبونات',
+      promo: 'العروض والكوبونات',
+      stores: 'المتاجر والمطاعم',
+      pharmacy: 'الصيدلية والروشتات',
+      rides: 'المشاوير والتوصيل',
+      parcels: 'اطلبها أي حاجة (طرود)',
+      market: 'سوق اطلبها (C2C)',
+      free_order: 'طلب نصي حر',
+      cart: 'السلة',
+      orders: 'الطلبات النشطة',
+      profile: 'الملف الشخصي وحسابي',
+      wallet: 'المحفظة والتسوية',
+      support: 'الدعم الفني',
+      verify_email: 'توثيق البريد الإلكتروني',
+      kyc_upload: 'مستندات الكابتن (KYC)',
+      notifications: 'صندوق الإشعارات',
+    };
+    return isAr ? mapAr[low] || raw : raw;
+  };
+
+  const fcmReady = Boolean(fcmStatus?.configured && fcmStatus?.auth_probe?.ok !== false);
 
   return (
     <div className="space-y-6">
@@ -173,17 +354,17 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
         </div>
         <div className="bg-white border border-slate-200 rounded-lg p-4">
           <div className="flex items-center justify-between text-slate-500 text-xs mb-1">
-            <span>{isAr ? 'محرك Firebase FCM والأجهزة' : 'Firebase FCM & Devices'}</span>
-            <Users className={`w-4 h-4 ${fcmStatus?.configured ? 'text-emerald-600' : 'text-amber-600'}`} />
+            <span>{isAr ? 'أجهزة Push المسجلة' : 'Registered Push Devices'}</span>
+            <Users className={`w-4 h-4 ${fcmReady ? 'text-emerald-600' : 'text-amber-600'}`} />
           </div>
           <p className="text-sm font-bold text-slate-900 mt-1">
-            {fcmStatus?.configured
+            {fcmReady
               ? isAr
-                ? 'FCM مفعّل وجاهز'
-                : 'FCM Active'
+                ? 'إشعارات الهاتف مفعّلة'
+                : 'Push Active'
               : isAr
-              ? 'FCM بانتظار مفتاح الخدمة'
-              : 'FCM Key Pending'}
+              ? 'بانتظار اعتماد FCM السحابي'
+              : 'FCM Credentials Pending'}
           </p>
           <p className="text-xs text-slate-500 tabular-nums">
             {isAr
@@ -197,7 +378,7 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
         <form onSubmit={handleSend} className="lg:col-span-5 bg-white border border-slate-200 rounded-lg p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-base font-bold text-slate-900">
-              {isAr ? 'إرسال إشعار جديد (Push Broadcast)' : 'Send Push Notification'}
+              {isAr ? 'إرسال إشعار جديد مع توجيه مخصص' : 'Send Push Notification'}
             </h3>
           </div>
 
@@ -328,15 +509,18 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
             </div>
           )}
 
-          <div>
-            <label className="text-xs font-semibold text-slate-700 block mb-1">
-              {isAr ? 'الشاشة التي يفتحها الإشعار (Deep Link)' : 'Deep Link Screen'}
-            </label>
+          {/* Custom Notification Redirect / Deep-Link Target */}
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-2.5">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+              <Compass className="w-4 h-4 text-orange-600" />
+              <span>{isAr ? 'توجيه الإشعار عند الضغط عليه (الصفحة المستهدفة)' : 'Redirect Destination on Tap'}</span>
+            </div>
+
             <select
-              value={deepLink}
+              value={redirectKind}
               onChange={(e) => {
-                const next = e.target.value;
-                setDeepLink(next);
+                const next = e.target.value as RedirectKind;
+                setRedirectKind(next);
                 if (next === 'verify_email' && targetApp !== 'customer') {
                   setTargetApp('customer');
                   setRecipientId('');
@@ -344,23 +528,126 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
               }}
               className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
             >
-              <option value="home">{isAr ? 'الشاشة الرئيسية' : 'Home'}</option>
-              <option value="stores">{isAr ? 'المتاجر والمنتجات' : 'Stores & Products'}</option>
-              <option value="pharmacy">{isAr ? 'الصيدلية والروشتات' : 'Pharmacy'}</option>
-              <option value="parcels">{isAr ? 'اطلبها أي حاجة (طرود)' : 'Parcels'}</option>
-              <option value="market">{isAr ? 'سوق اطلبها (C2C)' : 'Otlobha Market'}</option>
-              <option value="orders">{isAr ? 'الطلبات النشطة (للكباتن/العملاء)' : 'Active Orders'}</option>
-              <option value="verify_email">{isAr ? 'توثيق البريد الإلكتروني (verify_email)' : 'Verify Email (verify_email)'}</option>
-              <option value="kyc_upload">{isAr ? 'مستندات الكابتن (KYC)' : 'Captain KYC'}</option>
-              <option value="wallet">{isAr ? 'المحفظة والرصيد' : 'Wallet'}</option>
+              <optgroup label={isAr ? 'صفحات التطبيق الرئيسية' : 'Main Pages'}>
+                <option value="home">{isAr ? 'الصفحة الرئيسية' : 'Home Page'}</option>
+                <option value="categories">{isAr ? 'صفحة الأقسام الرئيسية والفرعية' : 'Categories Page'}</option>
+                <option value="offers">{isAr ? 'صفحة العروض والكوبونات' : 'Offers & Coupons'}</option>
+                <option value="stores">{isAr ? 'المتاجر والمطاعم' : 'Stores & Restaurants'}</option>
+                <option value="cart">{isAr ? 'سلة المشتريات' : 'Shopping Cart'}</option>
+                <option value="orders">{isAr ? 'الطلبات النشطة / طلباتي' : 'Orders'}</option>
+                <option value="profile">{isAr ? 'حسابي والملف الشخصي' : 'Profile / Account'}</option>
+                <option value="wallet">{isAr ? 'المحفظة والتسوية' : 'Wallet / Settlement'}</option>
+                <option value="support">{isAr ? 'الدعم الفني والتواصل' : 'Customer Support'}</option>
+                <option value="notifications">{isAr ? 'صندوق الإشعارات فقط' : 'Notifications Inbox'}</option>
+              </optgroup>
+              <optgroup label={isAr ? 'توجيه إلى عنصر محدد' : 'Specific Target'}>
+                <option value="category">{isAr ? 'قسم محدد (اختر القسم)' : 'Specific Category'}</option>
+                <option value="merchant">{isAr ? 'متجر محدد (اختر المتجر)' : 'Specific Store'}</option>
+                <option value="product">{isAr ? 'منتج محدد (اختر المنتج)' : 'Specific Product'}</option>
+                <option value="url">{isAr ? 'رابط خارجي مخصص (URL)' : 'Custom External URL'}</option>
+              </optgroup>
+              <optgroup label={isAr ? 'خدمات اطلبها والحساب' : 'Services & Account'}>
+                <option value="pharmacy">{isAr ? 'خدمة الصيدلية والروشتات' : 'Pharmacy & Prescriptions'}</option>
+                <option value="rides">{isAr ? 'خدمة المشاوير والتوصيل' : 'Rides Service'}</option>
+                <option value="parcels">{isAr ? 'خدمة الطرود (اطلبها أي حاجة)' : 'Parcels Service'}</option>
+                <option value="market">{isAr ? 'سوق اطلبها (C2C)' : 'Otlobha Market'}</option>
+                <option value="free_order">{isAr ? 'طلب نصي حر' : 'Free-Text Order'}</option>
+                <option value="verify_email">{isAr ? 'توثيق البريد الإلكتروني' : 'Verify Email'}</option>
+                <option value="kyc_upload">{isAr ? 'مستندات الكابتن (KYC)' : 'Captain KYC'}</option>
+              </optgroup>
             </select>
-            {deepLink === 'verify_email' && (
-              <p className="text-[11px] text-orange-700 mt-1">
-                {isAr
-                  ? 'عند الضغط على الإشعار في تطبيق العملاء، يفتح مباشرة صفحة توثيق البريد الخارجي (verify_email) لإدخال رمز التحقق.'
-                  : 'Tapping this notification in the Customer App directly opens the external email verification page (verify_email).'}
-              </p>
+
+            {redirectKind === 'category' && (
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                  {isAr ? 'اختر القسم الذي سيُفتح مباشرة' : 'Select Target Category'}
+                </label>
+                <select
+                  value={selectedCategoryId}
+                  onChange={(e) => setSelectedCategoryId(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
+                >
+                  <option value="">{isAr ? '-- اختر القسم --' : '-- Choose Category --'}</option>
+                  {categories.map((cat) => (
+                    <option key={cat.id} value={cat.id}>
+                      {cat.full_path_ar || cat.name_ar}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
+
+            {redirectKind === 'merchant' && (
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                  {isAr ? 'اختر المتجر الذي سيُفتح مباشرة' : 'Select Target Store'}
+                </label>
+                <select
+                  value={selectedMerchantId}
+                  onChange={(e) => setSelectedMerchantId(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
+                >
+                  <option value="">{isAr ? '-- اختر المتجر --' : '-- Choose Store --'}</option>
+                  {merchants.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name_ar} {m.zone_name ? `— ${m.zone_name}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {redirectKind === 'product' && (
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-semibold text-slate-600 block">
+                  {isAr ? 'ابحث واختر المنتج الذي سيُفتح مباشرة' : 'Search & Select Target Product'}
+                </label>
+                <input
+                  type="text"
+                  value={productSearch}
+                  onChange={(e) => setProductSearch(e.target.value)}
+                  placeholder={isAr ? 'اكتب اسم المنتج أو المتجر للتصفية...' : 'Filter products...'}
+                  className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                />
+                <select
+                  value={selectedProductId}
+                  onChange={(e) => setSelectedProductId(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
+                >
+                  <option value="">{isAr ? '-- اختر المنتج --' : '-- Choose Product --'}</option>
+                  {filteredProducts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name_ar} {p.merchant_name ? `(${p.merchant_name})` : ''}
+                      {p.sale_price ?? p.base_price ? ` — ${p.sale_price ?? p.base_price} ج.م` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {redirectKind === 'url' && (
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                  {isAr ? 'الرابط الخارجي (يفتح عند الضغط على الإشعار)' : 'External URL'}
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <ExternalLink className="w-4 h-4 text-slate-400 shrink-0" />
+                  <input
+                    type="url"
+                    dir="ltr"
+                    value={customUrl}
+                    onChange={(e) => setCustomUrl(e.target.value)}
+                    placeholder="https://example.com/offer"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs bg-white"
+                  />
+                </div>
+              </div>
+            )}
+
+            <p className="text-[11px] text-slate-600">
+              {isAr ? 'عند الضغط على الإشعار سيتم التحويل إلى: ' : 'Tapping redirects to: '}
+              <strong className="text-orange-700">{describeDeepLink(computedDeepLink)}</strong>
+            </p>
           </div>
 
           <div>
@@ -396,17 +683,24 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
             <div className="flex flex-wrap gap-1.5">
               <button
                 type="button"
-                onClick={() => applyTemplate('cust_verify_email')}
+                onClick={() => applyTemplate('cust_offers')}
                 className="px-2.5 py-1 bg-orange-50 hover:bg-orange-100 text-orange-800 border border-orange-200 rounded text-xs font-semibold whitespace-nowrap"
               >
-                {isAr ? 'توثيق البريد (verify_email)' : 'Verify Email (verify_email)'}
+                {isAr ? 'توجيه للعروض' : 'Offers Promo'}
+              </button>
+              <button
+                type="button"
+                onClick={() => applyTemplate('cust_verify_email')}
+                className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs whitespace-nowrap"
+              >
+                {isAr ? 'توثيق البريد' : 'Verify Email'}
               </button>
               <button
                 type="button"
                 onClick={() => applyTemplate('cust_promo')}
                 className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs whitespace-nowrap"
               >
-                {isAr ? 'عرض للعملاء' : 'Customer Promo'}
+                {isAr ? 'عرض متاجر' : 'Stores Promo'}
               </button>
               <button
                 type="button"
@@ -427,7 +721,7 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
                 onClick={() => applyTemplate('cap_kyc')}
                 className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs whitespace-nowrap"
               >
-                {isAr ? 'تذكير مستندات وكاش' : 'Captain KYC/Cash'}
+                {isAr ? 'مستندات وكاش' : 'Captain KYC'}
               </button>
             </div>
           </div>
@@ -460,45 +754,45 @@ export const NotificationsSection: React.FC<Props> = ({ lang, zones, captains, o
             </select>
           </div>
 
-          <div className="divide-y divide-slate-200">
-            {history.map((item) => (
-              <div key={item.id} className="py-3.5 space-y-1.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="font-bold text-slate-900">{appLabel(item.target_app)}</span>
-                    <span className="text-slate-400">·</span>
-                    <span className="text-slate-600">{item.target_zone === 'all' ? (isAr ? 'كل المنزلة' : 'All Zones') : item.target_zone}</span>
-                    <span className="text-slate-400">·</span>
-                    <span className="font-mono-num text-slate-500">{item.fcm_topic}</span>
+          {history.length === 0 ? (
+            <p className="text-xs text-slate-500 py-8 text-center">
+              {isAr ? 'لا توجد إشعارات مرسلة في هذا النطاق بعد.' : 'No notifications sent yet.'}
+            </p>
+          ) : (
+            <div className="divide-y divide-slate-200">
+              {history.map((item) => (
+                <div key={item.id} className="py-3.5 space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-bold text-slate-900">{appLabel(item.target_app)}</span>
+                      <span className="text-slate-400">·</span>
+                      <span className="text-slate-600">{item.target_zone === 'all' ? (isAr ? 'كل المنزلة' : 'All Zones') : item.target_zone}</span>
+                      <span className="text-slate-400">·</span>
+                      <span className="font-mono-num text-slate-500">{item.fcm_topic}</span>
+                    </div>
+                    <span className="text-xs font-mono-num text-slate-500">{item.created_at}</span>
                   </div>
-                  <span className="text-xs font-mono-num text-slate-500">{item.created_at}</span>
+                  <p className="text-sm font-bold text-slate-900">{item.title_ar}</p>
+                  <p className="text-xs text-slate-600 leading-relaxed">{item.body_ar}</p>
+                  <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500 pt-1">
+                    <span className="tabular-nums">
+                      {isAr ? 'المستهدفون:' : 'Reach:'} <strong className="text-slate-800">{item.audience_count}</strong>
+                    </span>
+                    <span>
+                      {isAr ? 'التوجيه:' : 'Target:'}{' '}
+                      <strong className="text-orange-700">{describeDeepLink(item.deep_link)}</strong>
+                    </span>
+                    <span>
+                      {isAr ? 'الحالة:' : 'Status:'}{' '}
+                      <strong className={item.is_read ? 'text-teal-700' : 'text-orange-700'}>
+                        {item.is_read ? (isAr ? 'تمت المشاهدة' : 'Seen') : isAr ? 'غير مقروء' : 'Unread'}
+                      </strong>
+                    </span>
+                  </div>
                 </div>
-                <p className="text-sm font-bold text-slate-900">{item.title_ar}</p>
-                <p className="text-xs text-slate-600 leading-relaxed">{item.body_ar}</p>
-                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500 pt-1">
-                  <span className="tabular-nums">
-                    {isAr ? 'المستهدفون:' : 'Reach:'} <strong className="text-slate-800">{item.audience_count}</strong>
-                  </span>
-                  <span>
-                    {isAr ? 'الوجهة:' : 'Screen:'}{' '}
-                    <strong className={item.deep_link === 'verify_email' ? 'text-orange-700' : 'text-slate-800'}>
-                      {item.deep_link === 'verify_email'
-                        ? isAr
-                          ? 'توثيق البريد (verify_email)'
-                          : 'Verify Email (verify_email)'
-                        : item.deep_link}
-                    </strong>
-                  </span>
-                  <span>
-                    {isAr ? 'الحالة:' : 'Status:'}{' '}
-                    <strong className={item.is_read ? 'text-teal-700' : 'text-orange-700'}>
-                      {item.is_read ? (isAr ? 'تمت القراءة في التطبيق' : 'Read in App') : isAr ? 'متاح في صندوق الإشعارات' : 'Delivered to Inbox'}
-                    </strong>
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import type Database from 'better-sqlite3';
 import { eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
@@ -19,7 +20,8 @@ interface TableRegistryEntry {
   pkColumn: PgColumn;
 }
 
-// Complete ordered registry of all 44 operational Otlobha tables
+// Complete parent-first ordered registry of all 44 operational Otlobha tables.
+// UPSERT runs forward (parents -> children); DELETE runs in reverse (children -> parents).
 const SYNCED_TABLES: TableRegistryEntry[] = [
   { name: 'service_configs', table: schema.serviceConfigs, pkName: 'service_key', pkColumn: schema.serviceConfigs.service_key },
   { name: 'service_zones', table: schema.serviceZones, pkName: 'id', pkColumn: schema.serviceZones.id },
@@ -68,16 +70,105 @@ const SYNCED_TABLES: TableRegistryEntry[] = [
 ];
 
 const INITIALIZED_META_KEY = 'initialized_v1';
+const DATA_VERSION_META_KEY = 'data_version';
 const UPSERT_CHUNK_SIZE = 150;
 const DELETE_CHUNK_SIZE = 400;
+const READ_FRESHNESS_INTERVAL_MS = 4000;
 
 let hydrated = false;
 let hydrationPromise: Promise<void> | null = null;
 let syncQueue: Promise<void> = Promise.resolve();
+let localDataVersion: string | null = null;
+let lastVersionCheckAt = 0;
+let lastSyncedTotalChanges = -1;
+let lastSyncAt: string | null = null;
+let lastSyncError: string | null = null;
 
 // In-memory snapshot of last committed state per table: tableName -> (pk -> canonical JSON signature)
 const lastSyncedState = new Map<string, Map<string, string>>();
 const sqliteColsCache = new Map<string, string[]>();
+
+const TRANSIENT_PG_CODES = new Set([
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
+  '57P03', // cannot_connect_now (Cloud SQL waking from scale-to-zero)
+  '08000', // connection_exception
+  '08003', // connection_does_not_exist
+  '08006', // connection_failure
+  '08001', // sqlclient_unable_to_establish_sqlconnection
+  '08004', // sqlserver_rejected_establishment_of_sqlconnection
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+function isTransientPgError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; message?: string; cause?: unknown };
+  if (e.code && TRANSIENT_PG_CODES.has(String(e.code))) return true;
+  const msg = String(e.message || '').toLowerCase();
+  if (
+    msg.includes('connection terminated') ||
+    msg.includes('terminating connection') ||
+    msg.includes('the database system is starting up') ||
+    msg.includes('the database system is shutting down') ||
+    msg.includes('timeout exceeded when trying to connect') ||
+    msg.includes('socket hang up') ||
+    msg.includes('econnreset') ||
+    msg.includes('epipe') ||
+    msg.includes('etimedout') ||
+    msg.includes('client has encountered a connection error') ||
+    msg.includes('connection ended unexpectedly') ||
+    msg.includes('cannot connect now')
+  ) {
+    return true;
+  }
+  if (e.cause && e.cause !== err) {
+    return isTransientPgError(e.cause);
+  }
+  return false;
+}
+
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+  const backoffs = [400, 1000, 2200];
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const transient = isTransientPgError(err);
+      if (!transient || attempt === maxAttempts) {
+        throw err;
+      }
+      const delayMs = backoffs[Math.min(attempt - 1, backoffs.length - 1)];
+      console.warn(
+        `[CloudSQL] Transient error during ${label} (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`,
+        err instanceof Error ? err.message : String(err)
+      );
+      await sleepMs(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
+function getSqliteTotalChanges(sqliteDb: Database.Database): number {
+  try {
+    const row = sqliteDb.prepare('SELECT total_changes() AS c').get() as { c?: number } | undefined;
+    return Number(row?.c ?? 0);
+  } catch {
+    return -1;
+  }
+}
 
 function getSqliteColumns(sqliteDb: Database.Database, tableName: string): string[] {
   const cached = sqliteColsCache.get(tableName);
@@ -157,24 +248,27 @@ function captureSnapshotFromSqlite(sqliteDb: Database.Database): void {
     }
     lastSyncedState.set(entry.name, map);
   }
+  lastSyncedTotalChanges = getSqliteTotalChanges(sqliteDb);
 }
 
 async function fetchAllPgTables(): Promise<Map<string, Array<Record<string, unknown>>>> {
-  const result = new Map<string, Array<Record<string, unknown>>>();
-  const BATCH_CONCURRENCY = 6;
-  for (let i = 0; i < SYNCED_TABLES.length; i += BATCH_CONCURRENCY) {
-    const slice = SYNCED_TABLES.slice(i, i + BATCH_CONCURRENCY);
-    const fetched = await Promise.all(
-      slice.map(async (entry) => {
-        const rows = (await pgDb.select().from(entry.table)) as Array<Record<string, unknown>>;
-        return { name: entry.name, rows };
-      })
-    );
-    for (const item of fetched) {
-      result.set(item.name, item.rows);
+  return withPgRetry('fetchAllPgTables', async () => {
+    const result = new Map<string, Array<Record<string, unknown>>>();
+    const BATCH_CONCURRENCY = 6;
+    for (let i = 0; i < SYNCED_TABLES.length; i += BATCH_CONCURRENCY) {
+      const slice = SYNCED_TABLES.slice(i, i + BATCH_CONCURRENCY);
+      const fetched = await Promise.all(
+        slice.map(async (entry) => {
+          const rows = (await pgDb.select().from(entry.table)) as Array<Record<string, unknown>>;
+          return { name: entry.name, rows };
+        })
+      );
+      for (const item of fetched) {
+        result.set(item.name, item.rows);
+      }
     }
-  }
-  return result;
+    return result;
+  });
 }
 
 function hydrateSqliteFromPgData(
@@ -222,49 +316,82 @@ function hydrateSqliteFromPgData(
   }
 }
 
-async function seedCloudSqlFromSqlite(sqliteDb: Database.Database): Promise<void> {
-  await pgDb.transaction(async (tx) => {
-    for (const entry of SYNCED_TABLES) {
-      const rows = sqliteDb.prepare(`SELECT * FROM "${entry.name}"`).all() as Array<Record<string, unknown>>;
-      if (rows.length === 0) continue;
+function makeNextDataVersion(): string {
+  return `${Date.now()}:${crypto.randomUUID().slice(0, 8)}`;
+}
 
-      const normalizedRows = rows
-        .filter((r) => r[entry.pkName] !== null && r[entry.pkName] !== undefined)
-        .map((r) => normalizeRowForPg(entry, r));
+async function seedCloudSqlFromSqlite(sqliteDb: Database.Database): Promise<string> {
+  const initialVersion = makeNextDataVersion();
+  await withPgRetry('seedCloudSqlFromSqlite', async () => {
+    await pgDb.transaction(async (tx) => {
+      for (const entry of SYNCED_TABLES) {
+        const rows = sqliteDb.prepare(`SELECT * FROM "${entry.name}"`).all() as Array<Record<string, unknown>>;
+        if (rows.length === 0) continue;
 
-      const conflictSet = buildConflictUpdateSet(entry);
-      for (let i = 0; i < normalizedRows.length; i += UPSERT_CHUNK_SIZE) {
-        const chunk = normalizedRows.slice(i, i + UPSERT_CHUNK_SIZE);
-        await tx
-          .insert(entry.table)
-          .values(chunk as never)
-          .onConflictDoUpdate({
-            target: entry.pkColumn,
-            set: conflictSet as never,
-          });
+        const normalizedRows = rows
+          .filter((r) => r[entry.pkName] !== null && r[entry.pkName] !== undefined)
+          .map((r) => normalizeRowForPg(entry, r));
+
+        const conflictSet = buildConflictUpdateSet(entry);
+        for (let i = 0; i < normalizedRows.length; i += UPSERT_CHUNK_SIZE) {
+          const chunk = normalizedRows.slice(i, i + UPSERT_CHUNK_SIZE);
+          await tx
+            .insert(entry.table)
+            .values(chunk as never)
+            .onConflictDoUpdate({
+              target: entry.pkColumn,
+              set: conflictSet as never,
+            });
+        }
       }
-    }
 
-    await tx
-      .insert(schema.cloudSqlMeta)
-      .values({
-        key: INITIALIZED_META_KEY,
-        value: new Date().toISOString(),
-        updated_at: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: schema.cloudSqlMeta.key,
-        set: {
-          value: new Date().toISOString(),
-          updated_at: new Date(),
-        },
-      });
+      const nowIso = new Date().toISOString();
+      await tx
+        .insert(schema.cloudSqlMeta)
+        .values([
+          { key: INITIALIZED_META_KEY, value: nowIso, updated_at: new Date() },
+          { key: DATA_VERSION_META_KEY, value: initialVersion, updated_at: new Date() },
+        ])
+        .onConflictDoUpdate({
+          target: schema.cloudSqlMeta.key,
+          set: {
+            value: sql.raw('excluded."value"'),
+            updated_at: sql.raw('excluded."updated_at"'),
+          },
+        });
+    });
   });
+  return initialVersion;
+}
+
+async function fetchRemoteDataVersion(): Promise<string | null> {
+  return withPgRetry('fetchRemoteDataVersion', async () => {
+    const rows = await pgDb
+      .select({ value: schema.cloudSqlMeta.value })
+      .from(schema.cloudSqlMeta)
+      .where(eq(schema.cloudSqlMeta.key, DATA_VERSION_META_KEY))
+      .limit(1);
+    return rows[0]?.value ?? null;
+  });
+}
+
+async function reloadSqliteFromCloudSqlUnlocked(
+  sqliteDb: Database.Database,
+  rebuildFtsFn?: () => void,
+  knownRemoteVersion?: string | null
+): Promise<void> {
+  const pgData = await fetchAllPgTables();
+  hydrateSqliteFromPgData(sqliteDb, pgData, rebuildFtsFn);
+  captureSnapshotFromSqlite(sqliteDb);
+  localDataVersion = knownRemoteVersion !== undefined ? knownRemoteVersion : await fetchRemoteDataVersion();
+  lastVersionCheckAt = Date.now();
+  const countsSummary = `merchants=${pgData.get('merchants')?.length ?? 0}, products=${pgData.get('products')?.length ?? 0}, banners=${pgData.get('storefront_banners')?.length ?? 0}, categories=${pgData.get('categories')?.length ?? 0}, orders=${pgData.get('orders')?.length ?? 0}`;
+  console.log(`[CloudSQL] Re-hydrated runtime cache from PostgreSQL (${countsSummary})`);
 }
 
 /**
  * Lazy single-flight hydration from Cloud SQL PostgreSQL.
- * Runs on the first incoming API request after server startup — never at module load time.
+ * Retries transient scale-to-zero wake-up errors automatically.
  * Fail-safe: if Cloud SQL is configured and unreachable, throws CloudSqlUnavailableError (503)
  * and refuses to serve an empty database or overwrite Cloud SQL.
  */
@@ -283,61 +410,80 @@ export async function ensureHydratedFromCloudSql(
   if (!hydrationPromise) {
     hydrationPromise = (async () => {
       try {
-        const metaRows = await pgDb
-          .select()
-          .from(schema.cloudSqlMeta)
-          .where(eq(schema.cloudSqlMeta.key, INITIALIZED_META_KEY))
-          .limit(1);
+        const metaRows = await withPgRetry('readCloudSqlMeta', async () =>
+          pgDb
+            .select()
+            .from(schema.cloudSqlMeta)
+            .where(inArray(schema.cloudSqlMeta.key, [INITIALIZED_META_KEY, DATA_VERSION_META_KEY]))
+        );
 
-        let pgHasExistingData = metaRows.length > 0;
-        let preloadedTables: Map<string, Array<Record<string, unknown>>> | null = null;
+        const initMeta = metaRows.find((r) => r.key === INITIALIZED_META_KEY);
+        const verMeta = metaRows.find((r) => r.key === DATA_VERSION_META_KEY);
+
+        let pgHasExistingData = Boolean(initMeta);
 
         if (!pgHasExistingData) {
           // Double-check core tables in case rows exist prior to meta marker
-          const [svcCheck, merCheck, custCheck, ordCheck, prdCheck, admCheck] = await Promise.all([
-            pgDb.select().from(schema.serviceConfigs).limit(1),
-            pgDb.select().from(schema.merchants).limit(1),
-            pgDb.select().from(schema.customers).limit(1),
-            pgDb.select().from(schema.orders).limit(1),
-            pgDb.select().from(schema.products).limit(1),
-            pgDb.select().from(schema.adminUsers).limit(1),
-          ]);
-          pgHasExistingData =
-            svcCheck.length > 0 ||
-            merCheck.length > 0 ||
-            custCheck.length > 0 ||
-            ordCheck.length > 0 ||
-            prdCheck.length > 0 ||
-            admCheck.length > 0;
+          pgHasExistingData = await withPgRetry('probeCoreTables', async () => {
+            const [svcCheck, merCheck, custCheck, ordCheck, prdCheck, admCheck, catCheck, bnrCheck] =
+              await Promise.all([
+                pgDb.select().from(schema.serviceConfigs).limit(1),
+                pgDb.select().from(schema.merchants).limit(1),
+                pgDb.select().from(schema.customers).limit(1),
+                pgDb.select().from(schema.orders).limit(1),
+                pgDb.select().from(schema.products).limit(1),
+                pgDb.select().from(schema.adminUsers).limit(1),
+                pgDb.select().from(schema.categories).limit(1),
+                pgDb.select().from(schema.storefrontBanners).limit(1),
+              ]);
+            return (
+              svcCheck.length > 0 ||
+              merCheck.length > 0 ||
+              custCheck.length > 0 ||
+              ordCheck.length > 0 ||
+              prdCheck.length > 0 ||
+              admCheck.length > 0 ||
+              catCheck.length > 0 ||
+              bnrCheck.length > 0
+            );
+          });
         }
 
         if (pgHasExistingData) {
-          preloadedTables = await fetchAllPgTables();
+          const preloadedTables = await fetchAllPgTables();
           hydrateSqliteFromPgData(sqliteDb, preloadedTables, rebuildFtsFn);
 
-          if (metaRows.length === 0) {
-            await pgDb
-              .insert(schema.cloudSqlMeta)
-              .values({
-                key: INITIALIZED_META_KEY,
-                value: new Date().toISOString(),
-                updated_at: new Date(),
-              })
-              .onConflictDoNothing();
+          let resolvedVersion = verMeta?.value ?? null;
+          if (!initMeta || !resolvedVersion) {
+            resolvedVersion = resolvedVersion || makeNextDataVersion();
+            await withPgRetry('ensureCloudSqlMeta', async () => {
+              await pgDb
+                .insert(schema.cloudSqlMeta)
+                .values([
+                  { key: INITIALIZED_META_KEY, value: new Date().toISOString(), updated_at: new Date() },
+                  { key: DATA_VERSION_META_KEY, value: resolvedVersion!, updated_at: new Date() },
+                ])
+                .onConflictDoNothing();
+            });
           }
 
-          const countsSummary = `merchants=${preloadedTables.get('merchants')?.length ?? 0}, products=${preloadedTables.get('products')?.length ?? 0}, customers=${preloadedTables.get('customers')?.length ?? 0}, orders=${preloadedTables.get('orders')?.length ?? 0}`;
+          localDataVersion = resolvedVersion;
+          lastVersionCheckAt = Date.now();
+          const countsSummary = `merchants=${preloadedTables.get('merchants')?.length ?? 0}, products=${preloadedTables.get('products')?.length ?? 0}, banners=${preloadedTables.get('storefront_banners')?.length ?? 0}, categories=${preloadedTables.get('categories')?.length ?? 0}, customers=${preloadedTables.get('customers')?.length ?? 0}, orders=${preloadedTables.get('orders')?.length ?? 0}`;
           console.log(`[CloudSQL] Hydrated primary runtime from PostgreSQL (${countsSummary})`);
         } else {
-          await seedCloudSqlFromSqlite(sqliteDb);
+          localDataVersion = await seedCloudSqlFromSqlite(sqliteDb);
+          lastVersionCheckAt = Date.now();
           console.log('[CloudSQL] Initialized fresh PostgreSQL database with Otlobha base seed data');
         }
 
         captureSnapshotFromSqlite(sqliteDb);
         hydrated = true;
+        lastSyncError = null;
       } catch (err) {
         hydrationPromise = null;
-        console.error('[CloudSQL] Hydration error:', err instanceof Error ? err.message : 'Unknown error');
+        lastSyncError = err instanceof Error ? err.message : 'Unknown hydration error';
+        console.error('[CloudSQL] Hydration error:', lastSyncError);
         throw new CloudSqlUnavailableError();
       }
     })();
@@ -347,16 +493,70 @@ export async function ensureHydratedFromCloudSql(
 }
 
 /**
+ * Ensures this server instance's SQLite read/write cache matches the latest Cloud SQL revision.
+ * - Prevents stale state across multiple Cloud Run instances or Dev/Shared Preview containers.
+ * - On read requests, checks `cloud_sql_meta.data_version` at most once every 4 seconds (1–2ms PK query).
+ * - On mutating requests (`forceCheck: true`), always checks before executing the mutation so writes
+ *   never operate on a stale local cache.
+ */
+export async function ensureFreshFromCloudSql(
+  sqliteDb: Database.Database,
+  rebuildFtsFn?: () => void,
+  options?: { forceCheck?: boolean }
+): Promise<void> {
+  await ensureHydratedFromCloudSql(sqliteDb, rebuildFtsFn);
+  if (!isCloudSqlConfigured()) return;
+
+  const forceCheck = Boolean(options?.forceCheck);
+  const now = Date.now();
+  if (!forceCheck && now - lastVersionCheckAt < READ_FRESHNESS_INTERVAL_MS) {
+    return;
+  }
+
+  // Serialize freshness check on syncQueue so it never races with an in-flight write-through commit
+  const task = syncQueue.then(async () => {
+    const insideNow = Date.now();
+    if (!forceCheck && insideNow - lastVersionCheckAt < READ_FRESHNESS_INTERVAL_MS) {
+      return;
+    }
+    try {
+      const remoteVersion = await fetchRemoteDataVersion();
+      lastVersionCheckAt = Date.now();
+      if (remoteVersion && remoteVersion !== localDataVersion) {
+        await reloadSqliteFromCloudSqlUnlocked(sqliteDb, rebuildFtsFn, remoteVersion);
+      } else if (remoteVersion && !localDataVersion) {
+        localDataVersion = remoteVersion;
+      }
+    } catch (err) {
+      lastSyncError = err instanceof Error ? err.message : 'Unknown freshness check error';
+      console.error('[CloudSQL] Freshness check error:', lastSyncError);
+      // On mutating requests, fail safe with 503 rather than writing against potentially stale data
+      if (forceCheck) {
+        throw new CloudSqlUnavailableError();
+      }
+    }
+  });
+
+  syncQueue = task.catch(() => {});
+  await task;
+}
+
+/**
  * Awaited delta write-through sync to Cloud SQL PostgreSQL via Drizzle ORM.
- * Computes exact per-table upserts & hard deletes against the last committed snapshot,
- * applies them inside a single PostgreSQL transaction, and updates the snapshot only after commit.
- * Fail-safe: refuses to write if Cloud SQL is configured but not yet hydrated.
+ * - Computes exact per-table upserts & hard deletes against the last committed snapshot.
+ * - Deletes in REVERSE table order (children -> parents) and upserts in FORWARD order (parents -> children).
+ * - Atomically advances `cloud_sql_meta.data_version` inside the same PostgreSQL transaction.
+ * - Retries transient Cloud SQL scale-to-zero / connection-reset errors automatically.
+ * - Fail-safe rollback: if PostgreSQL still cannot commit after retries, re-hydrates local SQLite from
+ *   Cloud SQL so local cache NEVER silently diverges from persistent storage.
  */
 export async function syncChangesToCloudSql(
   sqliteDb: Database.Database,
-  reason = 'mutation'
+  reason = 'mutation',
+  rebuildFtsFn?: () => void
 ): Promise<{ tablesUpdated: number; upserted: number; deleted: number }> {
   if (!isCloudSqlConfigured()) {
+    lastSyncedTotalChanges = getSqliteTotalChanges(sqliteDb);
     return { tablesUpdated: 0, upserted: 0, deleted: 0 };
   }
   if (!hydrated) {
@@ -404,45 +604,77 @@ export async function syncChangesToCloudSql(
     }
 
     if (tableDeltas.length === 0) {
+      lastSyncedTotalChanges = getSqliteTotalChanges(sqliteDb);
       result = { tablesUpdated: 0, upserted: 0, deleted: 0 };
       return;
     }
 
+    const nextVersion = makeNextDataVersion();
     let totalUpserted = 0;
     let totalDeleted = 0;
 
     try {
-      await pgDb.transaction(async (tx) => {
-        for (const delta of tableDeltas) {
-          if (delta.deletes.length > 0) {
-            for (let i = 0; i < delta.deletes.length; i += DELETE_CHUNK_SIZE) {
-              const chunk = delta.deletes.slice(i, i + DELETE_CHUNK_SIZE);
-              await tx.delete(delta.entry.table).where(inArray(delta.entry.pkColumn, chunk));
+      await withPgRetry(`sync:${reason}`, async () => {
+        totalUpserted = 0;
+        totalDeleted = 0;
+        await pgDb.transaction(async (tx) => {
+          // 1. Apply all DELETEs in REVERSE order (child tables before parent tables)
+          for (let idx = tableDeltas.length - 1; idx >= 0; idx--) {
+            const delta = tableDeltas[idx];
+            if (delta.deletes.length > 0) {
+              for (let i = 0; i < delta.deletes.length; i += DELETE_CHUNK_SIZE) {
+                const chunk = delta.deletes.slice(i, i + DELETE_CHUNK_SIZE);
+                await tx.delete(delta.entry.table).where(inArray(delta.entry.pkColumn, chunk));
+              }
+              totalDeleted += delta.deletes.length;
             }
-            totalDeleted += delta.deletes.length;
           }
 
-          if (delta.upserts.length > 0) {
-            const conflictSet = buildConflictUpdateSet(delta.entry);
-            for (let i = 0; i < delta.upserts.length; i += UPSERT_CHUNK_SIZE) {
-              const chunk = delta.upserts.slice(i, i + UPSERT_CHUNK_SIZE);
-              await tx
-                .insert(delta.entry.table)
-                .values(chunk as never)
-                .onConflictDoUpdate({
-                  target: delta.entry.pkColumn,
-                  set: conflictSet as never,
-                });
+          // 2. Apply all UPSERTs in FORWARD order (parent tables before child tables)
+          for (const delta of tableDeltas) {
+            if (delta.upserts.length > 0) {
+              const conflictSet = buildConflictUpdateSet(delta.entry);
+              for (let i = 0; i < delta.upserts.length; i += UPSERT_CHUNK_SIZE) {
+                const chunk = delta.upserts.slice(i, i + UPSERT_CHUNK_SIZE);
+                await tx
+                  .insert(delta.entry.table)
+                  .values(chunk as never)
+                  .onConflictDoUpdate({
+                    target: delta.entry.pkColumn,
+                    set: conflictSet as never,
+                  });
+              }
+              totalUpserted += delta.upserts.length;
             }
-            totalUpserted += delta.upserts.length;
           }
-        }
+
+          // 3. Advance cross-instance revision marker atomically inside the same PG transaction
+          await tx
+            .insert(schema.cloudSqlMeta)
+            .values({
+              key: DATA_VERSION_META_KEY,
+              value: nextVersion,
+              updated_at: new Date(),
+            })
+            .onConflictDoUpdate({
+              target: schema.cloudSqlMeta.key,
+              set: {
+                value: nextVersion,
+                updated_at: new Date(),
+              },
+            });
+        });
       });
 
       // Commit local snapshot only after PostgreSQL transaction succeeds
       for (const delta of tableDeltas) {
         lastSyncedState.set(delta.entry.name, delta.nextSnapshot);
       }
+      localDataVersion = nextVersion;
+      lastVersionCheckAt = Date.now();
+      lastSyncedTotalChanges = getSqliteTotalChanges(sqliteDb);
+      lastSyncAt = new Date().toISOString();
+      lastSyncError = null;
 
       result = {
         tablesUpdated: tableDeltas.length,
@@ -450,10 +682,20 @@ export async function syncChangesToCloudSql(
         deleted: totalDeleted,
       };
     } catch (err) {
-      console.error(
-        `[CloudSQL] Write-through sync failed (${reason}):`,
-        err instanceof Error ? err.message : 'Unknown error'
-      );
+      lastSyncError = err instanceof Error ? err.message : 'Unknown write-through error';
+      console.error(`[CloudSQL] Write-through sync failed (${reason}):`, lastSyncError);
+
+      // Prevent silent divergence where SQLite shows unsaved rows that vanish after container idle/restart:
+      // Roll back local SQLite to the authoritative PostgreSQL state.
+      try {
+        await reloadSqliteFromCloudSqlUnlocked(sqliteDb, rebuildFtsFn);
+      } catch (rollbackErr) {
+        console.error(
+          '[CloudSQL] Could not reload SQLite after sync failure:',
+          rollbackErr instanceof Error ? rollbackErr.message : rollbackErr
+        );
+      }
+
       throw new CloudSqlUnavailableError('تعذر حفظ التغييرات في قاعدة البيانات الرئيسية مؤقتًا، يرجى المحاولة مرة أخرى.');
     }
   });
@@ -462,6 +704,26 @@ export async function syncChangesToCloudSql(
   syncQueue = task.catch(() => {});
   await task;
   return result;
+}
+
+/**
+ * Zero-cost safety net for routes that mutate SQLite outside `res.json`/`res.send` (e.g., GET verify links,
+ * 204 responses, or background tasks). Reads SQLite `total_changes()` in-memory (~0.01ms) and only talks
+ * to Cloud SQL when an unsynced SQLite write actually occurred.
+ */
+export async function syncIfSqliteMutated(
+  sqliteDb: Database.Database,
+  reason = 'deferred_check',
+  rebuildFtsFn?: () => void
+): Promise<void> {
+  if (!isCloudSqlConfigured() || !hydrated) return;
+  const currentChanges = getSqliteTotalChanges(sqliteDb);
+  if (currentChanges < 0 || currentChanges === lastSyncedTotalChanges) return;
+  try {
+    await syncChangesToCloudSql(sqliteDb, reason, rebuildFtsFn);
+  } catch (err) {
+    console.error(`[CloudSQL] Deferred mutation sync failed (${reason}):`, err instanceof Error ? err.message : err);
+  }
 }
 
 export async function flushCloudSqlBeforeShutdown(sqliteDb: Database.Database): Promise<void> {
@@ -480,4 +742,20 @@ export async function flushCloudSqlBeforeShutdown(sqliteDb: Database.Database): 
 
 export function isCloudSqlHydrated(): boolean {
   return hydrated;
+}
+
+export function getCloudSqlPersistenceStatus(): {
+  configured: boolean;
+  hydrated: boolean;
+  data_version: string | null;
+  last_sync_at: string | null;
+  last_sync_error: string | null;
+} {
+  return {
+    configured: isCloudSqlConfigured(),
+    hydrated,
+    data_version: localDataVersion,
+    last_sync_at: lastSyncAt,
+    last_sync_error: lastSyncError,
+  };
 }

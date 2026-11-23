@@ -139,6 +139,35 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
     return false;
   }
 
+  /// Opens a specific category (L1, L2, or L3) directly from a push notification deep link.
+  bool openCategoryById(String categoryId) {
+    final targetId = categoryId.trim();
+    if (targetId.isEmpty) return false;
+    final target = _findById(targetId);
+    if (target == null) return false;
+
+    final chain = <String>[];
+    String? curId = targetId;
+    var guard = 0;
+    while (curId != null && curId.isNotEmpty && guard < 5) {
+      guard++;
+      chain.insert(0, curId);
+      final node = _findById(curId);
+      final pid = node != null ? _parentIdOf(node) : '';
+      if (pid.isEmpty || _findById(pid) == null) break;
+      curId = pid;
+    }
+
+    setState(() {
+      _selectedL1Id = chain.isNotEmpty ? chain[0] : targetId;
+      _selectedL2Id = chain.length >= 2 ? chain[1] : null;
+      _selectedL3Id = chain.length >= 3 ? chain[2] : null;
+    });
+    if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
+    _fetchCategoryProducts(targetId, reset: true);
+    return true;
+  }
+
   void _onProductsScroll() {
     if (!_productsScrollCtrl.hasClients) return;
     final pos = _productsScrollCtrl.position;

@@ -1071,8 +1071,128 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleMarkRead = async (id: string) => {
-    await api.markNotificationRead(id);
-    await loadBootstrap();
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)));
+    await api.markNotificationRead(id).catch(() => {});
+  };
+
+  const handleMarkAllInboxRead = async () => {
+    const unreadIds = notifications.filter((n) => !n.is_read).map((n) => n.id);
+    if (unreadIds.length === 0) return;
+    setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    try {
+      await api.markAllNotificationsRead({
+        ids: unreadIds,
+        app: 'customer',
+        recipient_id: customerSession?.id,
+      });
+    } catch {
+      // Fallback per-id if needed
+      await Promise.all(unreadIds.map((id) => api.markNotificationRead(id).catch(() => {})));
+    }
+  };
+
+  const openInboxDrawer = () => {
+    const opening = !showInbox;
+    setShowInbox(opening);
+    setShowSideDrawer(false);
+    setShowLiveTracking(false);
+    if (opening) {
+      void handleMarkAllInboxRead();
+    }
+  };
+
+  const handleNotificationClick = (n: NotificationRecord) => {
+    if (!n.is_read) {
+      void handleMarkRead(n.id);
+    }
+    const raw = String(n.deep_link || '').trim();
+    const low = raw.toLowerCase();
+    setShowInbox(false);
+    if (!low || low === 'notifications') return;
+    if (low === 'home') {
+      setTab('home');
+      return;
+    }
+    if (low === 'categories') {
+      setTab('categories');
+      return;
+    }
+    if (low.startsWith('category:')) {
+      const catId = raw.slice(9).trim();
+      if (catId) {
+        setStorefrontCategoryId(catId);
+        setStorefrontMerchantId('');
+        setStorefrontBrand('');
+        setStorefrontFilter('for_you');
+        setTab('home');
+      } else {
+        setTab('categories');
+      }
+      return;
+    }
+    if (low.startsWith('merchant:')) {
+      const merId = raw.slice(9).trim();
+      if (merId) {
+        setSelectedMerchantId(merId);
+        setStorefrontMerchantId(merId);
+        setStorefrontCategoryId('');
+        setStorefrontBrand('');
+        setTab('home');
+      } else {
+        handleOpenOtlobhaService('stores');
+      }
+      return;
+    }
+    if (low.startsWith('product:')) {
+      const prodId = raw.slice(8).trim();
+      const found = products.find((p) => p.id === prodId) || storefrontProducts.find((p) => p.id === prodId);
+      if (found) {
+        setStorefrontCategoryId(found.category_id || '');
+        setStorefrontMerchantId(found.merchant_id || '');
+      }
+      setTab('home');
+      return;
+    }
+    if (low === 'offers' || low === 'promo') {
+      setTab('offers');
+      return;
+    }
+    if (low === 'cart') {
+      setTab('cart');
+      return;
+    }
+    if (low === 'orders' || low === 'profile' || low === 'wallet') {
+      setTab('profile');
+      return;
+    }
+    if (low === 'support') {
+      setShowSupportModal(true);
+      return;
+    }
+    if (low === 'pharmacy') {
+      handleOpenOtlobhaService('pharmacy');
+      return;
+    }
+    if (low === 'rides') {
+      handleOpenOtlobhaService('rides');
+      return;
+    }
+    if (low === 'parcels') {
+      handleOpenOtlobhaService('parcels');
+      return;
+    }
+    if (low === 'market') {
+      handleOpenOtlobhaService('market');
+      return;
+    }
+    if (low === 'stores') {
+      handleOpenOtlobhaService('stores');
+      return;
+    }
+    if (low === 'free_order') {
+      handleOpenOtlobhaService('free_order');
+      return;
+    }
   };
 
   const handleSubmitStoreOrder = async () => {
@@ -1660,11 +1780,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
             <button
               type="button"
-              onClick={() => {
-                setShowInbox(!showInbox);
-                setShowSideDrawer(false);
-                setShowLiveTracking(false);
-              }}
+              onClick={openInboxDrawer}
               aria-label={isAr ? 'الإشعارات' : 'Notifications'}
               className={`relative flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-semibold min-h-[42px] whitespace-nowrap transition-colors border ${
                 showInbox
@@ -2417,27 +2533,56 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
               <p className="text-xs text-slate-500">{isAr ? 'لا توجد إشعارات حاليًا' : 'No notifications'}</p>
             ) : (
               <div className="divide-y divide-slate-100">
-                {notifications.map((n) => (
-                  <div key={n.id} className="py-3 flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-bold text-slate-900">{n.title_ar}</span>
-                        {!n.is_read && <span className="text-xs font-semibold text-orange-600">{isAr ? 'جديد' : 'New'}</span>}
+                {notifications.map((n) => {
+                  const dl = String(n.deep_link || '').trim();
+                  const isExternalUrl = dl.toLowerCase().startsWith('url:');
+                  const externalHref = isExternalUrl ? dl.slice(4).trim() : '';
+                  const hasAction = Boolean(dl && dl.toLowerCase() !== 'notifications');
+                  return (
+                    <div
+                      key={n.id}
+                      onClick={() => {
+                        if (!isExternalUrl && hasAction) handleNotificationClick(n);
+                      }}
+                      className={`py-3 flex flex-wrap items-start justify-between gap-3 ${
+                        hasAction && !isExternalUrl ? 'cursor-pointer hover:bg-slate-50 rounded-lg px-2 -mx-2 transition-colors' : ''
+                      }`}
+                    >
+                      <div className="space-y-1 flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-slate-900">{n.title_ar}</span>
+                          {!n.is_read && <span className="text-xs font-semibold text-orange-600">{isAr ? 'جديد' : 'New'}</span>}
+                        </div>
+                        <p className="text-xs text-slate-600">{n.body_ar}</p>
+                        <p className="text-xs font-mono-num text-slate-400">{n.created_at}</p>
                       </div>
-                      <p className="text-xs text-slate-600">{n.body_ar}</p>
-                      <p className="text-xs font-mono-num text-slate-400">{n.created_at}</p>
+                      {isExternalUrl && externalHref ? (
+                        <a
+                          href={externalHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => {
+                            if (!n.is_read) void handleMarkRead(n.id);
+                          }}
+                          className="px-3 py-1.5 bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100 rounded-lg text-xs font-semibold whitespace-nowrap"
+                        >
+                          {isAr ? 'فتح الرابط' : 'Open Link'}
+                        </a>
+                      ) : hasAction ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleNotificationClick(n);
+                          }}
+                          className="px-3 py-1.5 bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100 rounded-lg text-xs font-semibold whitespace-nowrap"
+                        >
+                          {isAr ? 'الانتقال للصفحة' : 'Open'}
+                        </button>
+                      ) : null}
                     </div>
-                    {!n.is_read && (
-                      <button
-                        type="button"
-                        onClick={() => handleMarkRead(n.id)}
-                        className="px-3 py-1.5 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-medium whitespace-nowrap"
-                      >
-                        {isAr ? 'تحديد كمقروء' : 'Mark Read'}
-                      </button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

@@ -26,9 +26,12 @@ import { startSqlitePersistSync, type SqlitePersistController } from './src/serv
 import { registerCloudSyncRoutes } from './src/server/cloudSyncRoutes.ts';
 import {
   CloudSqlUnavailableError,
+  ensureFreshFromCloudSql,
   ensureHydratedFromCloudSql,
   flushCloudSqlBeforeShutdown,
+  getCloudSqlPersistenceStatus,
   syncChangesToCloudSql,
+  syncIfSqliteMutated,
 } from './src/server/cloudSqlPersistence.ts';
 import { isCloudSqlConfigured } from './src/db/index.ts';
 import { getOrCreateUser } from './src/db/users.ts';
@@ -104,16 +107,20 @@ let sqlitePersistRef: SqlitePersistController | null = null;
 let postHydrationReconciled = false;
 
 app.use('/api', async (req, res, next) => {
-  // 1. Lazy Cloud SQL hydration gate (runs once on first real API request; fail-safe 503 if unreachable)
+  const isMutating =
+    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE';
+
+  // 1. Cloud SQL hydration & cross-instance freshness gate (fail-safe 503 if unreachable)
   if (req.path !== '/health' && isCloudSqlConfigured()) {
     try {
-      await ensureHydratedFromCloudSql(db, rebuildProductsFtsIndex);
+      await ensureFreshFromCloudSql(db, rebuildProductsFtsIndex, { forceCheck: isMutating });
       if (!postHydrationReconciled) {
         postHydrationReconciled = true;
         try {
+          const bootRes = ensureBootstrapSuperAdmin();
           const recon = reconcileAllExistingProductsToMasterCatalog();
-          if (recon.reconciled > 0 || recon.new_masters > 0) {
-            await syncChangesToCloudSql(db, 'startup:master_catalog_reconcile');
+          if (bootRes.created || recon.reconciled > 0 || recon.new_masters > 0) {
+            await syncChangesToCloudSql(db, 'startup:post_hydration_init', rebuildProductsFtsIndex);
           }
         } catch (reconErr) {
           console.error('[MasterCatalog] Post-hydration reconciliation error:', reconErr);
@@ -128,23 +135,23 @@ app.use('/api', async (req, res, next) => {
     }
   }
 
-  const isMutating =
-    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE';
+  let cloudSqlFlushStarted = false;
 
-  if (isMutating) {
-    res.on('finish', () => {
-      if (res.statusCode < 400) {
-        sqlitePersistRef?.scheduleFlush(`api:${req.method}`, 1200);
-      }
-    });
-  }
+  res.on('finish', () => {
+    if (isMutating && res.statusCode < 400 && !isCloudSqlConfigured()) {
+      sqlitePersistRef?.scheduleFlush(`api:${req.method}`, 1200);
+    }
+    // Zero-cost safety net: catches any SQLite write that happened outside res.json/res.send (e.g. GET links or 204)
+    if (isCloudSqlConfigured() && !cloudSqlFlushStarted) {
+      void syncIfSqliteMutated(db, `finish:${req.method}:${req.path}`, rebuildProductsFtsIndex);
+    }
+  });
 
   // 2. Awaited Cloud SQL write-through + optional async Gzip compression for /api JSON payloads >= 1 KB
   const acceptEnc = String(req.headers['accept-encoding'] || '').toLowerCase();
   const wantsGzip = acceptEnc.includes('gzip');
   const origJson = res.json.bind(res);
   const origSend = res.send.bind(res);
-  let cloudSqlFlushStarted = false;
 
   const sendJsonPayload = (body: unknown) => {
     if (res.headersSent) return;
@@ -182,7 +189,7 @@ app.use('/api', async (req, res, next) => {
     if (isMutating && res.statusCode < 400 && !cloudSqlFlushStarted) {
       cloudSqlFlushStarted = true;
       const persistTask = isCloudSqlConfigured()
-        ? syncChangesToCloudSql(db, `api:${req.method}:${req.path}`)
+        ? syncChangesToCloudSql(db, `api:${req.method}:${req.path}`, rebuildProductsFtsIndex)
         : Promise.resolve();
       persistTask
         .then(() => awaitPendingPushNotifications(3500).catch(() => {}))
@@ -211,7 +218,7 @@ app.use('/api', async (req, res, next) => {
       }
       cloudSqlFlushStarted = true;
       const persistTask = isCloudSqlConfigured()
-        ? syncChangesToCloudSql(db, `api:${req.method}:${req.path}`)
+        ? syncChangesToCloudSql(db, `api:${req.method}:${req.path}`, rebuildProductsFtsIndex)
         : Promise.resolve();
       persistTask
         .then(() => awaitPendingPushNotifications(3500).catch(() => {}))
@@ -842,6 +849,7 @@ app.get('/api/health', (_req, res) => {
     email_otp_mode: smtpCfg ? 'smtp' : 'sandbox',
     smtp_host: smtpCfg ? smtpCfg.host : null,
     smtp_port: smtpCfg ? smtpCfg.port : null,
+    persistence: getCloudSqlPersistenceStatus(),
     capabilities: {
       guest_bootstrap: true,
       customer_register_otp: true,
@@ -7371,6 +7379,69 @@ app.get('/api/mobile/notifications', requireAuth, (req, res) => {
   res.json(rows.map((n) => ({ ...n, is_read: Boolean(n.is_read) })));
 });
 
+app.patch('/api/mobile/notifications/read-all', requireAuth, (req, res) => {
+  const auth = req.auth!;
+  const isAdmin = isAdminAuth(auth);
+  const appName = isAdmin
+    ? String(req.body?.app || req.query.app || 'customer')
+    : auth.role;
+  const recipientId = isAdmin
+    ? String(req.body?.recipient_id || req.query.recipient_id || '')
+    : auth.id;
+  const rawIds = Array.isArray(req.body?.ids)
+    ? req.body.ids
+        .map((v: unknown) => String(v || '').trim())
+        .filter((v: string) => v.length > 0 && v.length <= 120)
+    : [];
+
+  let updated = 0;
+  if (rawIds.length > 0) {
+    const placeholders = rawIds.map(() => '?').join(', ');
+    if (isAdmin) {
+      const info = db
+        .prepare(`UPDATE notifications SET is_read = 1 WHERE id IN (${placeholders}) AND COALESCE(is_read, 0) = 0`)
+        .run(...rawIds);
+      updated = info.changes;
+    } else {
+      const info = db
+        .prepare(
+          `UPDATE notifications
+           SET is_read = 1
+           WHERE id IN (${placeholders})
+             AND (target_app = ? OR target_app = 'all')
+             AND (recipient_id IS NULL OR recipient_id = ?)
+             AND COALESCE(is_read, 0) = 0`
+        )
+        .run(...rawIds, appName, recipientId);
+      updated = info.changes;
+    }
+  } else if (isAdmin) {
+    const info = db
+      .prepare(
+        `UPDATE notifications
+         SET is_read = 1
+         WHERE (target_app = ? OR target_app = 'all')
+           AND (recipient_id IS NULL OR recipient_id = ?)
+           AND COALESCE(is_read, 0) = 0`
+      )
+      .run(appName, recipientId);
+    updated = info.changes;
+  } else {
+    const info = db
+      .prepare(
+        `UPDATE notifications
+         SET is_read = 1
+         WHERE (target_app = ? OR target_app = 'all')
+           AND (recipient_id IS NULL OR recipient_id = ?)
+           AND COALESCE(is_read, 0) = 0`
+      )
+      .run(appName, recipientId);
+    updated = info.changes;
+  }
+
+  res.json({ ok: true, updated });
+});
+
 app.patch('/api/mobile/notifications/:id/read', requireAuth, (req, res) => {
   const { id } = req.params;
   const auth = req.auth!;
@@ -12590,10 +12661,18 @@ async function startServer() {
     }
   };
 
-  httpServer.on('upgrade', (req, socket, head) => {
+  httpServer.on('upgrade', async (req, socket, head) => {
     const urlObj = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
     if (urlObj.pathname !== '/ws/order-chat') {
       return;
+    }
+
+    if (isCloudSqlConfigured()) {
+      try {
+        await ensureHydratedFromCloudSql(db, rebuildProductsFtsIndex);
+      } catch {
+        return rejectWsUpgrade(socket, 503, 'الخدمة في وضع التهيئة المؤقتة، يرجى إعادة الاتصال بعد لحظات');
+      }
     }
 
     const authRes = authenticateWsUpgrade(req, urlObj);
@@ -12842,19 +12921,40 @@ export class ErrorOverlay extends HTMLElement {}
     }
   }
 
-  const sqlitePersist = startSqlitePersistSync(db, dbPath);
+  const sqlitePersist = isCloudSqlConfigured() ? null : startSqlitePersistSync(db, dbPath);
   sqlitePersistRef = sqlitePersist;
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Otlobha Full-Stack & WebSocket Server running on http://0.0.0.0:${PORT}`);
+    if (isCloudSqlConfigured()) {
+      // Non-blocking warm hydration right after listening so Cloud SQL wakes up immediately on cold start
+      ensureHydratedFromCloudSql(db, rebuildProductsFtsIndex)
+        .then(() => {
+          if (!postHydrationReconciled) {
+            postHydrationReconciled = true;
+            const bootRes = ensureBootstrapSuperAdmin();
+            const recon = reconcileAllExistingProductsToMasterCatalog();
+            if (bootRes.created || recon.reconciled > 0 || recon.new_masters > 0) {
+              return syncChangesToCloudSql(db, 'startup:post_hydration_init', rebuildProductsFtsIndex);
+            }
+          }
+          return undefined;
+        })
+        .catch((err) => {
+          console.warn(
+            '[CloudSQL] Startup background hydration deferred to first API request:',
+            err instanceof Error ? err.message : err
+          );
+        });
+    }
   });
 
   let shuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[Shutdown] Received ${signal}; draining HTTP server and flushing SQLite snapshot...`);
-    sqlitePersist.stop();
+    console.log(`[Shutdown] Received ${signal}; draining HTTP server and flushing persistent state...`);
+    sqlitePersist?.stop();
     try {
       await new Promise<void>((resolve) => {
         httpServer.close(() => resolve());
@@ -12869,7 +12969,9 @@ export class ErrorOverlay extends HTMLElement {}
       // already logged inside flushCloudSqlBeforeShutdown
     }
     try {
-      await sqlitePersist.flushNow(`shutdown:${signal}`, { force: true, createRollingBackup: false });
+      if (sqlitePersist) {
+        await sqlitePersist.flushNow(`shutdown:${signal}`, { force: true, createRollingBackup: false });
+      }
     } catch {
       // already logged inside flushNow
     }

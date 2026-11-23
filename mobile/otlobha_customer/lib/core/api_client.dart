@@ -991,6 +991,21 @@ class OtlobhaCustomerApi {
     _ensureSuccess(res, endpointHint: '/api/mobile/notifications/$id/read');
   }
 
+  Future<void> markAllNotificationsRead({List<String>? ids}) async {
+    final res = await _sendWithAuth(
+      (h) => http.patch(
+        _apiUri('/api/mobile/notifications/read-all'),
+        headers: h,
+        body: jsonEncode({
+          'app': 'customer',
+          if (ids != null && ids.isNotEmpty) 'ids': ids,
+        }),
+      ),
+      json: true,
+    );
+    _ensureSuccess(res, endpointHint: '/api/mobile/notifications/read-all');
+  }
+
   Uri orderChatWsUri(String orderId) {
     return Uri.parse('$_wsBaseUrl/ws/order-chat?orderId=${Uri.encodeComponent(orderId)}');
   }

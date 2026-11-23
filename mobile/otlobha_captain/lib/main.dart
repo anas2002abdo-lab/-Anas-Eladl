@@ -171,8 +171,9 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _activeCaptainId != null && api.hasTokens) {
       _silentSync();
-      if (CaptainPushNotificationService.instance.currentToken == null) {
-        CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+      final push = CaptainPushNotificationService.instance;
+      if (push.currentToken == null || !push.isTokenSynced) {
+        push.registerForAuthenticatedCaptain(api);
       }
     }
   }
@@ -252,6 +253,32 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
     }
   }
 
+  void _markLocalNotificationRead(String notifId) {
+    final cleanId = notifId.trim();
+    if (cleanId.isEmpty) return;
+    if (!mounted) return;
+    setState(() {
+      _notifications = _notifications.map((raw) {
+        if (raw is Map && (raw['id']?.toString().trim() ?? '') == cleanId) {
+          return <String, dynamic>{...Map<String, dynamic>.from(raw), 'is_read': true};
+        }
+        return raw;
+      }).toList();
+    });
+  }
+
+  void _markAllLocalNotificationsRead() {
+    if (!mounted) return;
+    setState(() {
+      _notifications = _notifications.map((raw) {
+        if (raw is Map) {
+          return <String, dynamic>{...Map<String, dynamic>.from(raw), 'is_read': true};
+        }
+        return raw;
+      }).toList();
+    });
+  }
+
   void _handlePushNotificationTap(Map<String, dynamic> data) {
     if (!mounted) return;
     final capId = _activeCaptainId;
@@ -260,10 +287,17 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
       return;
     }
 
-    final deepLink = (data['deep_link'] ?? '').toString().toLowerCase();
+    final rawDeepLink = (data['deep_link'] ?? '').toString().trim();
+    final deepLink = rawDeepLink.toLowerCase();
     final orderId = (data['order_id'] ?? '').toString().trim();
     final tripId = (data['trip_id'] ?? '').toString().trim();
+    final notifId = (data['notification_id'] ?? data['id'] ?? '').toString().trim();
     final capName = (_activeCaptain?['full_name'] ?? 'الكابتن').toString();
+
+    if (notifId.isNotEmpty) {
+      _markLocalNotificationRead(notifId);
+      api.markNotificationRead(notifId).catchError((_) {});
+    }
 
     if (deepLink == 'order_chat' && orderId.isNotEmpty) {
       Navigator.push(
@@ -293,23 +327,44 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
       ).then((_) => _loadAll());
       return;
     }
-    if (deepLink == 'order' || deepLink == 'orders' || deepLink == 'parcels') {
-      setState(() {
-        _ordersInitialFilter = 'all';
-        _index = 1;
-      });
+    if (deepLink == 'home') {
+      _switchTab(0);
+      return;
+    }
+    if (deepLink == 'order' ||
+        deepLink == 'orders' ||
+        deepLink == 'parcels' ||
+        deepLink == 'rides' ||
+        deepLink == 'stores' ||
+        deepLink == 'pharmacy' ||
+        deepLink == 'market') {
+      _switchTab(1, ordersFilter: 'all');
       _loadAll();
       return;
     }
+    if (deepLink == 'pos') {
+      _switchTab(2);
+      return;
+    }
     if (deepLink == 'wallet' || deepLink == 'settlement') {
-      setState(() => _index = 3);
+      _switchTab(3);
       _loadAll();
       return;
     }
     if (deepLink == 'profile' || deepLink == 'kyc_upload') {
-      setState(() => _index = 4);
+      _switchTab(4);
       _loadAll();
       return;
+    }
+    if (deepLink.startsWith('url:')) {
+      final urlStr = rawDeepLink.substring(4).trim();
+      if (urlStr.isNotEmpty) {
+        Clipboard.setData(ClipboardData(text: urlStr));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تم نسخ الرابط: $urlStr')),
+        );
+        return;
+      }
     }
     _showNotificationsSheet();
   }
@@ -467,32 +522,81 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
   }
 
   void _showNotificationsSheet() {
+    final unreadIds = _notifications
+        .where((n) => n is Map && n['is_read'] != true && n['is_read'] != 1)
+        .map((n) => (n['id'] ?? '').toString().trim())
+        .where((id) => id.isNotEmpty)
+        .toList();
+
+    if (unreadIds.isNotEmpty) {
+      _markAllLocalNotificationsRead();
+      api
+          .markAllNotificationsRead(ids: unreadIds, recipientId: _activeCaptainId)
+          .catchError((_) async {
+        for (final id in unreadIds) {
+          try {
+            await api.markNotificationRead(id);
+          } catch (_) {}
+        }
+      });
+    }
+
+    final snapshot = _notifications
+        .whereType<Map>()
+        .map((m) => <String, dynamic>{...Map<String, dynamic>.from(m), 'is_read': true})
+        .toList();
+
     showModalBottomSheet(
       context: context,
-      builder: (_) => Directionality(
+      builder: (ctx) => Directionality(
         textDirection: TextDirection.rtl,
-        child: ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: _notifications.length,
-          separatorBuilder: (_, __) => const Divider(),
-          itemBuilder: (_, i) {
-            final n = _notifications[i];
-            return ListTile(
-              title: Text(n['title_ar'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text(n['body_ar'] ?? ''),
-              trailing: n['is_read'] == true
-                  ? const Icon(Icons.done_all, color: Color(0xFF0D9488))
-                  : TextButton(
-                      onPressed: () async {
-                        await api.markNotificationRead(n['id'].toString());
-                        if (mounted) Navigator.pop(context);
-                        _loadAll();
-                      },
-                      child: const Text('مقروء'),
+        child: snapshot.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: Text('لا توجد إشعارات حاليًا')),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.all(16),
+                itemCount: snapshot.length,
+                separatorBuilder: (_, __) => const Divider(),
+                itemBuilder: (_, i) {
+                  final n = snapshot[i];
+                  final dl = (n['deep_link'] ?? '').toString().trim().toLowerCase();
+                  final hasRedirect = dl.isNotEmpty && dl != 'notifications';
+                  return ListTile(
+                    onTap: hasRedirect
+                        ? () {
+                            Navigator.pop(ctx);
+                            _handlePushNotificationTap(n);
+                          }
+                        : null,
+                    leading: const CircleAvatar(
+                      backgroundColor: Color(0xFFFFF7ED),
+                      child: Icon(Icons.notifications_active_outlined, color: Color(0xFFA92224), size: 20),
                     ),
-            );
-          },
-        ),
+                    title: Text((n['title_ar'] ?? '').toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text((n['body_ar'] ?? '').toString()),
+                        if ((n['created_at'] ?? '').toString().isNotEmpty)
+                          Text(
+                            n['created_at'].toString(),
+                            style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                          ),
+                      ],
+                    ),
+                    trailing: hasRedirect
+                        ? const Chip(
+                            label: Text('انتقال', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFC2410C))),
+                            backgroundColor: Color(0xFFFFF7ED),
+                            side: BorderSide(color: Color(0xFFFED7AA)),
+                            visualDensity: VisualDensity.compact,
+                          )
+                        : const Icon(Icons.done_all, color: Color(0xFF0D9488)),
+                  );
+                },
+              ),
       ),
     );
   }

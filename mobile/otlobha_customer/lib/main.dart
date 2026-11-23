@@ -21,6 +21,7 @@ import 'screens/customer_otp_login_screen.dart';
 import 'screens/complete_profile_screen.dart';
 import 'screens/support_screen.dart';
 import 'screens/storefront_categories_screen.dart';
+import 'screens/storefront_product_pager_sheet.dart';
 import 'screens/storefront_smart_search_screen.dart';
 import 'screens/storefront_assistant_sheet.dart';
 
@@ -228,8 +229,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _isAuthenticated && !_isGuest) {
       _silentSync();
-      if (CustomerPushNotificationService.instance.currentToken == null) {
-        CustomerPushNotificationService.instance.registerForAuthenticatedUser(api);
+      final push = CustomerPushNotificationService.instance;
+      if (push.currentToken == null || !push.isTokenSynced) {
+        push.registerForAuthenticatedUser(api);
       }
     }
   }
@@ -478,6 +480,70 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     } catch (_) {}
   }
 
+  void _markLocalNotificationRead(String notifId) {
+    final cleanId = notifId.trim();
+    if (cleanId.isEmpty) return;
+    final current = _bootstrap['notifications'];
+    if (current is! List) return;
+    final updated = current.map((raw) {
+      if (raw is Map && (raw['id']?.toString().trim() ?? '') == cleanId) {
+        return <String, dynamic>{...Map<String, dynamic>.from(raw), 'is_read': true};
+      }
+      return raw;
+    }).toList();
+    if (mounted) {
+      setState(() {
+        _bootstrap = <String, dynamic>{..._bootstrap, 'notifications': updated};
+      });
+    }
+  }
+
+  void _markAllLocalNotificationsRead() {
+    final current = _bootstrap['notifications'];
+    if (current is! List) return;
+    final updated = current.map((raw) {
+      if (raw is Map) {
+        return <String, dynamic>{...Map<String, dynamic>.from(raw), 'is_read': true};
+      }
+      return raw;
+    }).toList();
+    if (mounted) {
+      setState(() {
+        _bootstrap = <String, dynamic>{..._bootstrap, 'notifications': updated};
+      });
+    }
+  }
+
+  Future<void> _openProductDeepLink(String productId) async {
+    final cleanId = productId.trim();
+    if (cleanId.isEmpty) {
+      _switchTab(0);
+      return;
+    }
+    try {
+      final list = ((_bootstrap['products'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final idx = list.indexWhere((p) => (p['id'] ?? '').toString() == cleanId);
+      if (idx >= 0 && mounted) {
+        await showStorefrontProductPager(
+          context: context,
+          api: api,
+          products: list,
+          initialIndex: idx,
+          getCartCount: () => _quickCart.values.fold<int>(0, (s, v) => s + v),
+          onAddToCart: _onQuickAdd,
+          onOpenCart: () => _switchTab(3),
+          onSelectBrand: _selectStorefrontBrand,
+          onSelectStore: _selectStorefrontMerchant,
+        );
+        return;
+      }
+    } catch (_) {}
+    _switchTab(0);
+  }
+
   void _handlePushNotificationTap(Map<String, dynamic> data) {
     if (!mounted) return;
     if (!_isAuthenticated || _isGuest) {
@@ -485,12 +551,14 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       return;
     }
 
-    final deepLink = (data['deep_link'] ?? '').toString().toLowerCase();
+    final rawDeepLink = (data['deep_link'] ?? '').toString().trim();
+    final deepLink = rawDeepLink.toLowerCase();
     final orderId = (data['order_id'] ?? '').toString().trim();
     final tripId = (data['trip_id'] ?? '').toString().trim();
     final notifId = (data['notification_id'] ?? data['id'] ?? '').toString().trim();
 
-    if (notifId.isNotEmpty && deepLink != 'verify_email') {
+    if (notifId.isNotEmpty) {
+      _markLocalNotificationRead(notifId);
       api.markNotificationRead(notifId).catchError((_) {});
     }
 
@@ -507,23 +575,96 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       return;
     }
     if (deepLink == 'home') {
-      setState(() => _index = 0);
+      _clearStorefrontFilters();
+      _switchTab(0);
+      return;
+    }
+    if (deepLink == 'categories') {
+      _switchTab(1);
+      return;
+    }
+    if (deepLink.startsWith('category:')) {
+      final catId = rawDeepLink.substring(9).trim();
+      _switchTab(1);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final opened = _categoriesKey.currentState?.openCategoryById(catId) ?? false;
+        if (!opened && catId.isNotEmpty) {
+          _selectStorefrontCategory(catId, '');
+        }
+      });
+      return;
+    }
+    if (deepLink.startsWith('merchant:')) {
+      final merId = rawDeepLink.substring(9).trim();
+      if (merId.isNotEmpty) {
+        final merchants = (_bootstrap['merchants'] as List?) ?? const [];
+        String merName = '';
+        for (final m in merchants) {
+          if (m is Map && (m['id'] ?? '').toString() == merId) {
+            merName = (m['name_ar'] ?? '').toString();
+            break;
+          }
+        }
+        _selectStorefrontMerchant(merId, merName);
+        _switchTab(0);
+        return;
+      }
+      _switchTab(2, serviceSubView: 'stores');
+      return;
+    }
+    if (deepLink.startsWith('product:')) {
+      final prodId = rawDeepLink.substring(8).trim();
+      _openProductDeepLink(prodId);
+      return;
+    }
+    if (deepLink.startsWith('url:')) {
+      final urlStr = rawDeepLink.substring(4).trim();
+      final uri = Uri.tryParse(urlStr);
+      if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
+        launchUrl(uri, mode: LaunchMode.externalApplication);
+        return;
+      }
+    }
+    if (deepLink == 'cart') {
+      _switchTab(3);
+      return;
+    }
+    if (deepLink == 'free_order') {
+      _orderChannel = 'free_text';
+      _switchTab(3);
       return;
     }
     if (deepLink == 'orders' || deepLink == 'profile' || deepLink == 'wallet') {
-      setState(() => _index = 4);
+      _switchTab(4);
       _loadData();
       return;
     }
     if (deepLink == 'offers' || deepLink == 'promo') {
-      setState(() => _index = 5);
+      _switchTab(5);
       return;
     }
-    if (deepLink == 'pharmacy' || deepLink == 'stores' || deepLink == 'parcels' || deepLink == 'market') {
-      setState(() {
-        _serviceSubView = deepLink == 'parcels' ? 'rides_parcels' : deepLink;
-        _index = 2;
-      });
+    if (deepLink == 'support') {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SupportScreen(
+            api: api,
+            customerName: _customerName,
+            customerPhone: _customerPhone,
+            customerEmail: _customerEmail,
+          ),
+        ),
+      );
+      return;
+    }
+    if (deepLink == 'pharmacy' ||
+        deepLink == 'stores' ||
+        deepLink == 'rides' ||
+        deepLink == 'parcels' ||
+        deepLink == 'market') {
+      final sub = (deepLink == 'parcels' || deepLink == 'rides') ? 'rides_parcels' : deepLink;
+      _switchTab(2, serviceSubView: sub);
       return;
     }
     _openNotifications();
@@ -959,6 +1100,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       _openAuthFromGuest();
       return;
     }
+    _markAllLocalNotificationsRead();
     await Navigator.push(
       context,
       MaterialPageRoute(
@@ -966,6 +1108,8 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           api: api,
           customerEmail: _customerEmail,
           onOpenVerifyEmail: () => _openExternalVerifyEmailPage(),
+          onNotificationsRead: _markAllLocalNotificationsRead,
+          onNotificationTap: (notif) => _handlePushNotificationTap(notif),
         ),
       ),
     );

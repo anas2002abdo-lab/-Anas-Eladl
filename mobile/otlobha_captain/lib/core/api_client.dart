@@ -446,6 +446,22 @@ class OtlobhaCaptainApi {
     _ensureSuccess(res, endpointHint: '/api/mobile/notifications/$id/read');
   }
 
+  Future<void> markAllNotificationsRead({List<String>? ids, String? recipientId}) async {
+    final res = await _sendWithAuth(
+      (h) => http.patch(
+        _apiUri('/api/mobile/notifications/read-all'),
+        headers: h,
+        body: jsonEncode({
+          'app': 'captain',
+          if (recipientId != null && recipientId.isNotEmpty) 'recipient_id': recipientId,
+          if (ids != null && ids.isNotEmpty) 'ids': ids,
+        }),
+      ),
+      json: true,
+    );
+    _ensureSuccess(res, endpointHint: '/api/mobile/notifications/read-all');
+  }
+
   Uri orderChatWsUri(String orderId) {
     return Uri.parse('$_wsBaseUrl/ws/order-chat?orderId=${Uri.encodeComponent(orderId)}');
   }

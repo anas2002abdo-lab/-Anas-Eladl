@@ -143,6 +143,7 @@ class CustomerPushNotificationService {
   bool _initialized = false;
   bool _firebaseReady = false;
   bool _permissionGranted = false;
+  bool _tokenSyncedToBackend = false;
   bool _soundEnabled = true;
   bool _vibrationEnabled = true;
   String? _currentToken;
@@ -157,6 +158,7 @@ class CustomerPushNotificationService {
 
   bool get isFirebaseReady => _firebaseReady;
   bool get isPermissionGranted => _permissionGranted;
+  bool get isTokenSynced => _tokenSyncedToBackend;
   bool get soundEnabled => _soundEnabled;
   bool get vibrationEnabled => _vibrationEnabled;
   String? get currentToken => _currentToken;
@@ -369,12 +371,26 @@ class CustomerPushNotificationService {
       _onTokenRefreshSub?.cancel();
       _onTokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((String newToken) async {
         _currentToken = newToken;
+        _tokenSyncedToBackend = false;
         if (_boundApi != null && _boundApi!.hasTokens) {
           await _syncTokenToBackend(_boundApi!, newToken);
         }
       });
+
+      // Subscribe to customer broadcast topics so background pushes arrive even on fresh installs
+      unawaited(_subscribeDefaultTopics());
     } catch (e) {
       debugPrint('[CustomerPush] Messaging listeners error: $e');
+    }
+  }
+
+  Future<void> _subscribeDefaultTopics() async {
+    if (!_firebaseReady || kIsWeb) return;
+    try {
+      await FirebaseMessaging.instance.subscribeToTopic('otlobha_all');
+      await FirebaseMessaging.instance.subscribeToTopic('otlobha_customer_all');
+    } catch (e) {
+      debugPrint('[CustomerPush] Topic subscription skipped: $e');
     }
   }
 
@@ -421,13 +437,15 @@ class CustomerPushNotificationService {
     }
     if (!_firebaseReady || !api.hasTokens) return;
 
+    unawaited(_subscribeDefaultTopics());
+
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
         final token = await FirebaseMessaging.instance.getToken();
         if (token != null && token.isNotEmpty) {
           _currentToken = token;
           await _syncTokenToBackend(api, token);
-          return;
+          if (_tokenSyncedToBackend) return;
         }
       } catch (e) {
         debugPrint('[CustomerPush] Token fetch/register attempt ${attempt + 1} failed: $e');
@@ -447,7 +465,9 @@ class CustomerPushNotificationService {
         appVersion: '1.0.0',
         deviceLabel: kIsWeb ? 'Web' : Platform.operatingSystem,
       );
+      _tokenSyncedToBackend = true;
     } catch (e) {
+      _tokenSyncedToBackend = false;
       debugPrint('[CustomerPush] Backend token sync failed: $e');
     }
   }
@@ -457,6 +477,7 @@ class CustomerPushNotificationService {
     try {
       await api.unregisterPushToken(fcmToken: _currentToken, deviceId: _deviceId);
     } catch (_) {}
+    _tokenSyncedToBackend = false;
     _boundApi = null;
   }
 

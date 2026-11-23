@@ -23,11 +23,19 @@ export const createPool = (): Pool => {
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
       max: 10,
-      connectionTimeoutMillis: 15000,
+      // Cloud SQL Developer Edition supports scale-to-zero:
+      // - 30s connection timeout allows smooth cold wake-up after idle periods
+      // - 20s idle timeout retires sockets before Cloud SQL suspends them
+      // - TCP keepAlive detects half-open sockets early
+      connectionTimeoutMillis: 30000,
+      idleTimeoutMillis: 20000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
+      allowExitOnIdle: false,
     });
 
     global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+      console.error('[CloudSQL] Unexpected error on idle SQL pool client:', err instanceof Error ? err.message : err);
     });
   }
   return global._postgresPool;
