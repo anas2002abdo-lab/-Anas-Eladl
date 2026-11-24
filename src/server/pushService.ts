@@ -939,6 +939,48 @@ export async function createAndSendNotification(params: {
 
   let fcmDelivery = await sendPushToTokens(tokens, pushPayload);
 
+  // For targeted merchant or captain operational notifications (e.g. new incoming order),
+  // ALSO send a high-priority FCM push to their dedicated per-account topic so phones wake up
+  // immediately even when the app is killed, screen is locked, or the direct token recently rotated.
+  // Android automatically deduplicates notifications sharing the same notification tag.
+  const cleanRecipientTopicSegment = params.recipientId
+    ? String(params.recipientId).trim().replace(/[^a-zA-Z0-9_.-]/g, '_')
+    : '';
+  const shouldSendTargetedRecipientTopic =
+    Boolean(cleanRecipientTopicSegment) &&
+    (appTarget === 'merchant' || appTarget === 'captain') &&
+    (category === 'operational' || tokens.length === 0 || fcmDelivery.sent_count === 0);
+
+  if (shouldSendTargetedRecipientTopic) {
+    const targetedTopic =
+      appTarget === 'merchant'
+        ? `otlobha_merchant_${cleanRecipientTopicSegment}`
+        : `otlobha_captain_${cleanRecipientTopicSegment}`;
+    const topicRes = await sendPushToTopic(targetedTopic, pushPayload);
+    if (topicRes.ok) {
+      fcmDelivery = {
+        ...fcmDelivery,
+        fcm_enabled: true,
+        reason: undefined,
+        sent_count: Math.max(fcmDelivery.sent_count, 1),
+        topic_sent: true,
+        topic_name: targetedTopic,
+        topic_message_id: topicRes.messageId,
+      };
+    } else if (
+      topicRes.errorCode &&
+      topicRes.errorCode !== 'fcm_not_configured' &&
+      fcmDelivery.sent_count === 0
+    ) {
+      fcmDelivery = {
+        ...fcmDelivery,
+        reason: topicRes.errorCode,
+        topic_sent: false,
+        topic_name: targetedTopic,
+      };
+    }
+  }
+
   // For broadcast notifications (or operational captain order/trip dispatches regardless of zone label),
   // also send to the FCM broadcast topic when direct token sends are 0 — or always for captain operational
   // dispatches so captains subscribed to otlobha_captain_all receive instant wake-up pushes (deduped by Android tag).

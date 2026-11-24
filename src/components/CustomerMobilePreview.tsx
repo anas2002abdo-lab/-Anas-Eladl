@@ -672,7 +672,10 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     setRideDistanceKm(distKm);
     try {
       const caps = await api.getNearbyCaptains(pLat, pLng, 'all');
-      setNearbyCaptains(caps || []);
+      const onlineOnly = (caps || []).filter((c) => c.availability_status === 'available');
+      setNearbyCaptains(onlineOnly);
+      setSelectedCaptainId((prev) => (prev && onlineOnly.some((c) => c.id === prev) ? prev : null));
+      setParcelCaptainId((prev) => (prev && onlineOnly.some((c) => c.id === prev) ? prev : ''));
     } catch {
       // ignore
     }
@@ -703,7 +706,15 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
             payload.type === 'order:status' ||
             payload.type === 'chat:message'
           ) {
-            api.getNearbyCaptains(pickupLat, pickupLng, 'all').then(setNearbyCaptains).catch(() => {});
+            api
+              .getNearbyCaptains(pickupLat, pickupLng, 'all')
+              .then((caps) => {
+                const onlineOnly = (caps || []).filter((c) => c.availability_status === 'available');
+                setNearbyCaptains(onlineOnly);
+                setSelectedCaptainId((prev) => (prev && onlineOnly.some((c) => c.id === prev) ? prev : null));
+                setParcelCaptainId((prev) => (prev && onlineOnly.some((c) => c.id === prev) ? prev : ''));
+              })
+              .catch(() => {});
             loadBootstrap(true).catch(() => {});
           } else if (payload.type === 'trip:accepted' && payload.trip) {
             const acceptedTrip = payload.trip as TripRecord;
@@ -956,6 +967,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     image_url?: string;
     base_price: number;
     sale_price?: number | null;
+    is_weighted?: boolean;
+    weight_step?: number;
+    weight_unit?: string;
   }) => {
     setProducts((prev) => {
       if (prev.some((x) => x.id === p.id)) return prev;
@@ -971,6 +985,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         base_price: Number(p.base_price || 0),
         sale_price: p.sale_price !== undefined ? p.sale_price : null,
         is_offer: Boolean(p.sale_price !== null && p.sale_price !== undefined && p.sale_price < p.base_price),
+        is_weighted: Boolean(p.is_weighted),
+        weight_step: Number(p.weight_step || 0.25),
+        weight_unit: p.weight_unit || 'كجم',
         stock_quantity: 50,
         low_stock_threshold: 5,
         requires_prescription: false,
@@ -994,6 +1011,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       image_url: card.image_url,
       base_price: card.base_price,
       sale_price: card.sale_price,
+      is_weighted: Boolean(card.is_weighted),
+      weight_step: Number(card.weight_step || 0.25),
+      weight_unit: card.weight_unit || 'كجم',
     });
     handleAddToCart(
       {
@@ -1008,6 +1028,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         base_price: card.base_price,
         sale_price: card.sale_price,
         is_offer: card.is_offer,
+        is_weighted: Boolean(card.is_weighted),
+        weight_step: Number(card.weight_step || 0.25),
+        weight_unit: card.weight_unit || 'كجم',
         stock_quantity: card.stock_quantity,
         low_stock_threshold: 5,
         requires_prescription: Boolean(card.requires_prescription),
@@ -1016,16 +1039,19 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         created_at: '',
         updated_at: '',
       },
-      1
+      card.is_weighted ? Number(card.weight_step || 0.25) : 1
     );
   };
 
   const handleDecrementStorefrontProduct = (prodId: string) => {
+    const prod = products.find((p) => p.id === prodId);
+    const step = prod?.is_weighted ? Number(prod.weight_step || 0.25) : 1;
     setCart((prev) => {
       const next = { ...prev };
       const cur = next[prodId] || 0;
-      if (cur <= 1) delete next[prodId];
-      else next[prodId] = cur - 1;
+      const updated = Math.round((cur - step) * 1000) / 1000;
+      if (updated <= 0.0001) delete next[prodId];
+      else next[prodId] = updated;
       return next;
     });
   };
@@ -1046,9 +1072,12 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleAddToCart = (prod: ProductRecord, delta: number) => {
+    const step = prod.is_weighted ? Number(prod.weight_step || 0.25) : 1;
+    const effectiveDelta =
+      prod.is_weighted && Math.abs(delta) === 1 ? (delta > 0 ? step : -step) : delta;
     const currentQty = cart[prod.id] || 0;
-    const nextQty = Math.max(0, currentQty + delta);
-    if (delta > 0) {
+    const nextQty = Math.max(0, Math.round((currentQty + effectiveDelta) * 1000) / 1000);
+    if (effectiveDelta > 0) {
       setSelectedMerchantId(prod.merchant_id);
       setOrderChannel('catalog');
       if (currentQty === 0) {
@@ -1061,7 +1090,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     }
     setCart((prev) => {
       const updated = { ...prev };
-      if (nextQty === 0) {
+      if (nextQty <= 0.0001) {
         delete updated[prod.id];
       } else {
         updated[prod.id] = nextQty;
@@ -3605,10 +3634,17 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                         captainFilterVehicle === 'all'
                           ? nearbyCaptains
                           : nearbyCaptains.filter((c) => c.vehicle_type === captainFilterVehicle);
+                      if (nearbyCaptains.length === 0) {
+                        return (
+                          <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5 text-xs text-amber-900 font-semibold">
+                            لا يوجد طيار متاح حاليًا — عند إرسال الطلب سيصل فورًا لأول طيار يصبح متاحًا.
+                          </div>
+                        );
+                      }
                       if (visibleCaptains.length === 0) {
                         return (
                           <p className="text-xs text-slate-500 py-1">
-                            لا يوجد طيارون ضمن هذا الفلتر — اضغط «الكل» لعرض جميع الطيارين.
+                            لا يوجد طيارون متاحون ضمن هذا الفلتر — اضغط «الكل» لعرض الطيارين المتاحين.
                           </p>
                         );
                       }

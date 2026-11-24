@@ -957,6 +957,15 @@ export function initDatabase(): void {
   if (!prodCols.some((c) => c.name === 'is_offer')) {
     db.exec('ALTER TABLE products ADD COLUMN is_offer INTEGER NOT NULL DEFAULT 0');
   }
+  if (!prodCols.some((c) => c.name === 'is_weighted')) {
+    db.exec('ALTER TABLE products ADD COLUMN is_weighted INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!prodCols.some((c) => c.name === 'weight_step')) {
+    db.exec('ALTER TABLE products ADD COLUMN weight_step REAL NOT NULL DEFAULT 0.25');
+  }
+  if (!prodCols.some((c) => c.name === 'weight_unit')) {
+    db.exec("ALTER TABLE products ADD COLUMN weight_unit TEXT NOT NULL DEFAULT 'كجم'");
+  }
   db.prepare(
     'UPDATE products SET is_offer = 1 WHERE is_offer = 0 AND sale_price IS NOT NULL AND sale_price < base_price'
   ).run();
@@ -1255,6 +1264,9 @@ export function initDatabase(): void {
       batch_id TEXT NOT NULL DEFAULT '',
       source_file_name TEXT NOT NULL DEFAULT '',
       enriched_from_master INTEGER NOT NULL DEFAULT 0,
+      is_weighted INTEGER NOT NULL DEFAULT 0,
+      weight_step REAL NOT NULL DEFAULT 0.25,
+      weight_unit TEXT NOT NULL DEFAULT 'كجم',
       status TEXT NOT NULL DEFAULT 'pending',
       admin_note TEXT NOT NULL DEFAULT '',
       reviewed_by TEXT,
@@ -1368,6 +1380,15 @@ export function initDatabase(): void {
   }
   if (!pmrCols.some((c) => c.name === 'enriched_from_master')) {
     db.exec('ALTER TABLE product_matching_requests ADD COLUMN enriched_from_master INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!pmrCols.some((c) => c.name === 'is_weighted')) {
+    db.exec('ALTER TABLE product_matching_requests ADD COLUMN is_weighted INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!pmrCols.some((c) => c.name === 'weight_step')) {
+    db.exec('ALTER TABLE product_matching_requests ADD COLUMN weight_step REAL NOT NULL DEFAULT 0.25');
+  }
+  if (!pmrCols.some((c) => c.name === 'weight_unit')) {
+    db.exec("ALTER TABLE product_matching_requests ADD COLUMN weight_unit TEXT NOT NULL DEFAULT 'كجم'");
   }
 
   // Indexes & unique constraints for Master Product Catalog & Multi-Store Price Comparison

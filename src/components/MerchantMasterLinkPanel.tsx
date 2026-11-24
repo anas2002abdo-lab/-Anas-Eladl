@@ -110,6 +110,9 @@ export const MerchantMasterLinkPanel: React.FC<Props> = ({
     proposed_stock: '15',
     image_url: '',
     description: '',
+    is_weighted: false,
+    weight_step: '0.25',
+    weight_unit: 'كجم',
   });
   const [myRequests, setMyRequests] = useState<ProductMatchingRequestRecord[]>([]);
 
@@ -407,6 +410,9 @@ export const MerchantMasterLinkPanel: React.FC<Props> = ({
         proposed_stock: Number(reqForm.proposed_stock || 10),
         image_url: reqForm.image_url.trim(),
         description: reqForm.description.trim(),
+        is_weighted: Boolean(reqForm.is_weighted),
+        weight_step: Number(reqForm.weight_step || 0.25),
+        weight_unit: reqForm.weight_unit || 'كجم',
       });
       onToast('تم إرسال طلب إضافة المنتج للإدارة بنجاح — سيتم ربطه بمتجرك فور الاعتماد');
       setSubTab('requests');
@@ -1109,6 +1115,52 @@ export const MerchantMasterLinkPanel: React.FC<Props> = ({
                     <Send className="w-4 h-4" />
                     إرسال للمراجعة
                   </button>
+                </div>
+                <div className="rounded-xl border border-amber-200 bg-white p-2.5 flex flex-wrap items-center gap-2.5">
+                  <label className="flex items-center gap-2 text-xs font-bold text-amber-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={reqForm.is_weighted}
+                      onChange={(e) => setReqForm({ ...reqForm, is_weighted: e.target.checked })}
+                    />
+                    <span>منتج يُباع بالوزن (زيادة بأقل من 1 صحيح)</span>
+                  </label>
+                  {reqForm.is_weighted && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {[0.1, 0.125, 0.25, 0.5].map((stepVal) => (
+                        <button
+                          key={stepVal}
+                          type="button"
+                          onClick={() => setReqForm({ ...reqForm, weight_step: String(stepVal) })}
+                          className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border ${
+                            Math.abs(Number(reqForm.weight_step) - stepVal) < 0.001
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-amber-50 text-amber-900 border-amber-200'
+                          }`}
+                        >
+                          {stepVal}
+                        </button>
+                      ))}
+                      <input
+                        type="number"
+                        min="0.05"
+                        max="10"
+                        step="0.05"
+                        value={reqForm.weight_step}
+                        onChange={(e) => setReqForm({ ...reqForm, weight_step: e.target.value })}
+                        className="w-16 px-2 py-0.5 text-xs rounded-lg border border-amber-300 tabular-nums"
+                      />
+                      <select
+                        value={reqForm.weight_unit}
+                        onChange={(e) => setReqForm({ ...reqForm, weight_unit: e.target.value })}
+                        className="px-2 py-0.5 text-xs rounded-lg border border-amber-300 font-semibold"
+                      >
+                        <option value="كجم">كجم</option>
+                        <option value="جم">جم</option>
+                        <option value="لتر">لتر</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
               </form>
             )}

@@ -156,8 +156,8 @@ export const AdminLoginPortal: React.FC<Props> = ({ lang, onSuccess, onNotify })
 
           <p className="text-[11px] text-slate-500 text-center leading-relaxed pt-1">
             {isAr
-              ? 'يتم التحقق من الجلسة على الخادم عبر HttpOnly Cookies وصلاحيات الأدوار (RBAC).'
-              : 'Session verified server-side via HttpOnly Cookies and role-based access control.'}
+              ? 'يتم حفظ جلستك بأمان على هذا المتصفح (عبر HttpOnly Cookies محمية) فلن يُطلب تسجيل الدخول عند تحديث الصفحة حتى تضغط على تسجيل الخروج.'
+              : 'Your session is stored securely in HttpOnly cookies and persists across page refreshes until you sign out.'}
           </p>
         </form>
       </div>

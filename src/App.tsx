@@ -83,6 +83,7 @@ export default function App() {
   const [standalone, setStandalone] = useState<boolean>(initialParams?.get('standalone') === '1');
   const [lang, setLang] = useState<Language>('ar');
   const [portalMode, setPortalMode] = useState<PortalMode>(initialPortal);
+  const portalModeRef = useRef<PortalMode>(initialPortal);
   const [activeTab, setActiveTab] = useState<string>(initialPortal === 'merchant' ? 'orders' : 'overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
@@ -99,6 +100,7 @@ export default function App() {
   const [adminUser, setAdminUser] = useState<AdminUserRecord | null>(null);
   const adminUserRef = useRef<AdminUserRecord | null>(null);
   const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const authCheckingRef = useRef<boolean>(true);
   const [overview, setOverview] = useState<Record<string, number> | null>(null);
   const [services, setServices] = useState<ServiceConfig[]>([]);
   const [zones, setZones] = useState<ServiceZone[]>([]);
@@ -126,6 +128,10 @@ export default function App() {
   useEffect(() => {
     adminUserRef.current = adminUser;
   }, [adminUser]);
+
+  useEffect(() => {
+    portalModeRef.current = portalMode;
+  }, [portalMode]);
 
   useEffect(() => {
     document.documentElement.dir = isAr ? 'rtl' : 'ltr';
@@ -219,8 +225,10 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (authChecking) return;
+    if (portalMode === 'admin' && !adminUserRef.current) return;
     refreshCore().catch(() => {});
-  }, [portalMode, merchantSession?.id]);
+  }, [portalMode, merchantSession?.id, authChecking]);
 
   // Subscribe to Firebase Auth state for the permanent Cloud Vault
   useEffect(() => {
@@ -367,11 +375,18 @@ export default function App() {
           // ignore
         }
       } finally {
-        if (active) setAuthChecking(false);
+        if (active) {
+          authCheckingRef.current = false;
+          setAuthChecking(false);
+        }
       }
     })();
 
-    const onFocus = () => refreshCore().catch(() => {});
+    const onFocus = () => {
+      if (authCheckingRef.current) return;
+      if (portalModeRef.current === 'admin' && !adminUserRef.current) return;
+      refreshCore().catch(() => {});
+    };
     window.addEventListener('focus', onFocus);
 
     return () => {

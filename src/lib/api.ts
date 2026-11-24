@@ -19,7 +19,11 @@ async function tryRefreshCookieSession(): Promise<boolean> {
       const res = await fetch('/api/auth/refresh', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
         body: JSON.stringify({}),
       });
       return res.ok;
@@ -42,53 +46,22 @@ async function parseResponseBody(res: Response): Promise<any> {
   }
 }
 
-function getPortalContextHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (typeof window === 'undefined') return headers;
-  try {
-    const custRaw = localStorage.getItem('otlobha_customer_session_v1');
-    if (custRaw) {
-      const cust = JSON.parse(custRaw);
-      if (cust?.id) headers['X-Otlobha-Customer-Id'] = String(cust.id);
-    }
-  } catch {
-    // ignore
-  }
-  try {
-    const merRaw = localStorage.getItem('otlobha_merchant_session_v1');
-    if (merRaw) {
-      const mer = JSON.parse(merRaw);
-      if (mer?.id) headers['X-Otlobha-Merchant-Id'] = String(mer.id);
-    }
-  } catch {
-    // ignore
-  }
-  try {
-    const capRaw = localStorage.getItem('otlobha_captain_session_v1');
-    if (capRaw) {
-      const cap = JSON.parse(capRaw);
-      if (cap?.id) headers['X-Otlobha-Captain-Id'] = String(cap.id);
-    }
-  } catch {
-    // ignore
-  }
-  return headers;
-}
-
 async function request<T>(url: string, options?: RequestInit, retryOn401 = true): Promise<T> {
   const method = (options?.method || 'GET').toUpperCase();
   const maxNetworkAttempts = method === 'GET' ? 3 : 1;
   let res: Response | null = null;
   let lastNetworkErr: unknown = null;
+  const isAuthEndpoint = url.startsWith('/api/auth/');
 
   for (let attempt = 1; attempt <= maxNetworkAttempts; attempt++) {
     try {
       res = await fetch(url, {
         credentials: 'include',
+        ...(isAuthEndpoint ? { cache: 'no-store' as RequestCache } : {}),
         ...options,
         headers: {
           'Content-Type': 'application/json',
-          ...getPortalContextHeaders(),
+          'X-Requested-With': 'XMLHttpRequest',
           ...(options?.headers || {}),
         },
       });
@@ -173,6 +146,10 @@ export const api = {
     request<{ ok: boolean; username: string }>('/api/captains/' + id + '/credentials', {
       method: 'PATCH',
       body: JSON.stringify(body),
+    }),
+  deleteCaptain: (id: string) =>
+    request<{ ok: boolean; id: string; deleted_name: string }>('/api/captains/' + encodeURIComponent(id), {
+      method: 'DELETE',
     }),
   reviewCaptainDoc: (docId: string, body: Record<string, unknown>) =>
     request('/api/captain-docs/' + docId, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -1156,6 +1133,32 @@ export const api = {
     }),
   getAdminMatchingRequests: (status = 'pending') =>
     request<any[]>(`/api/admin/matching-requests?status=${encodeURIComponent(status)}`),
+  updateAdminMatchingRequest: (
+    requestId: string,
+    body: {
+      product_name_ar?: string;
+      product_name_en?: string;
+      brand?: string;
+      category_id?: string | null;
+      category_path?: string;
+      barcode?: string | null;
+      size_label?: string;
+      image_url?: string;
+      description?: string;
+      proposed_price?: number;
+      proposed_stock?: number;
+      is_weighted?: boolean;
+      weight_step?: number;
+      weight_unit?: string;
+    }
+  ) =>
+    request<{ ok: boolean; request: any }>(
+      `/api/admin/matching-requests/${encodeURIComponent(requestId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }
+    ),
   reviewAdminMatchingRequest: (
     requestId: string,
     body: {

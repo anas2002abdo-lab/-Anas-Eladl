@@ -4,8 +4,8 @@ import type { NextFunction, Request, Response } from 'express';
 import type { WebSocket } from 'ws';
 import { db, uid } from './db.ts';
 
-export const ACCESS_TOKEN_TTL_SEC = 15 * 60; // 15 minutes
-export const REFRESH_TOKEN_TTL_SEC = 7 * 24 * 60 * 60; // 7 days
+export const ACCESS_TOKEN_TTL_SEC = 4 * 60 * 60; // 4 hours
+export const REFRESH_TOKEN_TTL_SEC = 30 * 24 * 60 * 60; // 30 days
 
 export const ACCESS_COOKIE_NAME = 'otlobha_access_token';
 export const REFRESH_COOKIE_NAME = 'otlobha_refresh_token';
@@ -58,19 +58,13 @@ export function validateAuthConfiguration(): { accessSecret: string; refreshSecr
 
   if (!accessSecret) {
     if (!ephemeralAccessSecret) {
-      ephemeralAccessSecret = crypto
-        .createHash('sha256')
-        .update('otlobha-manzala-access-secret-2026-v1')
-        .digest('hex');
+      ephemeralAccessSecret = crypto.randomBytes(32).toString('hex');
     }
     accessSecret = ephemeralAccessSecret;
   }
   if (!refreshSecret) {
     if (!ephemeralRefreshSecret) {
-      ephemeralRefreshSecret = crypto
-        .createHash('sha256')
-        .update('otlobha-manzala-refresh-secret-2026-v1')
-        .digest('hex');
+      ephemeralRefreshSecret = crypto.randomBytes(32).toString('hex');
     }
     refreshSecret = ephemeralRefreshSecret;
   }
@@ -78,7 +72,7 @@ export function validateAuthConfiguration(): { accessSecret: string; refreshSecr
   if ((!envAccess || !envRefresh) && !devNoticeLogged) {
     devNoticeLogged = true;
     console.warn(
-      '[Auth] JWT_ACCESS_SECRET / JWT_REFRESH_SECRET not set in environment; using fallback secrets.'
+      '[Auth] JWT_ACCESS_SECRET / JWT_REFRESH_SECRET not set in environment; using ephemeral in-memory signing secrets.'
     );
   }
 
@@ -168,7 +162,7 @@ export function parseCookies(req: Pick<IncomingMessage, 'headers'>): Record<stri
 
 function isSecureCookieRequest(req: Request): boolean {
   if (process.env.COOKIE_SECURE === 'true') return true;
-  if (process.env.NODE_ENV === 'production') return true;
+  if (process.env.COOKIE_SECURE === 'false') return false;
   if (req.secure) return true;
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
   return forwardedProto === 'https';
@@ -179,10 +173,12 @@ function buildCookieString(name: string, value: string, maxAgeSec: number, secur
     `${name}=${encodeURIComponent(value)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
     `Max-Age=${Math.max(0, Math.floor(maxAgeSec))}`,
   ];
-  if (secure) parts.push('Secure');
+  if (secure) {
+    parts.push('Secure', 'Partitioned');
+  }
   return parts.join('; ');
 }
 
@@ -450,6 +446,14 @@ export function rotateRefreshSession(
   }
 
   if (session.revoked_at) {
+    const revokedMs = Date.parse(
+      session.revoked_at.includes('T') ? session.revoked_at : `${session.revoked_at.replace(' ', 'T')}Z`
+    );
+    const ageMs = Number.isFinite(revokedMs) ? Date.now() - revokedMs : Number.POSITIVE_INFINITY;
+    // Brief grace window for concurrent browser tab/reload refresh requests so we do not wipe the brand-new rotated session
+    if (ageMs >= 0 && ageMs < 10_000) {
+      return { ok: false, status: 401, error: 'تم تحديث الجلسة للتو في طلب متزامن، يرجى إعادة المحاولة' };
+    }
     // Reuse detection: revoke all sessions for this user immediately
     const activeRows = db
       .prepare('SELECT id FROM user_sessions WHERE user_id = ? AND user_role = ? AND revoked_at IS NULL')
@@ -579,130 +583,38 @@ function resolveAuthFromToken(token: string | null): { auth: AuthContext; exp: n
   };
 }
 
-function buildAuthContextFromActor(actor: LoadedActor, sessionId = 'portal_ctx_session'): AuthContext {
-  return {
-    id: actor.id,
-    role: actor.role,
-    actorType: actor.actorType,
-    sessionId,
-    fullName: actor.fullName,
-    email: actor.email,
-    roleNameAr: actor.roleNameAr,
-    roleNameEn: actor.roleNameEn,
-    permissions: actor.permissions,
-    profile: actor.profile,
-  };
+function isBearerAuthenticated(req: Request): boolean {
+  const authHeader = String(req.headers.authorization || '').trim();
+  return authHeader.toLowerCase().startsWith('bearer ') && authHeader.length > 7;
 }
 
-function resolvePortalActorFromRequest(
-  req: Request,
-  preferredRoles?: string[],
-  explicitOwnerId?: string | null
-): AuthContext | null {
-  const headerMerchantId = String(req.headers['x-otlobha-merchant-id'] || '').trim();
-  const headerCaptainId = String(req.headers['x-otlobha-captain-id'] || '').trim();
-  const headerCustomerId = String(req.headers['x-otlobha-customer-id'] || '').trim();
+function verifyCookieCsrf(req: Request): boolean {
+  const method = (req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return true;
+  if (isBearerAuthenticated(req)) return true;
 
-  const paramId = String((req.params as Record<string, string | undefined>)?.id || '').trim();
-  const paramMerchantId = String((req.params as Record<string, string | undefined>)?.merchantId || '').trim();
-  const paramCaptainId = String((req.params as Record<string, string | undefined>)?.captainId || '').trim();
-  const paramCustomerId = String((req.params as Record<string, string | undefined>)?.customerId || '').trim();
+  // Custom header set by the SPA (cannot be sent cross-site without explicit CORS preflight)
+  const xrw = String(req.headers['x-requested-with'] || '').trim();
+  if (xrw.length > 0) return true;
 
-  const query = (req.query || {}) as Record<string, unknown>;
-  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+  const originHeader = String(req.headers.origin || '').trim();
+  const refererHeader = String(req.headers.referer || '').trim();
+  const sourceUrl = originHeader || refererHeader;
+  if (!sourceUrl) return true; // Non-browser API client
 
-  const candidateMerchantId =
-    headerMerchantId ||
-    paramMerchantId ||
-    String(body.merchant_id || body.merchantId || query.merchant_id || query.merchantId || '').trim() ||
-    paramId;
-  const candidateCaptainId =
-    headerCaptainId ||
-    paramCaptainId ||
-    String(body.captain_id || body.captainId || query.captain_id || query.captainId || '').trim() ||
-    paramId;
-  const candidateCustomerId =
-    headerCustomerId ||
-    paramCustomerId ||
-    String(body.customer_id || body.customerId || query.customer_id || query.customerId || '').trim() ||
-    paramId;
-
-  const wantsRole = (r: string) => !preferredRoles || preferredRoles.length === 0 || preferredRoles.includes(r);
-
-  if (explicitOwnerId) {
-    const rolesToTry: string[] = preferredRoles?.length
-      ? preferredRoles
-      : ['merchant', 'captain', 'customer', 'super_admin'];
-    for (const r of rolesToTry) {
-      const actor = loadLiveActor(explicitOwnerId, r);
-      if (actor) {
-        return buildAuthContextFromActor(actor);
-      }
-    }
+  try {
+    const parsedSource = new URL(sourceUrl);
+    const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const rawHost = forwardedHost || String(req.headers.host || '').trim();
+    const expectedHost = rawHost.split(':')[0].toLowerCase();
+    const sourceHost = parsedSource.hostname.toLowerCase();
+    if (expectedHost && sourceHost === expectedHost) return true;
+    const localHosts = new Set(['localhost', '127.0.0.1', '::1']);
+    if (localHosts.has(sourceHost) && localHosts.has(expectedHost)) return true;
+    return false;
+  } catch {
+    return false;
   }
-
-  if (wantsRole('merchant') && candidateMerchantId) {
-    const actor = loadLiveActor(candidateMerchantId, 'merchant');
-    if (actor) return buildAuthContextFromActor(actor);
-  }
-
-  if (wantsRole('captain') && candidateCaptainId) {
-    const actor = loadLiveActor(candidateCaptainId, 'captain');
-    if (actor) return buildAuthContextFromActor(actor);
-  }
-
-  if (wantsRole('customer') && candidateCustomerId) {
-    const actor = loadLiveActor(candidateCustomerId, 'customer');
-    if (actor) return buildAuthContextFromActor(actor);
-  }
-
-  if (wantsRole('super_admin') || wantsRole('admin') || preferredRoles?.some((r) => (ALL_ADMIN_ROLES as readonly string[]).includes(r))) {
-    const adminRow = db
-      .prepare("SELECT id, role_code FROM admin_users WHERE is_active = 1 ORDER BY CASE WHEN role_code = 'super_admin' THEN 0 ELSE 1 END LIMIT 1")
-      .get() as { id: string; role_code: string } | undefined;
-    if (adminRow) {
-      const actor = loadLiveActor(adminRow.id, adminRow.role_code);
-      if (actor) return buildAuthContextFromActor(actor);
-    }
-  }
-
-  if (wantsRole('merchant')) {
-    const mRow = db.prepare("SELECT id FROM merchants WHERE verification_status = 'approved' LIMIT 1").get() as { id: string } | undefined;
-    if (mRow) {
-      const actor = loadLiveActor(mRow.id, 'merchant');
-      if (actor) return buildAuthContextFromActor(actor);
-    }
-  }
-
-  if (wantsRole('captain')) {
-    const cRow = db.prepare("SELECT id FROM captains WHERE verification_status != 'suspended' LIMIT 1").get() as { id: string } | undefined;
-    if (cRow) {
-      const actor = loadLiveActor(cRow.id, 'captain');
-      if (actor) return buildAuthContextFromActor(actor);
-    }
-  }
-
-  if (wantsRole('customer')) {
-    const custRow = db.prepare('SELECT id FROM customers LIMIT 1').get() as { id: string } | undefined;
-    if (custRow) {
-      const actor = loadLiveActor(custRow.id, 'customer');
-      if (actor) return buildAuthContextFromActor(actor);
-    }
-    return {
-      id: candidateCustomerId || 'guest_customer_01',
-      role: 'customer',
-      actorType: 'customer',
-      sessionId: 'guest_session',
-      fullName: String(body.customer_name || 'عميل اطلبها'),
-      email: null,
-      permissions: ['customer:self'],
-      profile: {
-        phone: String(body.customer_phone || '01000000000'),
-      },
-    };
-  }
-
-  return null;
 }
 
 export function optionalAuth(req: Request): AuthContext | null {
@@ -713,29 +625,20 @@ export function optionalAuth(req: Request): AuthContext | null {
     req.auth = resolved.auth;
     return resolved.auth;
   }
-  const fallback = resolvePortalActorFromRequest(req);
-  if (fallback) {
-    req.auth = fallback;
-    return fallback;
-  }
   return null;
 }
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = extractAccessToken(req);
   const resolved = resolveAuthFromToken(token);
-  if (resolved) {
-    req.auth = resolved.auth;
-    return next();
+  if (!resolved) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول للوصول إلى هذا المورد' });
   }
-
-  const fallback = resolvePortalActorFromRequest(req);
-  if (fallback) {
-    req.auth = fallback;
-    return next();
+  if (!verifyCookieCsrf(req)) {
+    return res.status(403).json({ error: 'تم رفض الطلب لعدم تطابق مصدر الجلسة' });
   }
-
-  return res.status(401).json({ error: 'يجب تسجيل الدخول للوصول إلى هذا المورد' });
+  req.auth = resolved.auth;
+  return next();
 }
 
 export function requireStrictAdminAuth(req: Request, res: Response, next: NextFunction) {
@@ -747,19 +650,15 @@ export function requireStrictAdminAuth(req: Request, res: Response, next: NextFu
   if (resolved.auth.actorType !== 'admin' || !(ALL_ADMIN_ROLES as readonly string[]).includes(resolved.auth.role)) {
     return res.status(403).json({ error: 'ليس لديك صلاحية الإدارة للوصول إلى الخزنة السحابية' });
   }
+  if (!verifyCookieCsrf(req)) {
+    return res.status(403).json({ error: 'تم رفض الطلب لعدم تطابق مصدر الجلسة' });
+  }
   req.auth = resolved.auth;
   next();
 }
 
 export function requireRole(...allowedRoles: string[]) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.auth || !allowedRoles.includes(req.auth.role)) {
-      const portalActor = resolvePortalActorFromRequest(req, allowedRoles);
-      if (portalActor && allowedRoles.includes(portalActor.role)) {
-        req.auth = portalActor;
-        return next();
-      }
-    }
     if (!req.auth) {
       return res.status(401).json({ error: 'يجب تسجيل الدخول أولًا' });
     }
@@ -773,10 +672,6 @@ export function requireRole(...allowedRoles: string[]) {
 export function requirePermission(...requiredPermissions: string[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.auth) {
-      const portalActor = resolvePortalActorFromRequest(req, ['super_admin', 'admin']);
-      if (portalActor) req.auth = portalActor;
-    }
-    if (!req.auth) {
       return res.status(401).json({ error: 'يجب تسجيل الدخول أولًا' });
     }
     const perms = req.auth.permissions || [];
@@ -785,14 +680,6 @@ export function requirePermission(...requiredPermissions: string[]) {
     }
     if (requiredPermissions.some((p) => perms.includes(p))) {
       return next();
-    }
-    const adminFallback = resolvePortalActorFromRequest(req, ['super_admin', 'admin']);
-    if (adminFallback) {
-      const fallbackPerms = adminFallback.permissions || [];
-      if (fallbackPerms.includes('*') || requiredPermissions.some((p) => fallbackPerms.includes(p))) {
-        req.auth = adminFallback;
-        return next();
-      }
     }
     return res.status(403).json({ error: 'صلاحيات دورك الوظيفي لا تسمح بتنفيذ هذا الإجراء' });
   };
@@ -803,10 +690,6 @@ export function requireOwnership(
   options?: { allowRoles?: string[]; notFoundMessage?: string }
 ) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (!req.auth) {
-      const fallback = resolvePortalActorFromRequest(req);
-      if (fallback) req.auth = fallback;
-    }
     if (!req.auth) {
       return res.status(401).json({ error: 'يجب تسجيل الدخول أولًا' });
     }
@@ -819,11 +702,6 @@ export function requireOwnership(
         return res.status(404).json({ error: options?.notFoundMessage || 'المورد غير موجود' });
       }
       if (String(ownerId) !== String(req.auth.id)) {
-        const ownerActor = resolvePortalActorFromRequest(req, undefined, String(ownerId));
-        if (ownerActor && String(ownerActor.id) === String(ownerId)) {
-          req.auth = ownerActor;
-          return next();
-        }
         return res.status(403).json({ error: 'غير مصرح لك بالوصول إلى بيانات مستخدم آخر' });
       }
       return next();
@@ -963,62 +841,15 @@ export function authenticateWsUpgrade(
     }
   }
 
-  const wsMerchantId = String(urlObj.searchParams.get('merchantId') || '').trim();
-  const wsCaptainId = String(urlObj.searchParams.get('captainId') || '').trim();
-  const wsCustomerId = String(urlObj.searchParams.get('customerId') || '').trim();
-  const wsChannel = String(urlObj.searchParams.get('channel') || '').trim();
-  const defaultExp = Math.floor(Date.now() / 1000) + 86400;
-
-  if (wsMerchantId) {
-    const merchantActor = loadLiveActor(wsMerchantId, 'merchant');
-    if (merchantActor) {
-      return { ok: true, auth: buildAuthContextFromActor(merchantActor), exp: defaultExp };
-    }
-  }
-  if (wsCaptainId) {
-    const captainActor = loadLiveActor(wsCaptainId, 'captain');
-    if (captainActor) {
-      return { ok: true, auth: buildAuthContextFromActor(captainActor), exp: defaultExp };
-    }
-  }
-  if (wsCustomerId) {
-    const customerActor = loadLiveActor(wsCustomerId, 'customer');
-    if (customerActor) {
-      return { ok: true, auth: buildAuthContextFromActor(customerActor), exp: defaultExp };
-    }
-  }
-
   const resolved = resolveAuthFromToken(token);
-  if (resolved) {
-    return { ok: true, auth: resolved.auth, exp: resolved.exp };
+  if (!resolved) {
+    return { ok: false, status: 401, error: 'يجب تسجيل الدخول للاتصال المباشر' };
   }
 
-  if (wsChannel === 'admin' || wsChannel === 'rides') {
-    const adminRow = db
-      .prepare("SELECT id, role_code FROM admin_users WHERE is_active = 1 ORDER BY CASE WHEN role_code = 'super_admin' THEN 0 ELSE 1 END LIMIT 1")
-      .get() as { id: string; role_code: string } | undefined;
-    if (adminRow) {
-      const adminActor = loadLiveActor(adminRow.id, adminRow.role_code);
-      if (adminActor) {
-        return { ok: true, auth: buildAuthContextFromActor(adminActor), exp: defaultExp };
-      }
-    }
+  const wsChannel = String(urlObj.searchParams.get('channel') || '').trim();
+  if (wsChannel === 'admin' && !isAdminAuth(resolved.auth)) {
+    return { ok: false, status: 403, error: 'قناة الإدارة مخصصة لحسابات الإدارة فقط' };
   }
 
-  return {
-    ok: true,
-    auth: {
-      id: wsCustomerId || 'guest_customer_01',
-      role: 'customer',
-      actorType: 'customer',
-      sessionId: 'guest_session',
-      fullName: 'عميل اطلبها',
-      email: null,
-      permissions: ['customer:self'],
-      profile: {
-        phone: '01000000000',
-      },
-    },
-    exp: defaultExp,
-  };
+  return { ok: true, auth: resolved.auth, exp: resolved.exp };
 }

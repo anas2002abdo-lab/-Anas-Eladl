@@ -277,9 +277,9 @@ class MerchantApiClient {
     if (isFreeOrRxWithoutItems && quoteSubtotal != null && quoteSubtotal >= 0) {
       body['subtotal'] = quoteSubtotal;
     }
-    final res = await http
+    final res = await _authedRequest(() => http
         .patch(uri, headers: _headers(), body: jsonEncode(body))
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 20)));
     return Map<String, dynamic>.from(_decode(res) as Map);
   }
 
@@ -291,7 +291,7 @@ class MerchantApiClient {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/orders/${Uri.encodeComponent(orderId)}/merchant-action',
     );
-    final res = await http
+    final res = await _authedRequest(() => http
         .patch(
           uri,
           headers: _headers(),
@@ -301,7 +301,7 @@ class MerchantApiClient {
             'rejected_items': rejectedItems,
           }),
         )
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 20)));
     return Map<String, dynamic>.from(_decode(res) as Map);
   }
 
@@ -313,7 +313,7 @@ class MerchantApiClient {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/orders/${Uri.encodeComponent(orderId)}/merchant-action',
     );
-    final res = await http
+    final res = await _authedRequest(() => http
         .patch(
           uri,
           headers: _headers(),
@@ -323,15 +323,79 @@ class MerchantApiClient {
             'rejection_reason': reason.trim(),
           }),
         )
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 20)));
     return Map<String, dynamic>.from(_decode(res) as Map);
   }
 
   Future<List<Map<String, dynamic>>> fetchStoreProducts(String merchantId) async {
-    final uri = Uri.parse(
-      '${MerchantAppConfig.normalizedBaseUrl}/api/products?merchant_id=${Uri.encodeQueryComponent(merchantId)}',
-    );
-    final res = await http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20));
+    final page = await fetchStoreProductsPage(merchantId: merchantId, page: 1, limit: 100);
+    return page.items;
+  }
+
+  Future<MerchantProductsPageResult> fetchStoreProductsPage({
+    required String merchantId,
+    int page = 1,
+    int limit = 25,
+    String query = '',
+    bool offersOnly = false,
+    bool noImageOnly = false,
+    String availability = 'all', // all | available | unavailable
+  }) async {
+    final qp = <String, String>{
+      'merchant_id': merchantId,
+      'paginated': '1',
+      'page': '$page',
+      'limit': '$limit',
+    };
+    if (query.trim().isNotEmpty) qp['q'] = query.trim();
+    if (offersOnly) qp['offers_only'] = '1';
+    if (noImageOnly) qp['no_image'] = '1';
+    if (availability != 'all') qp['availability'] = availability;
+
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/products')
+        .replace(queryParameters: qp);
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20)));
+    final data = _decode(res);
+    if (data is Map) {
+      final rawItems = (data['items'] as List? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final sum = data['summary'] is Map ? Map<String, dynamic>.from(data['summary'] as Map) : const <String, dynamic>{};
+      return MerchantProductsPageResult(
+        items: rawItems,
+        total: int.tryParse('${data['total'] ?? rawItems.length}') ?? rawItems.length,
+        page: int.tryParse('${data['page'] ?? page}') ?? page,
+        limit: int.tryParse('${data['limit'] ?? limit}') ?? limit,
+        totalPages: int.tryParse('${data['total_pages'] ?? 1}') ?? 1,
+        hasMore: data['has_more'] == true,
+        totalAll: int.tryParse('${sum['total_all'] ?? data['total'] ?? rawItems.length}') ?? rawItems.length,
+        totalOffers: int.tryParse('${sum['total_offers'] ?? 0}') ?? 0,
+        totalNoImage: int.tryParse('${sum['total_no_image'] ?? 0}') ?? 0,
+        totalUnavailable: int.tryParse('${sum['total_unavailable'] ?? 0}') ?? 0,
+      );
+    }
+    if (data is List) {
+      final rawItems = data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      return MerchantProductsPageResult(
+        items: rawItems,
+        total: rawItems.length,
+        page: 1,
+        limit: rawItems.length,
+        totalPages: 1,
+        hasMore: false,
+        totalAll: rawItems.length,
+        totalOffers: rawItems.where((p) => p['is_offer'] == true).length,
+        totalNoImage: rawItems.where((p) => (p['image_url'] ?? '').toString().trim().isEmpty && p['is_available'] == true).length,
+        totalUnavailable: rawItems.where((p) => p['is_available'] == false || p['is_available'] == 0).length,
+      );
+    }
+    return const MerchantProductsPageResult.empty();
+  }
+
+  Future<List<Map<String, dynamic>>> fetchCategories() async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/categories');
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20)));
     final data = _decode(res);
     if (data is List) {
       return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
@@ -341,26 +405,98 @@ class MerchantApiClient {
 
   Future<void> updateProduct({
     required String productId,
+    String? nameAr,
+    String? categoryId,
     bool? isAvailable,
-    double? price,
+    double? basePrice,
+    double? salePrice,
+    bool clearSalePrice = false,
+    bool? isOffer,
+    int? stockQuantity,
+    String? imageUrl,
+    String? description,
+    bool? isWeighted,
+    double? weightStep,
+    String? weightUnit,
+    double? minOrderQty,
   }) async {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/products/${Uri.encodeComponent(productId)}',
     );
     final payload = <String, dynamic>{};
+    if (nameAr != null && nameAr.trim().isNotEmpty) payload['name_ar'] = nameAr.trim();
+    if (categoryId != null && categoryId.trim().isNotEmpty) payload['category_id'] = categoryId.trim();
     if (isAvailable != null) payload['is_available'] = isAvailable;
-    if (price != null && price >= 0) payload['price'] = price;
-    final res = await http
+    if (basePrice != null && basePrice >= 0) payload['base_price'] = basePrice;
+    if (clearSalePrice) {
+      payload['sale_price'] = null;
+    } else if (salePrice != null && salePrice >= 0) {
+      payload['sale_price'] = salePrice;
+    }
+    if (isOffer != null) payload['is_offer'] = isOffer;
+    if (stockQuantity != null && stockQuantity >= 0) payload['stock_quantity'] = stockQuantity;
+    if (imageUrl != null) payload['image_url'] = imageUrl.trim();
+    if (description != null) payload['description'] = description.trim();
+    if (isWeighted != null) payload['is_weighted'] = isWeighted;
+    if (weightStep != null && weightStep > 0) payload['weight_step'] = weightStep;
+    if (weightUnit != null && weightUnit.trim().isNotEmpty) payload['weight_unit'] = weightUnit.trim();
+    if (minOrderQty != null && minOrderQty > 0) payload['min_order_qty'] = minOrderQty;
+
+    final res = await _authedRequest(() => http
         .patch(uri, headers: _headers(), body: jsonEncode(payload))
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 20)));
     _decode(res);
+  }
+
+  Future<Map<String, dynamic>> submitNewProductRequest({
+    required String merchantId,
+    required String productNameAr,
+    String? categoryId,
+    String? categoryPath,
+    required double proposedPrice,
+    double? proposedSalePrice,
+    int proposedStock = 20,
+    String? brand,
+    String? sizeLabel,
+    String? barcode,
+    String? imageUrl,
+    String? description,
+    bool isWeighted = false,
+    double weightStep = 0.25,
+    String weightUnit = 'كجم',
+  }) async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant/master-catalog/request-new');
+    final res = await _authedRequest(() => http
+        .post(
+          uri,
+          headers: _headers(),
+          body: jsonEncode({
+            'merchant_id': merchantId,
+            'product_name_ar': productNameAr.trim(),
+            if (categoryId != null && categoryId.trim().isNotEmpty) 'category_id': categoryId.trim(),
+            if (categoryPath != null && categoryPath.trim().isNotEmpty) 'category_path': categoryPath.trim(),
+            'proposed_price': proposedPrice,
+            if (proposedSalePrice != null && proposedSalePrice > 0) 'proposed_sale_price': proposedSalePrice,
+            'proposed_stock': proposedStock,
+            if (brand != null && brand.trim().isNotEmpty) 'brand': brand.trim(),
+            if (sizeLabel != null && sizeLabel.trim().isNotEmpty) 'size_label': sizeLabel.trim(),
+            if (barcode != null && barcode.trim().isNotEmpty) 'barcode': barcode.trim(),
+            if (imageUrl != null && imageUrl.trim().isNotEmpty) 'image_url': imageUrl.trim(),
+            if (description != null && description.trim().isNotEmpty) 'description': description.trim(),
+            'is_weighted': isWeighted,
+            'weight_step': weightStep,
+            'weight_unit': weightUnit,
+          }),
+        )
+        .timeout(const Duration(seconds: 25)));
+    return Map<String, dynamic>.from(_decode(res) as Map);
   }
 
   Future<List<Map<String, dynamic>>> fetchApprovalRequests(String merchantId) async {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/merchant/master-catalog/my-requests?merchant_id=${Uri.encodeQueryComponent(merchantId)}',
     );
-    final res = await http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20));
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20)));
     final data = _decode(res);
     if (data is List) {
       return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
@@ -375,13 +511,51 @@ class MerchantApiClient {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/merchants/${Uri.encodeComponent(merchantId)}',
     );
-    final res = await http
+    final res = await _authedRequest(() => http
         .patch(
           uri,
           headers: _headers(),
           body: jsonEncode({'is_open': isOpen}),
         )
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 20)));
     _decode(res);
   }
+}
+
+class MerchantProductsPageResult {
+  final List<Map<String, dynamic>> items;
+  final int total;
+  final int page;
+  final int limit;
+  final int totalPages;
+  final bool hasMore;
+  final int totalAll;
+  final int totalOffers;
+  final int totalNoImage;
+  final int totalUnavailable;
+
+  const MerchantProductsPageResult({
+    required this.items,
+    required this.total,
+    required this.page,
+    required this.limit,
+    required this.totalPages,
+    required this.hasMore,
+    required this.totalAll,
+    required this.totalOffers,
+    required this.totalNoImage,
+    required this.totalUnavailable,
+  });
+
+  const MerchantProductsPageResult.empty()
+      : items = const [],
+        total = 0,
+        page = 1,
+        limit = 25,
+        totalPages = 1,
+        hasMore = false,
+        totalAll = 0,
+        totalOffers = 0,
+        totalNoImage = 0,
+        totalUnavailable = 0;
 }

@@ -69,6 +69,12 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
+  String _formatQty(double v) {
+    final rounded = double.parse(v.toStringAsFixed(3));
+    if (rounded == rounded.roundToDouble()) return rounded.toInt().toString();
+    return rounded.toString().replaceFirst(RegExp(r'\.?0+$'), '');
+  }
+
   @override
   Widget build(BuildContext context) {
     final allProducts = (widget.bootstrap['products'] as List?) ?? [];
@@ -103,8 +109,29 @@ class _CartScreenState extends State<CartScreen> {
       final p = widget.cartProductsCache[entry.key] ?? bootstrapProductById[entry.key];
       if (p == null) continue;
       final unit = ((p['sale_price'] ?? p['base_price']) as num).toDouble();
-      subtotal += unit * qty;
-      final itemMap = {'product': p, 'qty': qty, 'unit': unit};
+      final isWeighted = p['is_weighted'] == true || p['is_weighted'] == 1;
+      final rawStep = (p['weight_step'] is num)
+          ? (p['weight_step'] as num).toDouble()
+          : (double.tryParse((p['weight_step'] ?? '').toString()) ?? 0.25);
+      final weightStep = isWeighted ? (rawStep > 0 && rawStep <= 10 ? rawStep : 0.25) : 1.0;
+      final weightUnit = (p['weight_unit'] ?? 'كجم').toString().trim().isNotEmpty
+          ? (p['weight_unit'] ?? 'كجم').toString().trim()
+          : 'كجم';
+      final effectiveQty = isWeighted
+          ? double.parse((qty * weightStep).toStringAsFixed(3))
+          : qty.toDouble();
+      final lineTotal = double.parse((unit * effectiveQty).toStringAsFixed(2));
+      subtotal += lineTotal;
+      final itemMap = {
+        'product': p,
+        'qty': qty,
+        'effective_qty': effectiveQty,
+        'is_weighted': isWeighted,
+        'weight_step': weightStep,
+        'weight_unit': weightUnit,
+        'unit': unit,
+        'line_total': lineTotal,
+      };
       cartItems.add(itemMap);
       final mId = (p['merchant_id'] ?? effectiveMerchantId).toString();
       merchantGroups.putIfAbsent(mId, () => {
@@ -114,7 +141,7 @@ class _CartScreenState extends State<CartScreen> {
         'subtotal': 0.0,
       });
       (merchantGroups[mId]!['items'] as List<Map<String, dynamic>>).add(itemMap);
-      merchantGroups[mId]!['subtotal'] = (merchantGroups[mId]!['subtotal'] as double) + unit * qty;
+      merchantGroups[mId]!['subtotal'] = (merchantGroups[mId]!['subtotal'] as double) + lineTotal;
     }
 
     final remoteFee = ((selectedZone['remote_area_fee'] ?? 0) as num).toDouble();
@@ -242,10 +269,18 @@ class _CartScreenState extends State<CartScreen> {
                       ...grpItems.map((item) {
                         final p = item['product'] as Map<String, dynamic>;
                         final qty = item['qty'] as int;
+                        final isWeighted = item['is_weighted'] == true;
+                        final effectiveQty = (item['effective_qty'] as num).toDouble();
+                        final weightStep = (item['weight_step'] as num).toDouble();
+                        final weightUnit = (item['weight_unit'] ?? 'كجم').toString();
                         final unit = item['unit'] as double;
                         return ListTile(
                           title: Text('${p['name_ar']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                          subtitle: Text('${p['category_name'] ?? ''} · ${unit.toStringAsFixed(0)} ج.م للقطعة'),
+                          subtitle: Text(
+                            isWeighted
+                                ? '${p['category_name'] ?? ''} · ${unit.toStringAsFixed(0)} ج.م / $weightUnit (الزيادة ${_formatQty(weightStep)} $weightUnit)'
+                                : '${p['category_name'] ?? ''} · ${unit.toStringAsFixed(0)} ج.م للقطعة',
+                          ),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -253,7 +288,10 @@ class _CartScreenState extends State<CartScreen> {
                                 onPressed: () => widget.onAddProduct(p, -1),
                                 icon: const Icon(Icons.remove_circle_outline),
                               ),
-                              Text('$qty', style: const TextStyle(fontWeight: FontWeight.bold)),
+                              Text(
+                                isWeighted ? '${_formatQty(effectiveQty)} $weightUnit' : '$qty',
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
                               IconButton(
                                 onPressed: () => widget.onAddProduct(p, 1),
                                 icon: const Icon(Icons.add_circle, color: Color(0xFFEA580C)),
@@ -397,17 +435,21 @@ class _CartScreenState extends State<CartScreen> {
                       for (final grp in merchantGroups.values) {
                         final grpItems = grp['items'] as List<Map<String, dynamic>>;
                         final grpSub = (grp['subtotal'] as num).toDouble();
-                        final summary = grpItems.map((c) => "${c['product']['name_ar']} × ${c['qty']}").join(' + ');
+                        final summary = grpItems
+                            .map((c) => c['is_weighted'] == true
+                                ? "${c['product']['name_ar']} × ${_formatQty((c['effective_qty'] as num).toDouble())} ${c['weight_unit']}"
+                                : "${c['product']['name_ar']} × ${c['qty']}")
+                            .join(' + ');
                         storesPayload.add({
                           'merchant_id': grp['merchant_id'],
                           'order_channel': 'catalog',
                           'free_order_text': summary,
-                          'subtotal': grpSub,
+                          'subtotal': double.parse(grpSub.toStringAsFixed(2)),
                           'items': grpItems
                               .map((c) => {
                                     'product_id': c['product']['id'],
                                     'name_ar': c['product']['name_ar'],
-                                    'quantity': c['qty'],
+                                    'quantity': c['is_weighted'] == true ? c['effective_qty'] : c['qty'],
                                     'unit_price': (c['product']['sale_price'] ?? c['product']['base_price']),
                                   })
                               .toList(),

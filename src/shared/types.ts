@@ -229,6 +229,9 @@ export interface ProductRecord {
   barcode?: string | null;
   merchant_sku?: string;
   min_order_qty?: number;
+  is_weighted?: boolean;
+  weight_step?: number;
+  weight_unit?: string;
   purchase_count?: number;
   description: string;
   image_url: string;
@@ -319,6 +322,9 @@ export interface ProductMatchingRequestRecord {
   batch_id?: string;
   source_file_name?: string;
   enriched_from_master?: number | boolean;
+  is_weighted?: number | boolean;
+  weight_step?: number;
+  weight_unit?: string;
   status: 'pending' | 'approved_new' | 'linked_existing' | 'rejected';
   admin_note: string;
   reviewed_by: string | null;
@@ -378,6 +384,9 @@ export interface StorefrontProductCard {
   description?: string;
   base_price: number;
   sale_price: number | null;
+  is_weighted?: boolean;
+  weight_step?: number;
+  weight_unit?: string;
   effective_price: number;
   discount_percent: number;
   is_offer: boolean;

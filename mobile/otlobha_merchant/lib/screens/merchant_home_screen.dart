@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../core/api_client.dart';
 import '../core/config.dart';
 import '../core/push_notification_service.dart';
+import 'merchant_product_tools.dart';
 
 class MerchantHomeScreen extends StatefulWidget {
   final MerchantApiClient api;
@@ -34,9 +35,19 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
   bool _loadingRequests = false;
   String? _busyOrderId;
   String _productSearch = '';
+  String _productViewMode = 'all'; // all | unavailable
+  int _productsPage = 1;
+  int _productsTotalPages = 1;
+  int _productsTotal = 0;
+  int _totalAllProducts = 0;
+  int _totalOfferProducts = 0;
+  int _totalNoImageProducts = 0;
+  int _totalUnavailableProducts = 0;
+  Timer? _productSearchDebounce;
 
   List<Map<String, dynamic>> _orders = [];
   List<Map<String, dynamic>> _products = [];
+  List<Map<String, dynamic>> _categories = [];
   List<Map<String, dynamic>> _approvalRequests = [];
   List<Map<String, dynamic>> _notifications = [];
   final Set<String> _knownOrderIds = {};
@@ -75,7 +86,8 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     _initPushCallbacks();
     _refreshOrders(initial: true);
     _refreshNotifications(isInitial: true);
-    _refreshProducts();
+    _refreshProducts(page: 1);
+    _loadCategories();
     _refreshApprovalRequests();
     _connectWs();
     _pollTimer = Timer.periodic(const Duration(seconds: 12), (_) {
@@ -92,6 +104,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     _pollTimer?.cancel();
     _wsReconnectTimer?.cancel();
     _bannerTimer?.cancel();
+    _productSearchDebounce?.cancel();
     _wsSub?.cancel();
     _wsChannel?.sink.close();
     for (final c in _quoteControllers.values) {
@@ -342,12 +355,39 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     }
   }
 
-  Future<void> _refreshProducts() async {
-    if (_loadingProducts || _merchantId.isEmpty) return;
+  Future<void> _loadCategories() async {
+    try {
+      final cats = await widget.api.fetchCategories();
+      if (mounted) setState(() => _categories = cats);
+    } catch (_) {
+      // ignore transient error
+    }
+  }
+
+  Future<void> _refreshProducts({int? page}) async {
+    if (_merchantId.isEmpty) return;
+    final targetPage = page ?? _productsPage;
     setState(() => _loadingProducts = true);
     try {
-      final list = await widget.api.fetchStoreProducts(_merchantId);
-      if (mounted) setState(() => _products = list);
+      final res = await widget.api.fetchStoreProductsPage(
+        merchantId: _merchantId,
+        page: targetPage,
+        limit: 25,
+        query: _productSearch.trim(),
+        availability: _productViewMode == 'unavailable' ? 'unavailable' : 'all',
+      );
+      if (mounted) {
+        setState(() {
+          _products = res.items;
+          _productsPage = res.page;
+          _productsTotalPages = res.totalPages;
+          _productsTotal = res.total;
+          _totalAllProducts = res.totalAll;
+          _totalOfferProducts = res.totalOffers;
+          _totalNoImageProducts = res.totalNoImage;
+          _totalUnavailableProducts = res.totalUnavailable;
+        });
+      }
     } catch (_) {
       // ignore transient error
     } finally {
@@ -869,79 +909,445 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     );
   }
 
-  Widget _buildProductsTab() {
-    final q = _productSearch.trim().toLowerCase();
-    final filtered = _products.where((p) {
-      if (q.isEmpty) return true;
-      final name = (p['name_ar'] ?? '').toString().toLowerCase();
-      final cat = (p['category_name_ar'] ?? '').toString().toLowerCase();
-      return name.contains(q) || cat.contains(q);
-    }).toList();
+  Widget _buildProductsTopBarButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    int? badgeCount,
+    bool active = false,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+          decoration: BoxDecoration(
+            color: active ? color : Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: active ? color : color.withOpacity(0.32),
+              width: active ? 1.8 : 1.1,
+            ),
+            boxShadow: const [
+              BoxShadow(color: Color(0x0A0F172A), blurRadius: 6, offset: Offset(0, 2)),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 18, color: active ? Colors.white : color),
+                  if (badgeCount != null && badgeCount > 0) ...[
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: active ? Colors.white.withOpacity(0.24) : color.withOpacity(0.14),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                      child: Text(
+                        '$badgeCount',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w900,
+                          color: active ? Colors.white : color,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 5),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: active ? Colors.white : MerchantAppConfig.brandSlate,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
+  Widget _buildProductsTab() {
+    final isPausedView = _productViewMode == 'unavailable';
     return RefreshIndicator(
-      onRefresh: _refreshProducts,
+      onRefresh: () => _refreshProducts(page: _productsPage),
       child: Column(
         children: [
+          // Top action bar: Add to Offers | Products Without Images (Swipe) | Paused/Hidden Products
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-            child: TextField(
-              onChanged: (v) => setState(() => _productSearch = v),
-              decoration: InputDecoration(
-                hintText: 'ابحث في منتجات متجرك (${_products.length})...',
-                prefixIcon: const Icon(Icons.search),
-                filled: true,
-                fillColor: Colors.white,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
-                isDense: true,
-              ),
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+            child: Row(
+              children: [
+                _buildProductsTopBarButton(
+                  icon: Icons.local_offer_rounded,
+                  label: 'إضافة للعروض',
+                  color: MerchantAppConfig.brandRed,
+                  badgeCount: _totalOfferProducts,
+                  onTap: () async {
+                    final changed = await showMerchantAddToOffersSheet(
+                      context: context,
+                      api: widget.api,
+                      merchantId: _merchantId,
+                    );
+                    if (changed) {
+                      await _refreshProducts(page: _productsPage);
+                    }
+                  },
+                ),
+                const SizedBox(width: 8),
+                _buildProductsTopBarButton(
+                  icon: Icons.style_rounded,
+                  label: 'بدون صور',
+                  color: const Color(0xFFD97706),
+                  badgeCount: _totalNoImageProducts,
+                  onTap: () async {
+                    final changed = await showMerchantNoImageSwipeDeck(
+                      context: context,
+                      api: widget.api,
+                      merchantId: _merchantId,
+                    );
+                    if (changed) {
+                      await _refreshProducts(page: _productsPage);
+                    }
+                  },
+                ),
+                const SizedBox(width: 8),
+                _buildProductsTopBarButton(
+                  icon: Icons.visibility_off_rounded,
+                  label: 'المتوقفة عن الظهور',
+                  color: const Color(0xFF475569),
+                  badgeCount: _totalUnavailableProducts,
+                  active: isPausedView,
+                  onTap: () {
+                    setState(() {
+                      _productViewMode = isPausedView ? 'all' : 'unavailable';
+                      _productsPage = 1;
+                    });
+                    _refreshProducts(page: 1);
+                  },
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    onChanged: (v) {
+                      _productSearch = v;
+                      _productSearchDebounce?.cancel();
+                      _productSearchDebounce = Timer(const Duration(milliseconds: 350), () {
+                        if (!_disposed) _refreshProducts(page: 1);
+                      });
+                    },
+                    decoration: InputDecoration(
+                      hintText: isPausedView
+                          ? 'ابحث في المتوقفة عن الظهور ($_productsTotal)...'
+                          : 'ابحث في كل منتجات متجرك ($_totalAllProducts)...',
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      filled: true,
+                      fillColor: Colors.white,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                if (isPausedView) ...[
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _productViewMode = 'all';
+                        _productsPage = 1;
+                      });
+                      _refreshProducts(page: 1);
+                    },
+                    icon: const Icon(Icons.list_alt_rounded, size: 18),
+                    label: const Text('كل المنتجات', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          // Status & total count strip
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  isPausedView
+                      ? 'المنتجات المتوقفة عن الظهور: $_productsTotal منتج'
+                      : 'إجمالي منتجات المتجر: $_productsTotal منتج',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color(0xFF475569)),
+                ),
+                Text(
+                  'صفحة $_productsPage من $_productsTotalPages',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: MerchantAppConfig.brandRed),
+                ),
+              ],
             ),
           ),
           Expanded(
-            child: filtered.isEmpty
-                ? const Center(child: Text('لا توجد منتجات مطابقة'))
-                : ListView.builder(
-                    padding: const EdgeInsets.all(14),
-                    itemCount: filtered.length,
-                    itemBuilder: (_, idx) {
-                      final p = filtered[idx];
-                      final avail = p['is_available'] == true || p['is_available'] == 1;
-                      return Card(
-                        color: Colors.white,
-                        margin: const EdgeInsets.only(bottom: 8),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          side: const BorderSide(color: Color(0xFFE2E8F0)),
+            child: _loadingProducts
+                ? const Center(child: CircularProgressIndicator())
+                : _products.isEmpty
+                    ? Center(
+                        child: Text(
+                          isPausedView
+                              ? 'لا توجد منتجات متوقفة عن الظهور حاليًا'
+                              : 'لا توجد منتجات مطابقة للبحث',
+                          style: const TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.w700),
                         ),
-                        child: ListTile(
-                          title: Text(
-                            p['name_ar']?.toString() ?? '',
-                            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-                          ),
-                          subtitle: Text(
-                            '${p['category_name_ar'] ?? 'عام'} · ${p['price'] ?? 0} ج.م',
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                          trailing: Switch(
-                            value: avail,
-                            activeThumbColor: MerchantAppConfig.brandTeal,
-                            onChanged: (val) async {
-                              try {
-                                await widget.api.updateProduct(
-                                  productId: p['id'].toString(),
-                                  isAvailable: val,
-                                );
-                                await _refreshProducts();
-                                _snack(val ? 'تم تفعيل المنتج' : 'تم إيقاف المنتج مؤقتًا');
-                              } catch (e) {
-                                _snack(e.toString(), isError: true);
-                              }
-                            },
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+                        itemCount: _products.length,
+                        itemBuilder: (_, idx) {
+                          final p = _products[idx];
+                          final avail = p['is_available'] == true || p['is_available'] == 1;
+                          final isOffer = p['is_offer'] == true || p['is_offer'] == 1;
+                          final isWeighted = p['is_weighted'] == true || p['is_weighted'] == 1;
+                          final weightStep = double.tryParse('${p['weight_step'] ?? 0.25}') ?? 0.25;
+                          final weightUnit = (p['weight_unit'] ?? 'كجم').toString();
+                          final basePrice = double.tryParse('${p['base_price'] ?? p['price'] ?? 0}') ?? 0;
+                          final salePrice = p['sale_price'] != null ? double.tryParse('${p['sale_price']}') : null;
+                          final imgUrl = (p['image_url'] ?? '').toString().trim();
+                          final catName = (p['category_name'] ?? p['category_name_ar'] ?? 'عام').toString();
+
+                          return Card(
+                            color: Colors.white,
+                            elevation: 0,
+                            margin: const EdgeInsets.only(bottom: 8),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              side: BorderSide(
+                                color: !avail
+                                    ? const Color(0xFFFCA5A5)
+                                    : isOffer
+                                        ? MerchantAppConfig.brandRed.withOpacity(0.35)
+                                        : const Color(0xFFE2E8F0),
+                              ),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(10),
+                              child: Row(
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: imgUrl.isNotEmpty
+                                        ? Image.network(
+                                            imgUrl,
+                                            width: 56,
+                                            height: 56,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) => Container(
+                                              width: 56,
+                                              height: 56,
+                                              color: const Color(0xFFF1F5F9),
+                                              child: const Icon(Icons.image_not_supported_outlined, color: Color(0xFF94A3B8)),
+                                            ),
+                                          )
+                                        : Container(
+                                            width: 56,
+                                            height: 56,
+                                            color: const Color(0xFFFEF3C7),
+                                            child: const Icon(Icons.hide_image_outlined, color: Color(0xFFD97706)),
+                                          ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          p['name_ar']?.toString() ?? '',
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13.5),
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Wrap(
+                                          spacing: 6,
+                                          runSpacing: 4,
+                                          children: [
+                                            Text(
+                                              catName,
+                                              style: const TextStyle(fontSize: 11.5, color: Color(0xFF64748B)),
+                                            ),
+                                            if (salePrice != null && salePrice < basePrice)
+                                              Text(
+                                                '${salePrice.toStringAsFixed(2)} ج.م (بدل ${basePrice.toStringAsFixed(2)})',
+                                                style: const TextStyle(
+                                                  fontSize: 11.5,
+                                                  fontWeight: FontWeight.w800,
+                                                  color: MerchantAppConfig.brandRed,
+                                                ),
+                                              )
+                                            else
+                                              Text(
+                                                '${basePrice.toStringAsFixed(2)} ج.م',
+                                                style: const TextStyle(
+                                                  fontSize: 11.5,
+                                                  fontWeight: FontWeight.w800,
+                                                  color: MerchantAppConfig.brandSlate,
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Wrap(
+                                          spacing: 5,
+                                          runSpacing: 4,
+                                          children: [
+                                            if (isOffer)
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFFFFE4E6),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: const Text(
+                                                  'في العروض',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: MerchantAppConfig.brandRed,
+                                                  ),
+                                                ),
+                                              ),
+                                            if (isWeighted)
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFFFEF3C7),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: Text(
+                                                  'بالوزن (+$weightStep $weightUnit)',
+                                                  style: const TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: Color(0xFF92400E),
+                                                  ),
+                                                ),
+                                              ),
+                                            if (!avail)
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFFFEE2E2),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: const Text(
+                                                  'متوقف عن الظهور',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: Color(0xFFB91C1C),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: 'تعديل المنتج',
+                                        icon: const Icon(Icons.edit_rounded, color: MerchantAppConfig.brandRed, size: 20),
+                                        onPressed: () async {
+                                          if (_categories.isEmpty) await _loadCategories();
+                                          if (!mounted) return;
+                                          final updated = await showMerchantEditProductSheet(
+                                            context: context,
+                                            api: widget.api,
+                                            product: p,
+                                            categories: _categories,
+                                          );
+                                          if (updated) {
+                                            await _refreshProducts(page: _productsPage);
+                                            _snack('تم حفظ تعديلات المنتج بنجاح');
+                                          }
+                                        },
+                                      ),
+                                      Switch(
+                                        value: avail,
+                                        activeThumbColor: MerchantAppConfig.brandTeal,
+                                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                        onChanged: (val) async {
+                                          try {
+                                            await widget.api.updateProduct(
+                                              productId: p['id'].toString(),
+                                              isAvailable: val,
+                                            );
+                                            await _refreshProducts(page: _productsPage);
+                                            _snack(val ? 'تم إعادة إظهار المنتج للعملاء' : 'تم إيقاف ظهور المنتج مؤقتًا');
+                                          } catch (e) {
+                                            _snack(e.toString(), isError: true);
+                                          }
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
           ),
+          // Sequential Pagination Controls for ALL merchant products
+          if (_productsTotalPages > 1)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _productsPage > 1 && !_loadingProducts
+                        ? () => _refreshProducts(page: _productsPage - 1)
+                        : null,
+                    icon: const Icon(Icons.chevron_right_rounded, size: 18),
+                    label: const Text('الصفحة السابقة', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                  ),
+                  Text(
+                    '$_productsPage / $_productsTotalPages',
+                    style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _productsPage < _productsTotalPages && !_loadingProducts
+                        ? () => _refreshProducts(page: _productsPage + 1)
+                        : null,
+                    icon: const Icon(Icons.chevron_left_rounded, size: 18),
+                    label: const Text('الصفحة التالية', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -965,23 +1371,57 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'رفع ملف Excel للكتالوج المركزي',
+                  'إضافة منتجات جديدة واعتماد الكتالوج',
                   style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'ارفع ملف Excel لمنتجاتك مع تقسيم الأقسام تلقائيًا وإرسالها للإدارة للاعتماد والنشر على المنصة.',
+                  'أضف منتجًا جديدًا مباشرة من هنا (مع دعم البيع بالوزن بأقل من واحد صحيح) أو ارفع ملف Excel لمنتجاتك للاعتماد والنشر.',
                   style: TextStyle(color: Color(0xFFFEE2E2), fontSize: 12),
                 ),
                 const SizedBox(height: 12),
-                FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: MerchantAppConfig.brandRed,
-                  ),
-                  onPressed: () => _openExternalUrl(MerchantAppConfig.merchantPortalWebUrl),
-                  icon: const Icon(Icons.upload_file),
-                  label: const Text('فتح أداة رفع Excel المتقدمة', style: TextStyle(fontWeight: FontWeight.w800)),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: MerchantAppConfig.brandRed,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        onPressed: () async {
+                          if (_categories.isEmpty) await _loadCategories();
+                          if (!mounted) return;
+                          final added = await showMerchantAddProductSheet(
+                            context: context,
+                            api: widget.api,
+                            merchantId: _merchantId,
+                            categories: _categories,
+                          );
+                          if (added) {
+                            await _refreshApprovalRequests();
+                            await _refreshProducts(page: 1);
+                            _snack('تم إرسال المنتج الجديد للاعتماد بنجاح ✓');
+                          }
+                        },
+                        icon: const Icon(Icons.add_circle_outline_rounded, size: 20),
+                        label: const Text('إضافة منتج', style: TextStyle(fontWeight: FontWeight.w900)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white70),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        onPressed: () => _openExternalUrl(MerchantAppConfig.merchantPortalWebUrl),
+                        icon: const Icon(Icons.upload_file, size: 19),
+                        label: const Text('رفع ملف Excel', style: TextStyle(fontWeight: FontWeight.w800)),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -998,7 +1438,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
               child: Padding(
                 padding: EdgeInsets.all(24),
                 child: Text(
-                  'لا توجد طلبات اعتماد مرسلة حتى الآن',
+                  'لا توجد طلبات اعتماد مرسلة حتى الآن — يمكنك الضغط على «إضافة منتج» أعلاه.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Color(0xFF64748B)),
                 ),
@@ -1007,11 +1447,15 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
           else
             ..._approvalRequests.map((req) {
               final status = req['status']?.toString() ?? 'pending';
-              final label = status == 'approved'
+              final isApproved = status == 'approved' || status == 'approved_new' || status == 'linked_existing';
+              final label = isApproved
                   ? 'معتمد ✓'
                   : status == 'rejected'
                       ? 'مرفوض'
                       : 'قيد مراجعة الإدارة';
+              final isWeighted = req['is_weighted'] == true || req['is_weighted'] == 1;
+              final weightStep = req['weight_step'] ?? 0.25;
+              final weightUnit = req['weight_unit'] ?? 'كجم';
               return Card(
                 color: Colors.white,
                 margin: const EdgeInsets.only(bottom: 8),
@@ -1021,13 +1465,13 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                     style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
                   ),
                   subtitle: Text(
-                    '${req['category_path'] ?? 'بدون قسم'} · ${req['proposed_price'] ?? 0} ج.م',
+                    '${req['category_path'] ?? req['category_name'] ?? 'بدون قسم'} · ${req['proposed_price'] ?? 0} ج.م${isWeighted ? ' · بالوزن (+$weightStep $weightUnit)' : ''}',
                     style: const TextStyle(fontSize: 11),
                   ),
                   trailing: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
-                      color: status == 'approved'
+                      color: isApproved
                           ? const Color(0xFFDCFCE7)
                           : status == 'rejected'
                               ? const Color(0xFFFFE4E6)

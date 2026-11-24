@@ -436,14 +436,23 @@ function mapPlatformConfig(item: { config_group: string; record_id: string; data
 async function adminApiFetch<T>(url: string, options?: RequestInit, retried = false): Promise<T> {
   const res = await fetch(url, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(options?.headers || {}) },
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      ...(options?.headers || {}),
+    },
     ...options,
   });
   if (res.status === 401 && !retried) {
     const ref = await fetch('/api/auth/refresh', {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
       body: JSON.stringify({}),
     }).catch(() => null);
     if (ref?.ok) {

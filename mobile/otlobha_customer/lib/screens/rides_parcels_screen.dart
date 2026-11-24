@@ -140,7 +140,18 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
         _pickupPoint.longitude,
         vehicleType: 'all',
       );
-      if (mounted) setState(() => _nearbyCaptains = caps);
+      final onlineOnly = caps.where((c) => c['availability_status']?.toString() == 'available').toList();
+      if (mounted) {
+        setState(() {
+          _nearbyCaptains = onlineOnly;
+          if (_selectedCaptainId != null && !onlineOnly.any((c) => c['id']?.toString() == _selectedCaptainId)) {
+            _selectedCaptainId = null;
+          }
+          if (_parcelCaptainId != null && !onlineOnly.any((c) => c['id']?.toString() == _parcelCaptainId)) {
+            _parcelCaptainId = null;
+          }
+        });
+      }
     } catch (_) {}
   }
 
@@ -155,10 +166,17 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
         _pickupPoint.longitude,
         vehicleType: 'all',
       );
+      final onlineOnly = caps.where((c) => c['availability_status']?.toString() == 'available').toList();
       if (!mounted) return;
       setState(() {
         _distanceKm = roundedDist;
-        _nearbyCaptains = caps;
+        _nearbyCaptains = onlineOnly;
+        if (_selectedCaptainId != null && !onlineOnly.any((c) => c['id']?.toString() == _selectedCaptainId)) {
+          _selectedCaptainId = null;
+        }
+        if (_parcelCaptainId != null && !onlineOnly.any((c) => c['id']?.toString() == _parcelCaptainId)) {
+          _parcelCaptainId = null;
+        }
       });
     } catch (_) {
       if (mounted) setState(() => _distanceKm = roundedDist);
@@ -254,10 +272,12 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
             ),
           ),
         ),
-      ..._nearbyCaptains.where((c) => c['lat'] != null && c['lng'] != null).map((c) {
+      ..._nearbyCaptains
+          .where((c) => c['lat'] != null && c['lng'] != null && c['availability_status']?.toString() == 'available')
+          .map((c) {
         final cid = c['id']?.toString();
         final isSelected = cid == _selectedCaptainId;
-        final avail = c['availability_status']?.toString() ?? 'available';
+        final avail = c['availability_status']?.toString() ?? 'offline';
         final pinColor = isSelected
             ? const Color(0xFFEA580C)
             : avail == 'available'
@@ -553,7 +573,12 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
                           : c['vehicle_type'] == 'car'
                               ? 'سيارة'
                               : 'موتوسيكل';
-                      final availLabel = c['availability_status'] == 'available' ? 'متاح' : 'في مهمة';
+                      final avail = c['availability_status']?.toString() ?? 'offline';
+                      final availLabel = avail == 'available'
+                          ? 'متاح'
+                          : avail == 'busy'
+                              ? 'في مهمة'
+                              : 'غير متاح';
                       return DropdownMenuItem<String?>(
                         value: cid,
                         child: Text(
@@ -613,12 +638,21 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
                 if (_nearbyCaptains.isEmpty)
                   Container(
                     padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(10)),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFFBEB),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFFDE68A)),
+                    ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('لا يوجد طيارون ظاهرون حاليًا.', style: TextStyle(fontSize: 11.5, color: Colors.black54)),
-                        TextButton(onPressed: _refreshNearbyOnly, child: const Text('إعادة التحميل')),
+                        const Expanded(
+                          child: Text(
+                            'لا يوجد طيار متاح حاليًا — يمكنك إرسال الطلب وسيتلقاه أول طيار متاح.',
+                            style: TextStyle(fontSize: 11.5, color: Color(0xFF92400E), fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        TextButton(onPressed: _refreshNearbyOnly, child: const Text('تحديث')),
                       ],
                     ),
                   )
@@ -628,7 +662,7 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
                       .map((c) {
                     final cid = c['id']?.toString();
                     final isSelected = cid == _selectedCaptainId;
-                    final avail = c['availability_status']?.toString() ?? 'available';
+                    final avail = c['availability_status']?.toString() ?? 'offline';
                     return InkWell(
                       onTap: () {
                         setState(() {

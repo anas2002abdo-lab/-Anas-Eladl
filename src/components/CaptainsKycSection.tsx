@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Eye, EyeOff, KeyRound, MapPin, Navigation, RefreshCw, Star } from 'lucide-react';
+import { Eye, EyeOff, KeyRound, MapPin, Navigation, RefreshCw, Star, Trash2, X } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
 import type {
@@ -47,6 +47,8 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
   const [ratingCaptainFilter, setRatingCaptainFilter] = useState<string>('all');
   const [ratingTypeFilter, setRatingTypeFilter] = useState<string>('all');
   const [refreshingGps, setRefreshingGps] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<CaptainRecord | null>(null);
+  const [deletingCaptain, setDeletingCaptain] = useState(false);
 
   const filtered = filter === 'all' ? captains : captains.filter((c) => c.verification_status === filter);
 
@@ -115,9 +117,36 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
       if (fresh) {
         setSelected(fresh);
         setCredUsername(fresh.username || '');
+      } else {
+        const next = captains[0] ?? null;
+        setSelected(next);
+        setCashLimitInput(next?.cash_limit ?? 1000);
+        setCredUsername(next?.username || '');
       }
     }
   }, [captains]);
+
+  const handleConfirmDeleteCaptain = async () => {
+    if (!deleteTarget) return;
+    setDeletingCaptain(true);
+    try {
+      const res = await api.deleteCaptain(deleteTarget.id);
+      if (selected?.id === deleteTarget.id) {
+        setSelected(null);
+      }
+      setDeleteTarget(null);
+      await onRefresh();
+      onNotify(
+        isAr
+          ? `تم حذف الطيار (${res.deleted_name || deleteTarget.full_name}) نهائيًا`
+          : `Captain (${res.deleted_name || deleteTarget.full_name}) deleted`
+      );
+    } catch (err) {
+      onNotify((err as Error).message || (isAr ? 'تعذر حذف الطيار' : 'Failed to delete captain'));
+    } finally {
+      setDeletingCaptain(false);
+    }
+  };
 
   const handleSelect = (c: CaptainRecord) => {
     setSelected(c);
@@ -348,36 +377,53 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
           </h3>
           <div className="divide-y divide-slate-100">
             {filtered.map((c) => (
-              <button
+              <div
                 key={c.id}
-                onClick={() => handleSelect(c)}
-                className={`w-full text-start p-3 rounded-lg transition-colors ${
+                className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${
                   selected?.id === c.id ? 'bg-orange-50' : 'hover:bg-slate-50'
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-sm font-semibold text-slate-900 truncate">{c.full_name}</span>
-                    {c.username && (
-                      <span dir="ltr" className="text-[11px] font-mono-num px-1.5 py-0.5 bg-slate-100 text-slate-700 rounded">
-                        @{c.username}
-                      </span>
-                    )}
+                <button
+                  type="button"
+                  onClick={() => handleSelect(c)}
+                  className="flex-1 min-w-0 text-start p-1 cursor-pointer"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-semibold text-slate-900 truncate">{c.full_name}</span>
+                      {c.username && (
+                        <span dir="ltr" className="text-[11px] font-mono-num px-1.5 py-0.5 bg-slate-100 text-slate-700 rounded">
+                          @{c.username}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs font-medium text-slate-600 shrink-0">
+                      {isAr ? STATUS_LABELS[c.verification_status]?.ar : STATUS_LABELS[c.verification_status]?.en}
+                    </span>
                   </div>
-                  <span className="text-xs font-medium text-slate-600 shrink-0">
-                    {isAr ? STATUS_LABELS[c.verification_status]?.ar : STATUS_LABELS[c.verification_status]?.en}
-                  </span>
-                </div>
-                <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-2 tabular-nums">
-                  <span>{c.vehicle_type}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{c.plate_number}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-amber-600 font-bold">★ {Number(c.rating_avg || 5).toFixed(2)}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{c.zone_name}</span>
-                </div>
-              </button>
+                  <div className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-2 tabular-nums">
+                    <span>{c.vehicle_type}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{c.plate_number}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="text-amber-600 font-bold">★ {Number(c.rating_avg || 5).toFixed(2)}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{c.zone_name}</span>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDeleteTarget(c);
+                  }}
+                  title={isAr ? 'حذف الطيار' : 'Delete Captain'}
+                  aria-label={isAr ? `حذف الطيار ${c.full_name}` : `Delete captain ${c.full_name}`}
+                  className="p-2 rounded-lg text-rose-600 hover:bg-rose-100/80 border border-transparent hover:border-rose-200 transition-colors shrink-0 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -406,13 +452,21 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
                     {selected.location_updated_at ? ` · ${selected.location_updated_at}` : ''}
                   </p>
                 </div>
-                <div className="text-xs text-slate-600 tabular-nums space-y-0.5 text-end">
+                <div className="text-xs text-slate-600 tabular-nums space-y-1.5 text-end">
                   <div>
                     {isAr ? 'مستحقات التطبيق على الكابتن:' : 'Cash:'} <strong>{selected.cash_on_hand}</strong> / {selected.cash_limit} ج.م
                   </div>
                   <div className="text-rose-700">
                     {isAr ? 'إجمالي غرامات الإلغاء (10%):' : 'Penalties:'} <strong>{selected.total_penalties ?? 0} ج.م</strong>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(selected)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{isAr ? 'حذف الطيار' : 'Delete Captain'}</span>
+                  </button>
                 </div>
               </div>
 
@@ -691,6 +745,60 @@ export const CaptainsKycSection: React.FC<Props> = ({ lang, captains, onRefresh,
           </div>
         )}
       </div>
+
+      {/* Delete Captain Confirmation Modal */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-bold text-slate-900">
+                    {isAr ? 'تأكيد حذف الطيار' : 'Confirm Delete Captain'}
+                  </h4>
+                  <p className="text-xs text-slate-500">
+                    {isAr ? 'لا يمكن التراجع عن هذا الإجراء بعد التنفيذ' : 'This action cannot be undone'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                className="p-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-700 leading-relaxed">
+              {isAr
+                ? `هل أنت متأكد من حذف حساب الطيار «${deleteTarget.full_name}» (${deleteTarget.phone})؟ سيتم إنهاء جلساته النشطة وإزالة مستنداته وحسابه مع الحفاظ على سجل الطلبات التاريخي.`
+                : `Are you sure you want to permanently delete captain "${deleteTarget.full_name}" (${deleteTarget.phone})?`}
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={deletingCaptain}
+                onClick={() => setDeleteTarget(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                {isAr ? 'إلغاء' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                disabled={deletingCaptain}
+                onClick={() => void handleConfirmDeleteCaptain()}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{deletingCaptain ? (isAr ? 'جارٍ الحذف...' : 'Deleting...') : isAr ? 'حذف نهائي' : 'Delete'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

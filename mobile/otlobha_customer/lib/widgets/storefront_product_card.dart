@@ -27,6 +27,12 @@ class StorefrontProductCardWidget extends StatelessWidget {
     return value.toStringAsFixed(2);
   }
 
+  String _formatQty(double value) {
+    final rounded = double.parse(value.toStringAsFixed(3));
+    if (rounded == rounded.roundToDouble()) return rounded.toInt().toString();
+    return rounded.toString().replaceFirst(RegExp(r'\.?0+$'), '');
+  }
+
   @override
   Widget build(BuildContext context) {
     final basePrice = _toDouble(product['base_price']);
@@ -43,11 +49,20 @@ class StorefrontProductCardWidget extends StatelessWidget {
             ? (((basePrice - effPrice) / basePrice) * 100).round()
             : 0);
     final isOffer = product['is_offer'] == true || product['is_offer'] == 1;
+    final isWeighted = product['is_weighted'] == true || product['is_weighted'] == 1;
+    final rawStep = _toDouble(product['weight_step']);
+    final weightStep = (isWeighted && rawStep > 0 && rawStep <= 10) ? rawStep : 0.25;
+    final weightUnit = (product['weight_unit'] ?? 'كجم').toString().trim().isNotEmpty
+        ? (product['weight_unit'] ?? 'كجم').toString().trim()
+        : 'كجم';
     final storesCount = (product['stores_count'] as num?)?.toInt() ?? 1;
     final imgUrl = OtlobhaCustomerApi.resolveMediaUrl(product['image_url']);
     final brand = (product['brand'] ?? '').toString().trim();
     final categoryName = (product['category_name'] ?? '').toString().trim();
-    final sizeLabel = (product['size_label'] ?? '').toString().trim();
+    final rawSizeLabel = (product['size_label'] ?? '').toString().trim();
+    final sizeLabel = rawSizeLabel.isNotEmpty
+        ? rawSizeLabel
+        : (isWeighted ? 'بالوزن +${_formatQty(weightStep)} $weightUnit' : '');
     final merchantName = (product['merchant_name'] ?? '').toString().trim();
     final nameAr = (product['name_ar'] ?? '').toString().trim();
     final activeDeal = product['active_deal'] is Map
@@ -184,10 +199,12 @@ class StorefrontProductCardWidget extends StatelessWidget {
                                   Padding(
                                     padding: const EdgeInsets.symmetric(horizontal: 8),
                                     child: Text(
-                                      '$cartQty',
+                                      isWeighted
+                                          ? '${_formatQty(cartQty * weightStep)} $weightUnit'
+                                          : '$cartQty',
                                       style: const TextStyle(
                                         color: Colors.white,
-                                        fontSize: 13,
+                                        fontSize: 12.5,
                                         fontWeight: FontWeight.w900,
                                       ),
                                     ),
@@ -312,9 +329,9 @@ class StorefrontProductCardWidget extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(width: 3),
-                            const Text(
-                              'ج.م',
-                              style: TextStyle(
+                            Text(
+                              isWeighted ? 'ج.م / $weightUnit' : 'ج.م',
+                              style: const TextStyle(
                                 fontSize: 10.5,
                                 fontWeight: FontWeight.w700,
                                 color: Color(0xFF475569),

@@ -1097,6 +1097,9 @@ export function linkMerchantListingToMaster(input: {
   sale_price?: number | null;
   stock_quantity?: number;
   min_order_qty?: number;
+  is_weighted?: boolean;
+  weight_step?: number;
+  weight_unit?: string;
   merchant_sku?: string;
   is_available?: boolean;
   is_offer?: boolean;
@@ -1131,7 +1134,14 @@ export function linkMerchantListingToMaster(input: {
   }
 
   const stockQty = Math.max(0, Math.floor(Number(input.stock_quantity ?? 50)));
-  const minQty = Math.max(1, Math.floor(Number(input.min_order_qty ?? 1)));
+  const isWeighted = Boolean(input.is_weighted) ? 1 : 0;
+  const rawStep = Number(input.weight_step ?? 0.25);
+  const weightStep = Number.isFinite(rawStep) && rawStep >= 0.05 && rawStep <= 10 ? Math.round(rawStep * 1000) / 1000 : 0.25;
+  const weightUnit = String(input.weight_unit || 'كجم').trim() || 'كجم';
+  const rawMin = Number(input.min_order_qty ?? (isWeighted ? weightStep : 1));
+  const minQty = isWeighted
+    ? Math.max(weightStep, Math.round((Number.isFinite(rawMin) && rawMin > 0 ? rawMin : weightStep) * 1000) / 1000)
+    : Math.max(1, Math.floor(Number.isFinite(rawMin) ? rawMin : 1));
   const isAvailable = input.is_available !== false ? 1 : 0;
   const isOffer = Boolean(input.is_offer) || (salePrice !== null && salePrice < basePrice) ? 1 : 0;
 
@@ -1156,6 +1166,9 @@ export function linkMerchantListingToMaster(input: {
         is_offer = ?,
         stock_quantity = ?,
         min_order_qty = ?,
+        is_weighted = ?,
+        weight_step = ?,
+        weight_unit = ?,
         merchant_sku = ?,
         is_available = ?,
         brand = ?,
@@ -1177,6 +1190,9 @@ export function linkMerchantListingToMaster(input: {
       isOffer,
       stockQty,
       minQty,
+      input.is_weighted !== undefined ? isWeighted : (existing.is_weighted ? 1 : 0),
+      input.weight_step !== undefined ? weightStep : Number(existing.weight_step || 0.25),
+      input.weight_unit !== undefined ? weightUnit : String(existing.weight_unit || 'كجم'),
       String(input.merchant_sku || existing.merchant_sku || '').trim(),
       isAvailable,
       master.brand || '',
@@ -1205,8 +1221,8 @@ export function linkMerchantListingToMaster(input: {
       name_ar, name_en, description, image_url,
       brand, size_label, size_value, size_unit, barcode, merchant_sku,
       base_price, sale_price, is_offer, stock_quantity, low_stock_threshold,
-      min_order_qty, requires_prescription, addons_text, is_available
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, 0, '', ?)
+      min_order_qty, is_weighted, weight_step, weight_unit, requires_prescription, addons_text, is_available
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?, ?, ?, 0, '', ?)
   `).run(
     id,
     productCode,
@@ -1228,6 +1244,9 @@ export function linkMerchantListingToMaster(input: {
     isOffer,
     stockQty,
     minQty,
+    isWeighted,
+    weightStep,
+    weightUnit,
     isAvailable
   );
 
@@ -1558,6 +1577,9 @@ export function submitMerchantProductRequestRecord(input: {
   batch_id?: string;
   source_file_name?: string;
   enriched_from_master?: boolean;
+  is_weighted?: boolean;
+  weight_step?: number;
+  weight_unit?: string;
 }): { request: Record<string, any>; match_preview: MatchMasterResult } {
   const nameAr = String(input.product_name_ar || '').trim();
   if (!nameAr) throw new Error('اسم المنتج مطلوب');
@@ -1616,13 +1638,22 @@ export function submitMerchantProductRequestRecord(input: {
       : 0;
 
   const id = uid('pmr');
+  const reqIsWeighted = Boolean(input.is_weighted) ? 1 : 0;
+  const rawReqStep = Number(input.weight_step ?? 0.25);
+  const reqWeightStep =
+    Number.isFinite(rawReqStep) && rawReqStep >= 0.05 && rawReqStep <= 10
+      ? Math.round(rawReqStep * 1000) / 1000
+      : 0.25;
+  const reqWeightUnit = String(input.weight_unit || 'كجم').trim() || 'كجم';
+
   db.prepare(`
     INSERT INTO product_matching_requests (
       id, merchant_id, requested_by, product_name_ar, product_name_en, brand, category_id, category_path,
       barcode, size_value, size_unit, size_label, image_url, description,
       proposed_price, proposed_sale_price, proposed_stock, merchant_sku,
-      suggested_master_id, match_confidence, batch_id, source_file_name, enriched_from_master, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+      suggested_master_id, match_confidence, batch_id, source_file_name, enriched_from_master,
+      is_weighted, weight_step, weight_unit, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
   `).run(
     id,
     input.merchant_id,
@@ -1648,7 +1679,10 @@ export function submitMerchantProductRequestRecord(input: {
     matchPreview.match_status,
     String(input.batch_id || '').trim(),
     String(input.source_file_name || '').trim(),
-    enrichedFlag
+    enrichedFlag,
+    reqIsWeighted,
+    reqWeightStep,
+    reqWeightUnit
   );
 
   const request = db.prepare('SELECT * FROM product_matching_requests WHERE id = ?').get(id) as Record<string, any>;
@@ -1765,6 +1799,9 @@ export function reviewMerchantProductRequestRecord(input: {
         base_price: Number(reqRow.proposed_price || 0),
         sale_price: reqRow.proposed_sale_price !== null ? Number(reqRow.proposed_sale_price) : null,
         stock_quantity: Number(reqRow.proposed_stock ?? 10),
+        is_weighted: Boolean(reqRow.is_weighted),
+        weight_step: Number(reqRow.weight_step || 0.25),
+        weight_unit: String(reqRow.weight_unit || 'كجم'),
         merchant_sku: reqRow.merchant_sku || '',
         is_available: true,
         actor_name: actor,
@@ -1810,6 +1847,9 @@ export function reviewMerchantProductRequestRecord(input: {
         base_price: Number(reqRow.proposed_price || 0),
         sale_price: reqRow.proposed_sale_price !== null ? Number(reqRow.proposed_sale_price) : null,
         stock_quantity: Number(reqRow.proposed_stock ?? 10),
+        is_weighted: Boolean(reqRow.is_weighted),
+        weight_step: Number(reqRow.weight_step || 0.25),
+        weight_unit: String(reqRow.weight_unit || 'كجم'),
         merchant_sku: reqRow.merchant_sku || '',
         is_available: true,
         actor_name: actor,
@@ -2452,7 +2492,10 @@ export function registerMasterCatalogRoutes(app: Express): void {
         discount_percent: discountPct,
         is_offer: Boolean(r.is_offer) || discountPct > 0,
         stock_quantity: Number(r.stock_quantity ?? 0),
-        min_order_qty: Number(r.min_order_qty ?? 1),
+        is_weighted: Boolean(r.is_weighted),
+        weight_step: Number(r.weight_step || 0.25),
+        weight_unit: String(r.weight_unit || 'كجم').trim() || 'كجم',
+        min_order_qty: Number(r.min_order_qty ?? (Boolean(r.is_weighted) ? Number(r.weight_step || 0.25) : 1)),
         is_available: Boolean(r.is_available) && Number(r.stock_quantity ?? 0) > 0,
         requires_prescription: Boolean(r.requires_prescription),
         purchase_count: Number(r.purchase_count ?? 0),
@@ -3055,7 +3098,10 @@ export function registerMasterCatalogRoutes(app: Express): void {
         base_price: Number(req.body?.base_price),
         sale_price: req.body?.sale_price !== undefined ? req.body.sale_price : null,
         stock_quantity: req.body?.stock_quantity !== undefined ? Number(req.body.stock_quantity) : 10,
-        min_order_qty: req.body?.min_order_qty !== undefined ? Number(req.body.min_order_qty) : 1,
+        min_order_qty: req.body?.min_order_qty !== undefined ? Number(req.body.min_order_qty) : undefined,
+        is_weighted: Boolean(req.body?.is_weighted),
+        weight_step: req.body?.weight_step !== undefined ? Number(req.body.weight_step) : 0.25,
+        weight_unit: String(req.body?.weight_unit || 'كجم'),
         merchant_sku: String(req.body?.merchant_sku || ''),
         is_available: req.body?.is_available !== false,
         is_offer: Boolean(req.body?.is_offer),
@@ -3103,6 +3149,9 @@ export function registerMasterCatalogRoutes(app: Express): void {
             : null,
         proposed_stock: Number(req.body?.proposed_stock ?? 10),
         merchant_sku: String(req.body?.merchant_sku || ''),
+        is_weighted: Boolean(req.body?.is_weighted),
+        weight_step: req.body?.weight_step !== undefined ? Number(req.body.weight_step) : 0.25,
+        weight_unit: String(req.body?.weight_unit || 'كجم'),
       });
       res.status(201).json({ ok: true, ...result });
     } catch (err) {
@@ -3739,6 +3788,167 @@ export function registerMasterCatalogRoutes(app: Express): void {
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }
+  });
+
+  app.patch('/api/admin/matching-requests/:id', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {
+    if (!ensureAdminCatalogAccess(req, res)) return;
+    const reqId = String(req.params.id || '').trim();
+    const existing = db
+      .prepare('SELECT * FROM product_matching_requests WHERE id = ?')
+      .get(reqId) as Record<string, any> | undefined;
+    if (!existing) return res.status(404).json({ error: 'طلب المنتج غير موجود' });
+
+    const b = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+
+    const nextNameAr =
+      b.product_name_ar !== undefined ? String(b.product_name_ar || '').trim() : String(existing.product_name_ar || '').trim();
+    if (!nextNameAr) {
+      return res.status(400).json({ error: 'اسم المنتج بالعربية مطلوب' });
+    }
+    const nextNameEn =
+      b.product_name_en !== undefined ? String(b.product_name_en || '').trim() : String(existing.product_name_en || '');
+    const nextBrand = b.brand !== undefined ? String(b.brand || '').trim() : String(existing.brand || '');
+    const nextSizeLabel =
+      b.size_label !== undefined ? String(b.size_label || '').trim() : String(existing.size_label || '');
+    const nextBarcode =
+      b.barcode !== undefined ? (String(b.barcode || '').trim() || null) : existing.barcode ?? null;
+    const nextDescription =
+      b.description !== undefined ? String(b.description || '').trim() : String(existing.description || '');
+
+    let nextImageUrl = existing.image_url ? String(existing.image_url) : '';
+    if (b.image_url !== undefined) {
+      const candidate = String(b.image_url || '').trim();
+      if (candidate) {
+        const isSafeUrl =
+          /^https?:\/\//i.test(candidate) ||
+          candidate.startsWith('/assets/') ||
+          /^data:image\/(jpeg|jpg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(candidate);
+        if (!isSafeUrl) {
+          return res.status(400).json({ error: 'رابط أو ملف الصورة غير صالح' });
+        }
+        nextImageUrl = candidate;
+      } else {
+        nextImageUrl = '';
+      }
+    }
+
+    let nextCategoryId: string | null = existing.category_id ? String(existing.category_id) : null;
+    let nextCategoryPath = String(existing.category_path || '');
+    if (b.category_id !== undefined) {
+      const rawCatId = String(b.category_id || '').trim();
+      if (rawCatId) {
+        const catRow = db
+          .prepare('SELECT id, name_ar, full_path_ar FROM categories WHERE id = ?')
+          .get(rawCatId) as { id: string; name_ar: string; full_path_ar?: string | null } | undefined;
+        if (!catRow) {
+          return res.status(400).json({ error: 'القسم المحدد غير موجود' });
+        }
+        nextCategoryId = catRow.id;
+        nextCategoryPath =
+          b.category_path !== undefined && String(b.category_path || '').trim()
+            ? String(b.category_path).trim()
+            : String(catRow.full_path_ar || catRow.name_ar || '').trim();
+      } else {
+        nextCategoryId = null;
+        if (b.category_path !== undefined) {
+          nextCategoryPath = String(b.category_path || '').trim();
+        }
+      }
+    } else if (b.category_path !== undefined) {
+      nextCategoryPath = String(b.category_path || '').trim();
+    }
+
+    const parsedPrice =
+      b.proposed_price !== undefined && b.proposed_price !== ''
+        ? Number(b.proposed_price)
+        : Number(existing.proposed_price || 0);
+    if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
+      return res.status(400).json({ error: 'السعر المقترح غير صالح' });
+    }
+
+    const parsedStock =
+      b.proposed_stock !== undefined && b.proposed_stock !== ''
+        ? Math.floor(Number(b.proposed_stock))
+        : Number(existing.proposed_stock || 0);
+    if (!Number.isFinite(parsedStock) || parsedStock < 0) {
+      return res.status(400).json({ error: 'المخزون المقترح غير صالح' });
+    }
+
+    const nextIsWeighted =
+      b.is_weighted !== undefined ? (Boolean(b.is_weighted) ? 1 : 0) : (Boolean(existing.is_weighted) ? 1 : 0);
+    const rawStep = b.weight_step !== undefined && b.weight_step !== '' ? Number(b.weight_step) : Number(existing.weight_step || 0.25);
+    const nextWeightStep =
+      Number.isFinite(rawStep) && rawStep >= 0.05 && rawStep <= 10 ? Math.round(rawStep * 1000) / 1000 : 0.25;
+    const nextWeightUnit =
+      b.weight_unit !== undefined
+        ? (String(b.weight_unit || 'كجم').trim() || 'كجم')
+        : (String(existing.weight_unit || 'كجم').trim() || 'كجم');
+
+    db.prepare(`
+      UPDATE product_matching_requests
+      SET product_name_ar = ?,
+          product_name_en = ?,
+          brand = ?,
+          category_id = ?,
+          category_path = ?,
+          barcode = ?,
+          size_label = ?,
+          image_url = ?,
+          description = ?,
+          proposed_price = ?,
+          proposed_stock = ?,
+          is_weighted = ?,
+          weight_step = ?,
+          weight_unit = ?
+      WHERE id = ?
+    `).run(
+      nextNameAr,
+      nextNameEn,
+      nextBrand,
+      nextCategoryId,
+      nextCategoryPath,
+      nextBarcode,
+      nextSizeLabel,
+      nextImageUrl,
+      nextDescription,
+      parsedPrice,
+      parsedStock,
+      nextIsWeighted,
+      nextWeightStep,
+      nextWeightUnit,
+      reqId
+    );
+
+    recordAuditLog({
+      actor_name: req.auth!.fullName,
+      actor_role: req.auth!.role,
+      action: 'ADMIN_EDIT_MATCHING_REQUEST',
+      entity_type: 'product_matching_requests',
+      entity_id: reqId,
+      details: `تعديل بيانات طلب منتج قبل الاعتماد: ${nextNameAr}${nextCategoryPath ? ` (${nextCategoryPath})` : ''}`,
+    });
+
+    const updated = db
+      .prepare(`
+        SELECT
+          r.*,
+          m.business_name_ar AS merchant_name,
+          c.name_ar AS category_name,
+          COALESCE(NULLIF(TRIM(r.category_path), ''), NULLIF(TRIM(c.full_path_ar), ''), c.name_ar, NULLIF(TRIM(mc.full_path_ar), ''), mc.name_ar, '') AS resolved_category_path,
+          mp.canonical_name_ar AS suggested_master_name,
+          mp.size_label AS suggested_master_size,
+          mp.image_url AS suggested_master_image,
+          mc.name_ar AS suggested_master_category_name
+        FROM product_matching_requests r
+        LEFT JOIN merchants m ON m.id = r.merchant_id
+        LEFT JOIN categories c ON c.id = r.category_id
+        LEFT JOIN master_products mp ON mp.id = r.suggested_master_id
+        LEFT JOIN categories mc ON mc.id = mp.category_id
+        WHERE r.id = ?
+      `)
+      .get(reqId);
+
+    res.json({ ok: true, request: updated });
   });
 
   app.post('/api/admin/matching-requests/:id/review', requireAuth, requireRole(...ALL_ADMIN_ROLES), (req, res) => {

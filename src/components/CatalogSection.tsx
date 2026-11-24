@@ -123,6 +123,9 @@ export const CatalogSection: React.FC<Props> = ({
     addons_text: '',
     is_offer: false,
     is_available: true,
+    is_weighted: false,
+    weight_step: 0.25,
+    weight_unit: 'كجم',
   });
 
   const [catForm, setCatForm] = useState({
@@ -253,6 +256,9 @@ export const CatalogSection: React.FC<Props> = ({
       addons_text: '',
       is_offer: false,
       is_available: true,
+      is_weighted: false,
+      weight_step: 0.25,
+      weight_unit: 'كجم',
     });
   };
 
@@ -342,6 +348,9 @@ export const CatalogSection: React.FC<Props> = ({
       addons_text: p.addons_text,
       is_offer: Boolean(p.is_offer),
       is_available: p.is_available,
+      is_weighted: Boolean(p.is_weighted),
+      weight_step: Number(p.weight_step || 0.25),
+      weight_unit: String(p.weight_unit || 'كجم'),
     });
     setEditProductModalOpen(true);
   };
@@ -1392,6 +1401,61 @@ export const CatalogSection: React.FC<Props> = ({
                   </span>
                 </label>
               </div>
+              <div className="sm:col-span-6 rounded-xl border border-amber-200 bg-amber-50/60 p-3 flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2 text-xs font-bold text-amber-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={productForm.is_weighted}
+                    onChange={(e) => setProductForm({ ...productForm, is_weighted: e.target.checked })}
+                  />
+                  <span>
+                    {isAr
+                      ? 'منتج يُباع بالوزن (الزيادة بأقل من واحد صحيح مثل 0.25 أو 0.5)'
+                      : 'Weighted Product (Fractional Increment < 1)'}
+                  </span>
+                </label>
+                {productForm.is_weighted && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1">
+                      {[0.1, 0.125, 0.25, 0.5].map((stepVal) => (
+                        <button
+                          key={stepVal}
+                          type="button"
+                          onClick={() => setProductForm({ ...productForm, weight_step: stepVal })}
+                          className={`px-2 py-1 rounded-lg text-[11px] font-bold border ${
+                            Math.abs(Number(productForm.weight_step) - stepVal) < 0.001
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-white text-amber-900 border-amber-200 hover:bg-amber-100'
+                          }`}
+                        >
+                          {stepVal}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="number"
+                      min="0.05"
+                      max="10"
+                      step="0.05"
+                      value={productForm.weight_step}
+                      onChange={(e) =>
+                        setProductForm({ ...productForm, weight_step: Number(e.target.value) || 0.25 })
+                      }
+                      className="w-20 px-2 py-1 text-xs rounded-lg border border-amber-300 bg-white tabular-nums"
+                      title={isAr ? 'مقدار الزيادة المخصص' : 'Custom step'}
+                    />
+                    <select
+                      value={productForm.weight_unit}
+                      onChange={(e) => setProductForm({ ...productForm, weight_unit: e.target.value })}
+                      className="px-2 py-1 text-xs rounded-lg border border-amber-300 bg-white font-semibold"
+                    >
+                      <option value="كجم">كجم</option>
+                      <option value="جم">جم</option>
+                      <option value="لتر">لتر</option>
+                    </select>
+                  </div>
+                )}
+              </div>
               <div className="flex items-end justify-end sm:col-span-2">
                 <button
                   type="submit"
@@ -1517,6 +1581,13 @@ export const CatalogSection: React.FC<Props> = ({
                                 {(p.is_offer || (p.sale_price !== null && p.sale_price < p.base_price)) && (
                                   <span className="px-1.5 py-0.5 rounded bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-bold">
                                     {isAr ? 'في العروض ⭐' : 'In Offers'}
+                                  </span>
+                                )}
+                                {p.is_weighted && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-bold">
+                                    {isAr
+                                      ? `بالوزن (+${p.weight_step ?? 0.25} ${p.weight_unit || 'كجم'})`
+                                      : `Weight (+${p.weight_step ?? 0.25} ${p.weight_unit || 'kg'})`}
                                   </span>
                                 )}
                               </div>
@@ -2185,6 +2256,58 @@ export const CatalogSection: React.FC<Props> = ({
                   <Percent className="w-3.5 h-3.5 shrink-0" />
                   <span>{isAr ? 'إضافة لقسم العروض' : 'Add to Offers'}</span>
                 </label>
+              </div>
+              <div className="sm:col-span-2 rounded-xl border border-amber-200 bg-amber-50/60 p-3 space-y-2">
+                <label className="flex items-center gap-2 text-xs font-bold text-amber-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={productForm.is_weighted}
+                    onChange={(e) => setProductForm({ ...productForm, is_weighted: e.target.checked })}
+                  />
+                  <span>
+                    {isAr
+                      ? 'منتج يُباع بالوزن (الزيادة بأقل من واحد صحيح مثل 0.25 أو 0.5)'
+                      : 'Weighted Product (Fractional Increment < 1)'}
+                  </span>
+                </label>
+                {productForm.is_weighted && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[0.1, 0.125, 0.25, 0.5].map((stepVal) => (
+                      <button
+                        key={stepVal}
+                        type="button"
+                        onClick={() => setProductForm({ ...productForm, weight_step: stepVal })}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-bold border ${
+                          Math.abs(Number(productForm.weight_step) - stepVal) < 0.001
+                            ? 'bg-amber-600 text-white border-amber-600'
+                            : 'bg-white text-amber-900 border-amber-200 hover:bg-amber-100'
+                        }`}
+                      >
+                        {stepVal}
+                      </button>
+                    ))}
+                    <input
+                      type="number"
+                      min="0.05"
+                      max="10"
+                      step="0.05"
+                      value={productForm.weight_step}
+                      onChange={(e) =>
+                        setProductForm({ ...productForm, weight_step: Number(e.target.value) || 0.25 })
+                      }
+                      className="w-20 px-2 py-1 text-xs rounded-lg border border-amber-300 bg-white tabular-nums"
+                    />
+                    <select
+                      value={productForm.weight_unit}
+                      onChange={(e) => setProductForm({ ...productForm, weight_unit: e.target.value })}
+                      className="px-2 py-1 text-xs rounded-lg border border-amber-300 bg-white font-semibold"
+                    >
+                      <option value="كجم">كجم</option>
+                      <option value="جم">جم</option>
+                      <option value="لتر">لتر</option>
+                    </select>
+                  </div>
+                )}
               </div>
             </div>
             <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2 shrink-0">

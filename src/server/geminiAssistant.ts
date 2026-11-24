@@ -1,7 +1,9 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
-export const OTLOBHA_ASSISTANT_MODEL = 'gemini-3.1-flash-lite';
-const REQUEST_TIMEOUT_MS = 12_000;
+export const OTLOBHA_ASSISTANT_MODEL = 'gemini-4-hydrogen';
+export const OTLOBHA_ASSISTANT_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const REQUEST_TIMEOUT_MS = 24_000;
+const MAX_RETRY_ATTEMPTS = 3;
 
 export interface AssistantHistoryTurn {
   role: 'user' | 'assistant';
@@ -70,7 +72,6 @@ function getGeminiClient(): GoogleGenAI {
         headers: {
           'User-Agent': 'aistudio-build',
         },
-        timeout: REQUEST_TIMEOUT_MS,
       },
     });
     cachedClientKey = apiKey;
@@ -136,6 +137,14 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
     );
   }
 
+  if (status === 503 || upper.includes('HIGH DEMAND') || upper.includes('OVERLOADED') || upper.includes('UNAVAILABLE')) {
+    return new GeminiAssistantError(
+      'تشهد خدمة المساعد الذكي ضغطًا مؤقتًا الآن. يرجى الضغط على إعادة المحاولة خلال ثوانٍ.',
+      503,
+      'UPSTREAM_HIGH_DEMAND'
+    );
+  }
+
   return new GeminiAssistantError(
     'تعذر الاتصال بخدمة المساعد الذكي حاليًا. يرجى المحاولة مرة أخرى خلال لحظات.',
     502,
@@ -145,17 +154,19 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
 
 function isRetryableError(err: unknown): boolean {
   const status = Number((err as any)?.status || (err as any)?.statusCode || 0);
-  if (status === 400 || status === 401 || status === 403 || status === 404 || status === 429) {
+  if (status === 400 || status === 401 || status === 403 || status === 404) {
     return false;
   }
-  if (status >= 500) return true;
+  if (status === 429 || status >= 500) return true;
+  const code = String((err as any)?.code || '').toUpperCase();
+  if (code === 'EMPTY_RESPONSE' || code === 'TIMEOUT' || code === 'UPSTREAM_UNAVAILABLE') {
+    return true;
+  }
   const msg = String((err as any)?.message || '').toUpperCase();
   if (
     msg.includes('API_KEY_INVALID') ||
     msg.includes('PERMISSION_DENIED') ||
-    msg.includes('NOT_FOUND') ||
-    msg.includes('RESOURCE_EXHAUSTED') ||
-    msg.includes('QUOTA')
+    msg.includes('NOT_FOUND')
   ) {
     return false;
   }
@@ -165,9 +176,13 @@ function isRetryableError(err: unknown): boolean {
     msg.includes('TIMEOUT') ||
     msg.includes('FETCH FAILED') ||
     msg.includes('NETWORK') ||
+    msg.includes('ABORTED') ||
+    msg.includes('429') ||
     msg.includes('503') ||
+    msg.includes('502') ||
     msg.includes('500') ||
-    msg.includes('UNAVAILABLE')
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('OVERLOADED')
   );
 }
 
@@ -258,118 +273,162 @@ export async function runOtlobhaGeminiAssistant(
     catalogBlock,
   ].join('\n');
 
-  const safeHistory = (input.history || [])
+  // Sanitize multi-turn conversation history so Gemini always receives
+  // strictly alternating user/model turns starting with a 'user' turn.
+  const rawTurns: Array<{ role: 'user' | 'model'; text: string }> = (input.history || [])
     .filter((h) => h && typeof h.text === 'string' && h.text.trim().length > 0)
-    .slice(-8);
-
-  const contents = [
-    ...safeHistory.map((h) => ({
+    .slice(-8)
+    .map((h) => ({
       role: h.role === 'user' ? 'user' : 'model',
-      parts: [{ text: h.text.trim().slice(0, 900) }],
-    })),
-    {
-      role: 'user',
-      parts: [{ text: input.message.trim().slice(0, 1200) }],
-    },
+      text: h.text.trim().slice(0, 900),
+    }));
+
+  const normalizedTurns: Array<{ role: 'user' | 'model'; text: string }> = [];
+  for (const turn of rawTurns) {
+    if (normalizedTurns.length === 0 && turn.role !== 'user') {
+      continue;
+    }
+    const prev = normalizedTurns[normalizedTurns.length - 1];
+    if (prev && prev.role === turn.role) {
+      prev.text = `${prev.text}\n${turn.text}`.slice(0, 1200);
+    } else {
+      normalizedTurns.push({ ...turn });
+    }
+  }
+
+  const currentUserText = input.message.trim().slice(0, 1200);
+  const lastNorm = normalizedTurns[normalizedTurns.length - 1];
+  if (lastNorm && lastNorm.role === 'user') {
+    if (lastNorm.text !== currentUserText) {
+      lastNorm.text = `${lastNorm.text}\n${currentUserText}`.slice(0, 1500);
+    }
+  } else {
+    normalizedTurns.push({ role: 'user', text: currentUserText });
+  }
+
+  const contents = normalizedTurns.map((t) => ({
+    role: t.role,
+    parts: [{ text: t.text }],
+  }));
+
+  const modelCandidates: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
+    { model: OTLOBHA_ASSISTANT_MODEL, thinkingLevel: ThinkingLevel.LOW },
+    { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
   ];
 
   let lastErr: unknown = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await withTimeout(
-        ai.models.generateContent({
-          model: OTLOBHA_ASSISTANT_MODEL,
-          contents,
-          config: {
-            systemInstruction,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                reply_ar: {
-                  type: Type.STRING,
-                  description: 'رد واضح ومباشر ومفيد للمستخدم باللغة العربية.',
+  for (const candidate of modelCandidates) {
+    for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: candidate.model,
+            contents,
+            config: {
+              systemInstruction,
+              thinkingConfig: { thinkingLevel: candidate.thinkingLevel },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  reply_ar: {
+                    type: Type.STRING,
+                    description: 'رد واضح ومباشر ومفيد للمستخدم باللغة العربية.',
+                  },
+                  search_keywords: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'أسماء منتجات مفردة قصيرة للبحث بالكتالوج إن كان الطلب للشراء، وإلا فارغة.',
+                  },
+                  suggested_product_ids: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'معرّفات المنتجات الحقيقية من الكتالوج المرفق فقط.',
+                  },
+                  suggested_service: {
+                    type: Type.STRING,
+                    enum: ['none', 'pharmacy', 'rides', 'parcels', 'market', 'free_order'],
+                    description: 'خدمة مقترحة من اطلبها إن كانت مناسبة، وإلا "none".',
+                  },
+                  quick_prompts: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: '3 اقتراحات قصيرة لأسئلة متابعة مناسبة.',
+                  },
                 },
-                search_keywords: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'أسماء منتجات مفردة قصيرة للبحث بالكتالوج إن كان الطلب للشراء، وإلا فارغة.',
-                },
-                suggested_product_ids: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'معرّفات المنتجات الحقيقية من الكتالوج المرفق فقط.',
-                },
-                suggested_service: {
-                  type: Type.STRING,
-                  enum: ['none', 'pharmacy', 'rides', 'parcels', 'market', 'free_order'],
-                  description: 'خدمة مقترحة من اطلبها إن كانت مناسبة، وإلا "none".',
-                },
-                quick_prompts: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: '3 اقتراحات قصيرة لأسئلة متابعة مناسبة.',
-                },
+                required: ['reply_ar', 'quick_prompts'],
               },
-              required: ['reply_ar', 'quick_prompts'],
             },
-          },
-        }),
-        REQUEST_TIMEOUT_MS
-      );
-
-      const rawText = (response.text ?? '').trim();
-      if (!rawText) {
-        throw new GeminiAssistantError(
-          'لم يُرجع المساعد الذكي ردًا نصيًا لهذه الرسالة. يرجى المحاولة مرة أخرى.',
-          502,
-          'EMPTY_RESPONSE'
+          }),
+          REQUEST_TIMEOUT_MS
         );
+
+        const rawText = (response.text ?? '').trim();
+        if (!rawText) {
+          throw new GeminiAssistantError(
+            'لم يُرجع المساعد الذكي ردًا نصيًا لهذه الرسالة. يرجى المحاولة مرة أخرى.',
+            502,
+            'EMPTY_RESPONSE'
+          );
+        }
+
+        const parsed = parseJsonResponseText(rawText);
+        const replyAr = String(parsed?.reply_ar || rawText).trim();
+        const rawKeywords = Array.isArray(parsed?.search_keywords) ? parsed.search_keywords : [];
+        const rawProductIds = Array.isArray(parsed?.suggested_product_ids) ? parsed.suggested_product_ids : [];
+        const rawPrompts = Array.isArray(parsed?.quick_prompts) ? parsed.quick_prompts : [];
+        const rawService = String(parsed?.suggested_service || '').trim().toLowerCase();
+        const normalizedService = rawService === 'none' ? '' : rawService;
+
+        const validCatalogIds = new Set(input.catalogProducts.map((p) => p.id));
+        const suggestedProductIds = rawProductIds
+          .map((id: unknown) => String(id || '').trim())
+          .filter((id: string) => id.length > 0 && validCatalogIds.has(id))
+          .slice(0, 8);
+
+        const searchKeywords = rawKeywords
+          .map((k: unknown) => String(k || '').trim())
+          .filter((k: string) => k.length >= 2)
+          .slice(0, 6);
+
+        const quickPrompts = rawPrompts
+          .map((q: unknown) => String(q || '').trim())
+          .filter((q: string) => q.length >= 2 && q.length <= 60)
+          .slice(0, 4);
+
+        return {
+          reply_ar: replyAr,
+          search_keywords: searchKeywords,
+          suggested_product_ids: suggestedProductIds,
+          suggested_service: (ALLOWED_SERVICES.has(normalizedService) ? normalizedService : '') as AssistantRunOutput['suggested_service'],
+          quick_prompts:
+            quickPrompts.length > 0
+              ? quickPrompts
+              : ['أرخص العروض اليوم', 'مقاضي الفطار والألبان', 'اطلب من الصيدلية', 'طلب نصي حر'],
+          model: candidate.model,
+        };
+      } catch (err) {
+        lastErr = err;
+        const errStatus = Number((err as any)?.status || (err as any)?.statusCode || 0);
+        const errMsg = err instanceof Error ? err.message : String(err ?? '');
+        console.error(
+          `[OtlobhaAssistant] attempt ${attempt}/${MAX_RETRY_ATTEMPTS} failed on ${candidate.model} (status=${errStatus}): ${errMsg.slice(0, 260)}`
+        );
+
+        // Stop immediately on auth/key errors — failing over to another model won't help
+        if (errStatus === 401 || errStatus === 403) {
+          throw classifyGeminiError(err);
+        }
+
+        if (attempt < MAX_RETRY_ATTEMPTS && isRetryableError(err)) {
+          const jitter = Math.floor(Math.random() * 250);
+          const backoffMs = (attempt === 1 ? 700 : 1600) + jitter;
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        // Break inner retry loop so we immediately try the fallback model
+        break;
       }
-
-      const parsed = parseJsonResponseText(rawText);
-      const replyAr = String(parsed?.reply_ar || rawText).trim();
-      const rawKeywords = Array.isArray(parsed?.search_keywords) ? parsed.search_keywords : [];
-      const rawProductIds = Array.isArray(parsed?.suggested_product_ids) ? parsed.suggested_product_ids : [];
-      const rawPrompts = Array.isArray(parsed?.quick_prompts) ? parsed.quick_prompts : [];
-      const rawService = String(parsed?.suggested_service || '').trim().toLowerCase();
-      const normalizedService = rawService === 'none' ? '' : rawService;
-
-      const validCatalogIds = new Set(input.catalogProducts.map((p) => p.id));
-      const suggestedProductIds = rawProductIds
-        .map((id: unknown) => String(id || '').trim())
-        .filter((id: string) => id.length > 0 && validCatalogIds.has(id))
-        .slice(0, 8);
-
-      const searchKeywords = rawKeywords
-        .map((k: unknown) => String(k || '').trim())
-        .filter((k: string) => k.length >= 2)
-        .slice(0, 6);
-
-      const quickPrompts = rawPrompts
-        .map((q: unknown) => String(q || '').trim())
-        .filter((q: string) => q.length >= 2 && q.length <= 60)
-        .slice(0, 4);
-
-      return {
-        reply_ar: replyAr,
-        search_keywords: searchKeywords,
-        suggested_product_ids: suggestedProductIds,
-        suggested_service: (ALLOWED_SERVICES.has(normalizedService) ? normalizedService : '') as AssistantRunOutput['suggested_service'],
-        quick_prompts:
-          quickPrompts.length > 0
-            ? quickPrompts
-            : ['أرخص العروض اليوم', 'مقاضي الفطار والألبان', 'اطلب من الصيدلية', 'طلب نصي حر'],
-        model: OTLOBHA_ASSISTANT_MODEL,
-      };
-    } catch (err) {
-      lastErr = err;
-      if (attempt < 2 && isRetryableError(err)) {
-        await new Promise((resolve) => setTimeout(resolve, 350));
-        continue;
-      }
-      throw classifyGeminiError(err);
     }
   }
 

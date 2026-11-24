@@ -108,6 +108,9 @@ class MerchantPushNotificationService {
   bool _vibrationEnabled = true;
   String? _lastSyncedToken;
   String? _lastSyncedUserId;
+  String? _subscribedMerchantTopic;
+  MerchantApiClient? _boundApi;
+  String? _boundMerchantId;
   bool _guestTokenSynced = false;
   final Set<String> _shownLocalIds = {};
   final Set<String> _shownServerNotifIds = {};
@@ -388,6 +391,9 @@ class MerchantPushNotificationService {
       messaging.onTokenRefresh.listen((newToken) {
         _currentToken = newToken;
         _lastSyncedToken = null;
+        if (_boundApi != null && _boundMerchantId != null && _boundMerchantId!.isNotEmpty) {
+          unawaited(syncTokenWithBackend(_boundApi!, _boundMerchantId!));
+        }
       });
     } catch (e) {
       debugPrint('[MerchantPush] FirebaseMessaging setup error: $e');
@@ -471,11 +477,37 @@ class MerchantPushNotificationService {
     }
   }
 
+  String _merchantTopicFor(String merchantId) {
+    final clean = merchantId.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_.-]'), '_');
+    return 'otlobha_merchant_$clean';
+  }
+
   Future<void> syncTokenWithBackend(MerchantApiClient api, String merchantId) async {
-    await scheduleNativeBackgroundSync();
+    _boundApi = api;
+    _boundMerchantId = merchantId;
+    await scheduleNativeBackgroundSync(fastCheck: true);
     if (!_firebaseAvailable) return;
     try {
-      _currentToken ??= await FirebaseMessaging.instance.getToken();
+      final messaging = FirebaseMessaging.instance;
+      // Subscribe to dedicated per-merchant FCM topic so incoming orders ALWAYS wake the phone
+      // even when the app is killed, screen is locked, or the direct device token rotated.
+      final desiredTopic = _merchantTopicFor(merchantId);
+      if (_subscribedMerchantTopic != desiredTopic) {
+        if (_subscribedMerchantTopic != null && _subscribedMerchantTopic!.isNotEmpty) {
+          try {
+            await messaging.unsubscribeFromTopic(_subscribedMerchantTopic!);
+          } catch (_) {}
+        }
+        try {
+          await messaging.subscribeToTopic(desiredTopic);
+          await messaging.subscribeToTopic('otlobha_merchant_all');
+          _subscribedMerchantTopic = desiredTopic;
+        } catch (e) {
+          debugPrint('[MerchantPush] Merchant topic subscribe warning: $e');
+        }
+      }
+
+      _currentToken ??= await messaging.getToken();
       final token = _currentToken?.trim() ?? '';
       if (token.length < 20) return;
       if (_lastSyncedToken == token && _lastSyncedUserId == merchantId) return;
@@ -497,6 +529,11 @@ class MerchantPushNotificationService {
 
   Future<void> unregisterFromBackend(MerchantApiClient api) async {
     try {
+      if (_firebaseAvailable && _subscribedMerchantTopic != null && _subscribedMerchantTopic!.isNotEmpty) {
+        try {
+          await FirebaseMessaging.instance.unsubscribeFromTopic(_subscribedMerchantTopic!);
+        } catch (_) {}
+      }
       if ((_currentToken != null && _currentToken!.isNotEmpty) || (_deviceId != null && _deviceId!.isNotEmpty)) {
         await api.unregisterPushToken(fcmToken: _currentToken, deviceId: _deviceId);
       }
@@ -505,6 +542,9 @@ class MerchantPushNotificationService {
     } finally {
       _lastSyncedToken = null;
       _lastSyncedUserId = null;
+      _subscribedMerchantTopic = null;
+      _boundApi = null;
+      _boundMerchantId = null;
     }
   }
 

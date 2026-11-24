@@ -14,6 +14,7 @@ import {
   Link2,
   Loader2,
   Package,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -45,6 +46,34 @@ interface Props {
 }
 
 type AdminCatalogTab = 'masters' | 'excel' | 'requests' | 'duplicates' | 'banners' | 'audit';
+
+function compressRequestImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawUrl = String(reader.result || '');
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 600;
+        const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(rawUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      };
+      img.onerror = () => resolve(rawUrl);
+      img.src = rawUrl;
+    };
+    reader.onerror = () => reject(new Error('تعذر قراءة ملف الصورة'));
+    reader.readAsDataURL(file);
+  });
+}
 
 export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchants, onRefresh, onToast }) => {
   const [tab, setTab] = useState<AdminCatalogTab>('masters');
@@ -95,6 +124,99 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
   const [reqCategoryFilter, setReqCategoryFilter] = useState<string>('ALL');
   const [reqBatchFilter, setReqBatchFilter] = useState<string>('ALL');
   const [bulkReviewing, setBulkReviewing] = useState(false);
+  const [editingRequest, setEditingRequest] = useState<ProductMatchingRequestRecord | null>(null);
+  const [savingReqEdit, setSavingReqEdit] = useState(false);
+  const [editReqForm, setEditReqForm] = useState({
+    product_name_ar: '',
+    product_name_en: '',
+    brand: '',
+    category_id: '',
+    category_path: '',
+    size_label: '',
+    barcode: '',
+    image_url: '',
+    proposed_price: '',
+    proposed_stock: '',
+    is_weighted: false,
+    weight_step: '0.25',
+    weight_unit: 'كجم',
+  });
+
+  const openEditRequestModal = (r: ProductMatchingRequestRecord) => {
+    setEditingRequest(r);
+    setEditReqForm({
+      product_name_ar: r.product_name_ar || '',
+      product_name_en: r.product_name_en || '',
+      brand: r.brand || '',
+      category_id: r.category_id || '',
+      category_path: r.resolved_category_path || r.category_path || r.category_name || '',
+      size_label: r.size_label || '',
+      barcode: r.barcode || '',
+      image_url: r.image_url || r.suggested_master_image || '',
+      proposed_price: r.proposed_price !== undefined && r.proposed_price !== null ? String(r.proposed_price) : '0',
+      proposed_stock: r.proposed_stock !== undefined && r.proposed_stock !== null ? String(r.proposed_stock) : '0',
+      is_weighted: Boolean(r.is_weighted),
+      weight_step: r.weight_step !== undefined && r.weight_step !== null ? String(r.weight_step) : '0.25',
+      weight_unit: r.weight_unit || 'كجم',
+    });
+  };
+
+  const handleUploadEditReqImage = async (file: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      onToast('يرجى اختيار ملف صورة صالح (JPG / PNG / WebP)');
+      return;
+    }
+    try {
+      const dataUrl = await compressRequestImage(file);
+      setEditReqForm((prev) => ({ ...prev, image_url: dataUrl }));
+    } catch (err) {
+      onToast((err as Error).message || 'تعذر تجهيز الصورة');
+    }
+  };
+
+  const handleSaveRequestEdit = async (approveAfter = false) => {
+    if (!editingRequest) return;
+    if (!editReqForm.product_name_ar.trim()) {
+      onToast('يرجى إدخال اسم المنتج بالعربية');
+      return;
+    }
+    setSavingReqEdit(true);
+    try {
+      await api.updateAdminMatchingRequest(editingRequest.id, {
+        product_name_ar: editReqForm.product_name_ar.trim(),
+        product_name_en: editReqForm.product_name_en.trim(),
+        brand: editReqForm.brand.trim(),
+        category_id: editReqForm.category_id || null,
+        category_path: editReqForm.category_path.trim(),
+        size_label: editReqForm.size_label.trim(),
+        barcode: editReqForm.barcode.trim() || null,
+        image_url: editReqForm.image_url.trim(),
+        proposed_price: editReqForm.proposed_price === '' ? 0 : Number(editReqForm.proposed_price),
+        proposed_stock: editReqForm.proposed_stock === '' ? 0 : Number(editReqForm.proposed_stock),
+        is_weighted: Boolean(editReqForm.is_weighted),
+        weight_step: Number(editReqForm.weight_step || 0.25),
+        weight_unit: editReqForm.weight_unit || 'كجم',
+      });
+      if (approveAfter && editingRequest.status === 'pending') {
+        await api.reviewAdminMatchingRequest(editingRequest.id, {
+          decision: 'approve_smart',
+          target_master_id: editingRequest.suggested_master_id || null,
+          auto_create_listing: true,
+        });
+        onToast('تم حفظ تعديلات المنتج واعتماده ونشره بالقسم بنجاح');
+      } else {
+        onToast('تم حفظ تعديلات المنتج (الاسم، القسم، الصورة) بنجاح');
+      }
+      setEditingRequest(null);
+      await Promise.all([loadRequests(), loadMasters()]);
+      onRefresh();
+    } catch (err) {
+      onToast((err as Error).message || 'تعذر حفظ تعديلات المنتج');
+    } finally {
+      setSavingReqEdit(false);
+    }
+  };
 
   // Duplicates tab
   const [duplicates, setDuplicates] = useState<any[]>([]);
@@ -1015,23 +1137,34 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                           </div>
                         </div>
                       </div>
-                      <span
-                        className={`px-2.5 py-1 rounded-full text-xs font-bold ${
-                          r.status === 'pending'
-                            ? 'bg-amber-100 text-amber-800'
-                            : r.status === 'rejected'
-                            ? 'bg-red-100 text-red-700'
-                            : 'bg-emerald-100 text-emerald-700'
-                        }`}
-                      >
-                        {r.status === 'pending'
-                          ? 'قيد الموافقة'
-                          : r.status === 'approved_new'
-                          ? 'تم اعتماده ونشره ✓'
-                          : r.status === 'linked_existing'
-                          ? 'تم ربطه ونشره ✓'
-                          : 'مرفوض'}
-                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => openEditRequestModal(r)}
+                          className="px-3 py-1.5 rounded-xl bg-white border border-slate-300 hover:border-[#A92224] hover:text-[#A92224] text-slate-800 text-xs font-black inline-flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                          title="تعديل الاسم والقسم والصورة"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          تعديل
+                        </button>
+                        <span
+                          className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                            r.status === 'pending'
+                              ? 'bg-amber-100 text-amber-800'
+                              : r.status === 'rejected'
+                              ? 'bg-red-100 text-red-700'
+                              : 'bg-emerald-100 text-emerald-700'
+                          }`}
+                        >
+                          {r.status === 'pending'
+                            ? 'قيد الموافقة'
+                            : r.status === 'approved_new'
+                            ? 'تم اعتماده ونشره ✓'
+                            : r.status === 'linked_existing'
+                            ? 'تم ربطه ونشره ✓'
+                            : 'مرفوض'}
+                        </span>
+                      </div>
                     </div>
 
                     {r.suggested_master_id && (
@@ -1696,6 +1829,246 @@ export const MasterCatalogAdminSection: React.FC<Props> = ({ categories, merchan
                   );
                 })
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: EDIT MERCHANT CATALOG MATCHING REQUEST (NAME, CATEGORY, IMAGE & DETAILS) */}
+      {editingRequest && (
+        <div className="fixed inset-0 z-50 bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 flex items-center gap-2">
+                  <Pencil className="w-4 h-4 text-[#A92224]" />
+                  تعديل بيانات المنتج قبل الاعتماد
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  المتجر: <b>{editingRequest.merchant_name || editingRequest.merchant_id}</b> — عدّل الاسم أو القسم أو الصورة ثم احفظ أو اعتمد مباشرة.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingRequest(null)}
+                className="p-2 rounded-xl hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3.5">
+              {/* Image Preview + Direct Upload + URL */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 space-y-3">
+                <div className="flex items-center gap-3.5">
+                  {editReqForm.image_url ? (
+                    <img
+                      src={editReqForm.image_url}
+                      alt={editReqForm.product_name_ar}
+                      className="w-20 h-20 rounded-2xl object-cover border border-slate-200 bg-white shrink-0"
+                    />
+                  ) : (
+                    <div className="w-20 h-20 rounded-2xl bg-slate-200/80 flex items-center justify-center text-slate-400 shrink-0">
+                      <ImageIcon className="w-7 h-7" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0 space-y-2">
+                    <div className="text-xs font-black text-slate-800">صورة المنتج</div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="px-3 py-1.5 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>رفع صورة من الجهاز</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0] || null;
+                            void handleUploadEditReqImage(file);
+                            e.currentTarget.value = '';
+                          }}
+                        />
+                      </label>
+                      {editReqForm.image_url && (
+                        <button
+                          type="button"
+                          onClick={() => setEditReqForm((prev) => ({ ...prev, image_url: '' }))}
+                          className="px-2.5 py-1.5 rounded-xl bg-white border border-slate-300 hover:bg-red-50 hover:text-red-700 text-slate-600 text-xs font-bold cursor-pointer"
+                        >
+                          إزالة الصورة
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-600">أو رابط الصورة المباشر</label>
+                  <input
+                    dir="ltr"
+                    value={editReqForm.image_url}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, image_url: e.target.value }))}
+                    placeholder="https://..."
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Name Fields */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-bold text-slate-700">اسم المنتج بالعربية *</label>
+                  <input
+                    required
+                    value={editReqForm.product_name_ar}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, product_name_ar: e.target.value }))}
+                    placeholder="مثال: لبن جهينة كامل الدسم 1 لتر"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700">الاسم بالإنجليزية (اختياري)</label>
+                  <input
+                    dir="ltr"
+                    value={editReqForm.product_name_en}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, product_name_en: e.target.value }))}
+                    placeholder="Juhayna Full Cream Milk 1L"
+                    className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                  />
+                </div>
+              </div>
+
+              {/* Category Picker */}
+              <div>
+                <CategoryPathPicker
+                  categories={merchantCategories}
+                  valueCategoryId={editReqForm.category_id}
+                  valueCategoryPath={editReqForm.category_path}
+                  compact
+                  label="القسم (اختر القسم الرئيسي أو الفرعي)"
+                  onChange={({ category_id, category_path }) =>
+                    setEditReqForm((prev) => ({ ...prev, category_id, category_path }))
+                  }
+                />
+              </div>
+
+              {/* Brand / Size / Price / Stock */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700">العلامة التجارية</label>
+                  <input
+                    value={editReqForm.brand}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, brand: e.target.value }))}
+                    className="w-full mt-1 px-2.5 py-2 rounded-xl border border-slate-200 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700">الحجم / الوزن</label>
+                  <input
+                    value={editReqForm.size_label}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, size_label: e.target.value }))}
+                    className="w-full mt-1 px-2.5 py-2 rounded-xl border border-slate-200 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700">السعر (ج.م)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={editReqForm.proposed_price}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, proposed_price: e.target.value }))}
+                    className="w-full mt-1 px-2.5 py-2 rounded-xl border border-slate-200 text-xs tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700">المخزون</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editReqForm.proposed_stock}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, proposed_stock: e.target.value }))}
+                    className="w-full mt-1 px-2.5 py-2 rounded-xl border border-slate-200 text-xs tabular-nums"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 space-y-2">
+                <label className="flex items-center gap-2 text-xs font-bold text-amber-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editReqForm.is_weighted}
+                    onChange={(e) => setEditReqForm((prev) => ({ ...prev, is_weighted: e.target.checked }))}
+                  />
+                  <span>منتج يُباع بالوزن (زيادة بأقل من واحد صحيح مثل 0.25 أو 0.5)</span>
+                </label>
+                {editReqForm.is_weighted && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[0.1, 0.125, 0.25, 0.5].map((stepVal) => (
+                      <button
+                        key={stepVal}
+                        type="button"
+                        onClick={() => setEditReqForm((prev) => ({ ...prev, weight_step: String(stepVal) }))}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-bold border ${
+                          Math.abs(Number(editReqForm.weight_step) - stepVal) < 0.001
+                            ? 'bg-amber-600 text-white border-amber-600'
+                            : 'bg-white text-amber-900 border-amber-200'
+                        }`}
+                      >
+                        {stepVal}
+                      </button>
+                    ))}
+                    <input
+                      type="number"
+                      min="0.05"
+                      max="10"
+                      step="0.05"
+                      value={editReqForm.weight_step}
+                      onChange={(e) => setEditReqForm((prev) => ({ ...prev, weight_step: e.target.value }))}
+                      className="w-20 px-2 py-1 text-xs rounded-lg border border-amber-300 bg-white tabular-nums"
+                    />
+                    <select
+                      value={editReqForm.weight_unit}
+                      onChange={(e) => setEditReqForm((prev) => ({ ...prev, weight_unit: e.target.value }))}
+                      className="px-2 py-1 text-xs rounded-lg border border-amber-300 bg-white font-semibold"
+                    >
+                      <option value="كجم">كجم</option>
+                      <option value="جم">جم</option>
+                      <option value="لتر">لتر</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={savingReqEdit}
+                  onClick={() => setEditingRequest(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={savingReqEdit}
+                  onClick={() => void handleSaveRequestEdit(false)}
+                  className="px-4 py-2 rounded-xl bg-[#A92224] hover:bg-[#86191B] text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                >
+                  {savingReqEdit && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  حفظ التعديلات
+                </button>
+                {editingRequest.status === 'pending' && (
+                  <button
+                    type="button"
+                    disabled={savingReqEdit}
+                    onClick={() => void handleSaveRequestEdit(true)}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    حفظ واعتماد ونشر بالقسم
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

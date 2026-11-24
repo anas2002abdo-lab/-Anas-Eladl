@@ -108,9 +108,19 @@ app.set('trust proxy', 1);
 let sqlitePersistRef: SqlitePersistController | null = null;
 let postHydrationReconciled = false;
 
+const READ_ONLY_POST_PATHS = new Set([
+  '/storefront/assistant',
+  '/merchant/master-catalog/match',
+  '/merchant/master-catalog/excel-preview',
+  '/pricing/simulate',
+]);
+
 app.use('/api', async (req, res, next) => {
   const isMutating =
-    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE';
+    (req.method === 'POST' && !READ_ONLY_POST_PATHS.has(req.path)) ||
+    req.method === 'PUT' ||
+    req.method === 'PATCH' ||
+    req.method === 'DELETE';
 
   // 1. Cloud SQL hydration & cross-instance freshness gate (fail-safe 503 if unreachable)
   if (req.path !== '/health' && isCloudSqlConfigured()) {
@@ -1045,6 +1055,7 @@ function ensureSuperAdminMerchantAccount(admin: Record<string, unknown>): Record
 }
 
 app.post('/api/auth/admin/login', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   const { email: rawEmail, username: rawUsername, password } = (req.body || {}) as {
     email?: string;
     username?: string;
@@ -1137,6 +1148,7 @@ app.post('/api/auth/admin/login', (req, res) => {
 });
 
 app.post('/api/auth/refresh', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   const rawRefresh = extractRefreshToken(req);
   if (!rawRefresh) {
     return res.status(401).json({ error: 'رمز التحديث غير مرفق' });
@@ -1160,6 +1172,7 @@ app.post('/api/auth/refresh', (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   const auth = optionalAuth(req);
   const fcmToken = typeof req.body?.fcm_token === 'string' ? req.body.fcm_token.trim() : '';
   const deviceId = typeof req.body?.device_id === 'string' ? req.body.device_id.trim() : '';
@@ -1181,6 +1194,7 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.json({
     ok: true,
     authenticated: true,
@@ -1811,6 +1825,55 @@ app.patch('/api/captains/:id/credentials', requireAuth, requirePermission('capta
   res.json({ ok: true, username: nextUsername });
 });
 
+app.delete('/api/captains/:id', requireAuth, requirePermission('captains.review', 'captains.suspend'), (req, res) => {
+  const { id } = req.params;
+  const existing = db.prepare('SELECT * FROM captains WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  if (!existing) return res.status(404).json({ error: 'الكابتن غير موجود' });
+
+  const captainName = String(existing.full_name || id);
+  const captainSessions = db
+    .prepare("SELECT id FROM user_sessions WHERE user_id = ? AND user_role = 'captain'")
+    .all(id) as Array<{ id: string }>;
+
+  const removeCaptainTx = db.transaction((capId: string) => {
+    db.prepare('UPDATE orders SET captain_id = NULL WHERE captain_id = ?').run(capId);
+    db.prepare('UPDATE trips SET captain_id = NULL WHERE captain_id = ?').run(capId);
+    db.prepare('UPDATE trips SET preferred_captain_id = NULL WHERE preferred_captain_id = ?').run(capId);
+    db.prepare('UPDATE deliveries SET captain_id = NULL WHERE captain_id = ?').run(capId);
+    db.prepare('UPDATE deliveries SET preferred_captain_id = NULL WHERE preferred_captain_id = ?').run(capId);
+    db.prepare('DELETE FROM captain_documents WHERE captain_id = ?').run(capId);
+    db.prepare('DELETE FROM captain_ratings WHERE captain_id = ?').run(capId);
+    db.prepare("DELETE FROM wallets WHERE user_id = ? AND owner_type = 'captain'").run(capId);
+    db.prepare("DELETE FROM user_sessions WHERE user_id = ? AND user_role = 'captain'").run(capId);
+    db.prepare("DELETE FROM push_device_tokens WHERE user_id = ? AND user_role = 'captain'").run(capId);
+    db.prepare('DELETE FROM captains WHERE id = ?').run(capId);
+  });
+
+  removeCaptainTx(id);
+  for (const s of captainSessions) {
+    closeSocketsForSession(s.id, 4401, 'تم حذف حساب الطيار');
+  }
+
+  recordAuditLog({
+    actor_name: req.auth?.fullName || 'المدير العام',
+    actor_role: req.auth?.role || 'super_admin',
+    action: 'CAPTAIN_DELETED',
+    entity_type: 'captains',
+    entity_id: id,
+    reason: 'حذف حساب طيار من لوحة الإدارة',
+    details: `تم حذف الطيار (${captainName} - ${String(existing.phone || '')}) وإنهاء جلساته النشطة`,
+  });
+
+  broadcastToRooms(['rides:all', 'admin:all', `captain:${id}`], {
+    type: 'captains:updated',
+    captain_id: id,
+    deleted: true,
+    availability_status: 'offline',
+  });
+
+  res.json({ ok: true, id, deleted_name: captainName });
+});
+
 app.patch('/api/captains/:id/status', requireAuth, requirePermission('captains.review', 'captains.suspend'), (req, res) => {
   const { id } = req.params;
   const { verification_status, rejection_reason, is_eligible_for_rides, allowed_services, availability_status, cash_limit } = req.body;
@@ -2207,6 +2270,10 @@ app.get('/api/orders', allowAnyUserOrGuest, (req, res) => {
       params.push(statusFilter);
     }
   }
+  if (auth.role === 'customer') {
+    clauses.push('o.customer_id = ?');
+    params.push(auth.id);
+  }
   if (effectiveMerchantId) {
     clauses.push('(o.merchant_id = ? OR EXISTS (SELECT 1 FROM order_stores os WHERE os.order_id = o.id AND os.merchant_id = ?))');
     params.push(effectiveMerchantId, effectiveMerchantId);
@@ -2587,11 +2654,11 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
     for (let idx = 0; idx < rawItems.length; idx++) {
       const it = rawItems[idx];
       if (!it) continue;
-      const qty = Math.max(1, Math.floor(Number(it.quantity || 1)));
+      const rawQtyNum = Number(it.quantity ?? 1);
       const productId = it.product_id ? String(it.product_id).trim() : null;
       if (productId) {
         const product = db
-          .prepare('SELECT id, merchant_id, name_ar, base_price, sale_price, is_available FROM products WHERE id = ?')
+          .prepare('SELECT id, merchant_id, name_ar, base_price, sale_price, is_available, is_weighted, weight_step, min_order_qty FROM products WHERE id = ?')
           .get(productId) as Record<string, unknown> | undefined;
         if (!product || String(product.merchant_id || '') !== String(merchant_id)) {
           return res.status(400).json({ error: 'أحد المنتجات المختارة غير موجود أو لا يتبع هذا المتجر' });
@@ -2599,6 +2666,12 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
         if (!Boolean(product.is_available)) {
           return res.status(400).json({ error: `المنتج "${String(product.name_ar)}" غير متوفر حاليًا` });
         }
+        const isWeighted = Boolean(product.is_weighted);
+        const weightStep = Math.max(0.05, Number(product.weight_step || 0.25));
+        const minOrderQty = Math.max(isWeighted ? weightStep : 1, Number(product.min_order_qty || (isWeighted ? weightStep : 1)));
+        const qty = isWeighted
+          ? Math.max(minOrderQty, Math.round((Number.isFinite(rawQtyNum) && rawQtyNum > 0 ? rawQtyNum : weightStep) * 1000) / 1000)
+          : Math.max(1, Math.floor(Number.isFinite(rawQtyNum) ? rawQtyNum : 1));
         const basePrice = Number(product.base_price || 0);
         const discPrice = product.sale_price !== null && product.sale_price !== undefined ? Number(product.sale_price) : null;
         const unitPrice = discPrice !== null && discPrice > 0 && discPrice < basePrice ? discPrice : basePrice;
@@ -2613,6 +2686,7 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
           rejection_reason: null,
         });
       } else if (isAdminActor && String(it.name_ar || '').trim()) {
+        const qty = Math.max(0.05, Math.round((Number.isFinite(rawQtyNum) && rawQtyNum > 0 ? rawQtyNum : 1) * 1000) / 1000);
         const unitPrice = Math.max(0, Number(it.unit_price || 0));
         sanitizedItems.push({
           id: it.id ? String(it.id) : `item_${idx + 1}_${uid('it')}`,
@@ -2999,11 +3073,11 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
       for (let idx = 0; idx < rawItems.length; idx++) {
         const it = rawItems[idx];
         if (!it) continue;
-        const qty = Math.max(1, Math.floor(Number(it.quantity || 1)));
+        const rawQtyNum = Number(it.quantity ?? 1);
         const productId = it.product_id ? String(it.product_id).trim() : null;
         if (productId) {
           const product = db
-            .prepare('SELECT id, merchant_id, name_ar, base_price, sale_price, is_available FROM products WHERE id = ?')
+            .prepare('SELECT id, merchant_id, name_ar, base_price, sale_price, is_available, is_weighted, weight_step, min_order_qty FROM products WHERE id = ?')
             .get(productId) as Record<string, unknown> | undefined;
           if (!product || String(product.merchant_id || '') !== String(st.merchant_id)) {
             return res.status(400).json({ error: 'أحد المنتجات المختارة غير موجود أو لا يتبع هذا المتجر' });
@@ -3011,6 +3085,12 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
           if (!Boolean(product.is_available)) {
             return res.status(400).json({ error: `المنتج "${String(product.name_ar)}" غير متوفر حاليًا` });
           }
+          const isWeighted = Boolean(product.is_weighted);
+          const weightStep = Math.max(0.05, Number(product.weight_step || 0.25));
+          const minOrderQty = Math.max(isWeighted ? weightStep : 1, Number(product.min_order_qty || (isWeighted ? weightStep : 1)));
+          const qty = isWeighted
+            ? Math.max(minOrderQty, Math.round((Number.isFinite(rawQtyNum) && rawQtyNum > 0 ? rawQtyNum : weightStep) * 1000) / 1000)
+            : Math.max(1, Math.floor(Number.isFinite(rawQtyNum) ? rawQtyNum : 1));
           const basePrice = Number(product.base_price || 0);
           const discPrice = product.sale_price !== null && product.sale_price !== undefined ? Number(product.sale_price) : null;
           const unitPrice = discPrice !== null && discPrice > 0 && discPrice < basePrice ? discPrice : basePrice;
@@ -3025,6 +3105,7 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
             rejection_reason: null,
           });
         } else if (isAdminActor && String(it.name_ar || '').trim()) {
+          const qty = Math.max(0.05, Math.round((Number.isFinite(rawQtyNum) && rawQtyNum > 0 ? rawQtyNum : 1) * 1000) / 1000);
           const unitPrice = Math.max(0, Number(it.unit_price || 0));
           sanitizedItems.push({
             id: it.id ? String(it.id) : `item_${idx + 1}_${uid('it')}`,
@@ -4532,6 +4613,8 @@ app.get('/api/products', (req, res) => {
   const merchantId = typeof req.query.merchant_id === 'string' ? req.query.merchant_id.trim() : '';
   const categoryId = typeof req.query.category_id === 'string' ? req.query.category_id.trim() : '';
   const offersOnly = req.query.offers_only === '1' || req.query.offers_only === 'true';
+  const noImageOnly = req.query.no_image === '1' || req.query.no_image === 'true';
+  const availabilityFilter = typeof req.query.availability === 'string' ? req.query.availability.trim().toLowerCase() : 'all';
   const approvedOnly = req.query.approved_only === '1' || req.query.approved_only === 'true';
   const rawQuery = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const paginated = req.query.paginated === '1' || req.query.paginated === 'true';
@@ -4560,6 +4643,14 @@ app.get('/api/products', (req, res) => {
   }
   if (offersOnly || categoryId === 'offers') {
     clauses.push('(p.is_offer = 1 OR c.is_offers_section = 1 OR (p.sale_price IS NOT NULL AND p.sale_price < p.base_price))');
+  }
+  if (noImageOnly) {
+    clauses.push("TRIM(COALESCE(p.image_url, '')) = ''");
+  }
+  if (availabilityFilter === 'available') {
+    clauses.push('p.is_available = 1');
+  } else if (availabilityFilter === 'unavailable' || availabilityFilter === 'paused' || availabilityFilter === 'hidden') {
+    clauses.push('p.is_available = 0');
   }
 
   if (isAdminAuth(auth)) {
@@ -4601,11 +4692,18 @@ app.get('/api/products', (req, res) => {
 
   const mapProductRow = (p: Record<string, unknown>) => {
     const hasDiscount = p.sale_price !== null && p.sale_price !== undefined && Number(p.sale_price) < Number(p.base_price);
+    const isWeighted = Boolean(p.is_weighted);
+    const weightStep = Number(p.weight_step || 0.25);
+    const weightUnit = String(p.weight_unit || 'كجم').trim() || 'كجم';
     return {
       ...p,
       is_offer: Boolean(p.is_offer) || Boolean(p.category_is_offers) || hasDiscount,
       requires_prescription: Boolean(p.requires_prescription),
       is_available: Boolean(p.is_available),
+      is_weighted: isWeighted,
+      weight_step: Number.isFinite(weightStep) && weightStep > 0 ? weightStep : 0.25,
+      weight_unit: weightUnit,
+      min_order_qty: Number(p.min_order_qty || (isWeighted ? (Number.isFinite(weightStep) && weightStep > 0 ? weightStep : 0.25) : 1)),
     };
   };
 
@@ -4717,6 +4815,34 @@ app.get('/api/products', (req, res) => {
         .get(...params) as { c: number }
     ).c;
     const totalPages = Math.max(1, Math.ceil(total / limit));
+    let summary:
+      | { total_all: number; total_offers: number; total_no_image: number; total_unavailable: number }
+      | undefined;
+    if (merchantId && merchantId !== 'all') {
+      const sRow = db
+        .prepare(
+          `SELECT
+             COUNT(*) AS total_all,
+             SUM(CASE WHEN p.is_offer = 1 OR c.is_offers_section = 1 OR (p.sale_price IS NOT NULL AND p.sale_price < p.base_price) THEN 1 ELSE 0 END) AS total_offers,
+             SUM(CASE WHEN TRIM(COALESCE(p.image_url, '')) = '' AND p.is_available = 1 THEN 1 ELSE 0 END) AS total_no_image,
+             SUM(CASE WHEN p.is_available = 0 THEN 1 ELSE 0 END) AS total_unavailable
+           FROM products p
+           JOIN categories c ON c.id = p.category_id
+           WHERE p.merchant_id = ?`
+        )
+        .get(merchantId) as {
+        total_all?: number;
+        total_offers?: number;
+        total_no_image?: number;
+        total_unavailable?: number;
+      };
+      summary = {
+        total_all: Number(sRow?.total_all || 0),
+        total_offers: Number(sRow?.total_offers || 0),
+        total_no_image: Number(sRow?.total_no_image || 0),
+        total_unavailable: Number(sRow?.total_unavailable || 0),
+      };
+    }
     return res.json({
       items: mapped,
       total,
@@ -4724,6 +4850,7 @@ app.get('/api/products', (req, res) => {
       limit,
       total_pages: totalPages,
       has_more: offset + mapped.length < total,
+      ...(summary ? { summary } : {}),
     });
   }
 
@@ -4750,9 +4877,13 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     barcode,
     merchant_sku,
     min_order_qty,
+    is_weighted,
+    weight_step,
+    weight_unit,
     description,
     image_url,
     base_price,
+    price,
     sale_price,
     is_offer,
     stock_quantity,
@@ -4797,7 +4928,7 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     return res.status(403).json({ error: 'غير مصرح لك بإضافة منتج داخل قسم يتبع متجرًا آخر' });
   }
 
-  const parsedBase = Number(base_price ?? 0);
+  const parsedBase = Number(base_price ?? price ?? 0);
   if (!Number.isFinite(parsedBase) || parsedBase < 0) {
     return res.status(400).json({ error: 'السعر الأساسي غير صالح' });
   }
@@ -4807,7 +4938,17 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
   }
   const parsedStock = Math.max(0, Math.floor(Number(stock_quantity ?? 10)));
   const parsedThreshold = Math.max(0, Math.floor(Number(low_stock_threshold ?? 5)));
-  const parsedMinQty = Math.max(1, Math.floor(Number(min_order_qty ?? 1)));
+  const parsedIsWeighted = Boolean(is_weighted) ? 1 : 0;
+  const rawWeightStep = Number(weight_step ?? 0.25);
+  const parsedWeightStep =
+    Number.isFinite(rawWeightStep) && rawWeightStep >= 0.05 && rawWeightStep <= 10
+      ? Math.round(rawWeightStep * 1000) / 1000
+      : 0.25;
+  const parsedWeightUnit = String(weight_unit || 'كجم').trim() || 'كجم';
+  const rawMinQty = Number(min_order_qty ?? (parsedIsWeighted ? parsedWeightStep : 1));
+  const parsedMinQty = parsedIsWeighted
+    ? Math.max(parsedWeightStep, Math.round((Number.isFinite(rawMinQty) && rawMinQty > 0 ? rawMinQty : parsedWeightStep) * 1000) / 1000)
+    : Math.max(1, Math.floor(Number.isFinite(rawMinQty) ? rawMinQty : 1));
   const parsedSize = extractSize({ size_label, name_ar, name_en });
   const cleanMasterId = String(master_product_id || '').trim() || null;
 
@@ -4863,8 +5004,9 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     INSERT INTO products (
       id, product_code, merchant_id, category_id, master_product_id, name_ar, name_en, description, image_url,
       brand, size_label, size_value, size_unit, barcode, merchant_sku, min_order_qty,
+      is_weighted, weight_step, weight_unit,
       base_price, sale_price, is_offer, stock_quantity, low_stock_threshold, requires_prescription, addons_text, is_available
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     finalCode,
@@ -4882,6 +5024,9 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     String(barcode || '').trim() || null,
     String(merchant_sku || '').trim(),
     parsedMinQty,
+    parsedIsWeighted,
+    parsedWeightStep,
+    parsedWeightUnit,
     parsedBase,
     parsedSale,
     effectiveIsOffer,
@@ -5165,7 +5310,12 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
       return res.status(409).json({ error: `كود المنتج "${nextCode}" مستخدم بالفعل لمنتج آخر` });
     }
   }
-  const nextBase = b.base_price !== undefined ? Number(b.base_price) : Number(existing.base_price);
+  const nextBase =
+    b.base_price !== undefined
+      ? Number(b.base_price)
+      : b.price !== undefined
+      ? Number(b.price)
+      : Number(existing.base_price);
   if (!Number.isFinite(nextBase) || nextBase < 0) {
     return res.status(400).json({ error: 'السعر الأساسي غير صالح' });
   }
@@ -5218,7 +5368,20 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
       ? (String(b.barcode || '').trim() || null)
       : existing.barcode ? String(existing.barcode).trim() : null;
   const nextMerchantSku = b.merchant_sku !== undefined ? String(b.merchant_sku || '').trim() : String(existing.merchant_sku || '');
-  const nextMinQty = b.min_order_qty !== undefined ? Math.max(1, Math.floor(Number(b.min_order_qty))) : Number(existing.min_order_qty || 1);
+  const nextIsWeighted = b.is_weighted !== undefined ? (Boolean(b.is_weighted) ? 1 : 0) : (Boolean(existing.is_weighted) ? 1 : 0);
+  const rawNextStep = b.weight_step !== undefined ? Number(b.weight_step) : Number(existing.weight_step || 0.25);
+  const nextWeightStep =
+    Number.isFinite(rawNextStep) && rawNextStep >= 0.05 && rawNextStep <= 10
+      ? Math.round(rawNextStep * 1000) / 1000
+      : 0.25;
+  const nextWeightUnit =
+    b.weight_unit !== undefined
+      ? (String(b.weight_unit || 'كجم').trim() || 'كجم')
+      : (String(existing.weight_unit || 'كجم').trim() || 'كجم');
+  const rawNextMinQty = b.min_order_qty !== undefined ? Number(b.min_order_qty) : Number(existing.min_order_qty || (nextIsWeighted ? nextWeightStep : 1));
+  const nextMinQty = nextIsWeighted
+    ? Math.max(nextWeightStep, Math.round((Number.isFinite(rawNextMinQty) && rawNextMinQty > 0 ? rawNextMinQty : nextWeightStep) * 1000) / 1000)
+    : Math.max(1, Math.floor(Number.isFinite(rawNextMinQty) ? rawNextMinQty : 1));
 
   let nextMasterId = existing.master_product_id ? String(existing.master_product_id).trim() : null;
   const nameChanged = b.name_ar !== undefined && String(b.name_ar).trim() !== String(existing.name_ar).trim();
@@ -5249,6 +5412,7 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
     UPDATE products SET
       product_code = ?, merchant_id = ?, category_id = ?, master_product_id = ?, name_ar = ?, name_en = ?, description = ?, image_url = ?,
       brand = ?, size_label = ?, size_value = ?, size_unit = ?, barcode = ?, merchant_sku = ?, min_order_qty = ?,
+      is_weighted = ?, weight_step = ?, weight_unit = ?,
       base_price = ?, sale_price = ?, is_offer = ?, stock_quantity = ?, low_stock_threshold = ?,
       requires_prescription = ?, addons_text = ?, is_available = ?, updated_at = datetime('now')
     WHERE id = ?
@@ -5268,6 +5432,9 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
     nextBarcode,
     nextMerchantSku,
     nextMinQty,
+    nextIsWeighted,
+    nextWeightStep,
+    nextWeightUnit,
     nextBase,
     nextSale,
     nextIsOffer,
@@ -7857,19 +8024,20 @@ app.get('/api/trips', requireAuth, (req, res) => {
 });
 
 app.get('/api/mobile/captains/nearby', requireAuth, requireRole('customer', ...ALL_ADMIN_ROLES), (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   const refLat = Number(req.query.lat || 31.1583);
   const refLng = Number(req.query.lng || 31.9369);
   const vehicleType = req.query.vehicle_type ? String(req.query.vehicle_type) : null;
 
+  // Strictly return ONLY approved captains who are currently online & available
   const rows = db
-    .prepare("SELECT * FROM captains WHERE verification_status = 'approved'")
+    .prepare("SELECT * FROM captains WHERE verification_status = 'approved' AND availability_status = 'available'")
     .all() as Array<Record<string, unknown>>;
 
-  const candidateRows =
+  const effectiveRows =
     vehicleType && vehicleType !== 'all'
       ? rows.filter((c) => String(c.vehicle_type) === vehicleType)
       : rows;
-  const effectiveRows = candidateRows.length > 0 ? candidateRows : rows;
 
   const enriched = effectiveRows
     .map((c) => {
@@ -7892,12 +8060,7 @@ app.get('/api/mobile/captains/nearby', requireAuth, requireRole('customer', ...A
         is_eligible_for_rides: Boolean(c.is_eligible_for_rides),
       };
     })
-    .sort((a, b) => {
-      const availScoreA = a.availability_status === 'available' ? 0 : a.availability_status === 'busy' ? 1 : 2;
-      const availScoreB = b.availability_status === 'available' ? 0 : b.availability_status === 'busy' ? 1 : 2;
-      if (availScoreA !== availScoreB) return availScoreA - availScoreB;
-      return a.distance_km - b.distance_km;
-    });
+    .sort((a, b) => a.distance_km - b.distance_km);
 
   res.json(enriched);
 });
@@ -7950,7 +8113,7 @@ app.post('/api/mobile/rides', requireAuth, requireRole('customer', ...ALL_ADMIN_
   let preferredCapName: string | null = null;
   if (preferredCapId) {
     const capRow = db
-      .prepare("SELECT id, full_name FROM captains WHERE id = ? AND verification_status = 'approved'")
+      .prepare("SELECT id, full_name FROM captains WHERE id = ? AND verification_status = 'approved' AND availability_status = 'available'")
       .get(preferredCapId) as { id: string; full_name: string } | undefined;
     if (capRow) {
       preferredCapName = capRow.full_name;
@@ -8668,7 +8831,7 @@ app.post('/api/mobile/parcels', requireAuth, requireRole('customer', ...ALL_ADMI
   let chosenCapName: string | null = null;
   if (preferred_captain_id) {
     const capRow = db
-      .prepare("SELECT id, full_name FROM captains WHERE id = ? AND verification_status = 'approved'")
+      .prepare("SELECT id, full_name FROM captains WHERE id = ? AND verification_status = 'approved' AND availability_status = 'available'")
       .get(String(preferred_captain_id)) as { id: string; full_name: string } | undefined;
     if (capRow) {
       chosenCapId = capRow.id;
@@ -11372,18 +11535,22 @@ app.patch(
   (req, res) => {
     const { id } = req.params;
     const { availability_status } = req.body;
+    const normalizedAvail = String(availability_status || '').trim();
+    if (!['available', 'offline', 'busy'].includes(normalizedAvail)) {
+      return res.status(400).json({ error: 'حالة التوفر غير صالحة' });
+    }
     const cap = db.prepare('SELECT * FROM captains WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (!cap) return res.status(404).json({ error: 'الكابتن غير موجود' });
-    if (cap.verification_status !== 'approved' && availability_status === 'available') {
+    if (cap.verification_status !== 'approved' && normalizedAvail === 'available') {
       return res.status(403).json({ error: 'لا يمكنك استقبال الطلبات قبل اعتماد حسابك ومستنداتك من الإدارة' });
     }
-    db.prepare('UPDATE captains SET availability_status = ? WHERE id = ?').run(availability_status, id);
+    db.prepare('UPDATE captains SET availability_status = ? WHERE id = ?').run(normalizedAvail, id);
     broadcastToRooms(['rides:all', 'admin:all', `captain:${id}`], {
       type: 'captains:updated',
       captain_id: id,
-      availability_status,
+      availability_status: normalizedAvail,
     });
-    res.json({ ok: true });
+    res.json({ ok: true, availability_status: normalizedAvail });
   }
 );
 
