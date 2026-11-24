@@ -1014,10 +1014,15 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                   color: const Color(0xFFD97706),
                   badgeCount: (_totalAllProducts - _totalUnavailableProducts).clamp(0, 999999),
                   onTap: () async {
+                    if (_categories.isEmpty) {
+                      await _loadCategories();
+                    }
+                    if (!mounted) return;
                     final changed = await showMerchantProductsSwipeDeck(
                       context: context,
                       api: widget.api,
                       merchantId: _merchantId,
+                      categories: _categories,
                     );
                     if (changed) {
                       await _refreshProducts(page: _productsPage);

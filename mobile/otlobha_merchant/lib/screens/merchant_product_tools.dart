@@ -1271,6 +1271,7 @@ Future<bool> showMerchantProductsSwipeDeck({
   required BuildContext context,
   required MerchantApiClient api,
   required String merchantId,
+  List<Map<String, dynamic>> categories = const [],
 }) async {
   final changed = await showModalBottomSheet<bool>(
     context: context,
@@ -1278,7 +1279,11 @@ Future<bool> showMerchantProductsSwipeDeck({
     useSafeArea: true,
     enableDrag: false,
     backgroundColor: Colors.transparent,
-    builder: (ctx) => _MerchantProductsSwipeDeck(api: api, merchantId: merchantId),
+    builder: (ctx) => _MerchantProductsSwipeDeck(
+      api: api,
+      merchantId: merchantId,
+      categories: categories,
+    ),
   );
   return changed == true;
 }
@@ -1286,8 +1291,13 @@ Future<bool> showMerchantProductsSwipeDeck({
 class _MerchantProductsSwipeDeck extends StatefulWidget {
   final MerchantApiClient api;
   final String merchantId;
+  final List<Map<String, dynamic>> categories;
 
-  const _MerchantProductsSwipeDeck({required this.api, required this.merchantId});
+  const _MerchantProductsSwipeDeck({
+    required this.api,
+    required this.merchantId,
+    this.categories = const [],
+  });
 
   @override
   State<_MerchantProductsSwipeDeck> createState() => _MerchantProductsSwipeDeckState();
@@ -1295,6 +1305,7 @@ class _MerchantProductsSwipeDeck extends StatefulWidget {
 
 class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> {
   final List<Map<String, dynamic>> _deck = [];
+  List<Map<String, dynamic>> _categories = [];
   int _index = 0;
   int _nextPage = 1;
   bool _hasMore = true;
@@ -1309,7 +1320,20 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
   @override
   void initState() {
     super.initState();
+    _categories = List<Map<String, dynamic>>.from(widget.categories);
+    if (_categories.isEmpty) {
+      unawaited(_ensureCategoriesLoaded());
+    }
     _loadNextBatch();
+  }
+
+  Future<void> _ensureCategoriesLoaded() async {
+    try {
+      final cats = await widget.api.fetchCategories();
+      if (mounted && cats.isNotEmpty) {
+        setState(() => _categories = cats);
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadNextBatch() async {
@@ -1389,63 +1413,41 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     }
   }
 
-  Future<void> _editImageForCurrent() async {
+  Future<void> _editCurrentCardDetails() async {
     if (_busyAction || _index >= _deck.length) return;
+    if (_categories.isEmpty) {
+      await _ensureCategoriesLoaded();
+    }
+    if (!mounted) return;
     final product = _deck[_index];
-    final id = (product['id'] ?? '').toString();
-    final name = (product['name_ar'] ?? '').toString();
-    final existingUrl = (product['image_url'] ?? '').toString().trim();
-    final ctrl = TextEditingController(text: existingUrl);
 
-    final url = await showDialog<String>(
+    final updated = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
-      builder: (dCtx) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: AlertDialog(
-          title: Text('رابط صورة "$name"', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
-          content: TextField(
-            controller: ctrl,
-            textDirection: TextDirection.ltr,
-            decoration: const InputDecoration(
-              labelText: 'رابط الصورة (URL)',
-              hintText: 'https://...',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(dCtx, null), child: const Text('إلغاء')),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: _kBrandPrimary),
-              onPressed: () => Navigator.pop(dCtx, ctrl.text.trim()),
-              child: const Text('حفظ الرابط'),
-            ),
-          ],
-        ),
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _SwipeCardEditSheet(
+        api: widget.api,
+        product: product,
+        categories: _categories,
       ),
     );
 
-    if (url == null) return;
-    setState(() => _busyAction = true);
-    try {
-      await widget.api.updateProduct(productId: id, imageUrl: url);
-      _changedAny = true;
-      if (!mounted) return;
-      setState(() {
-        _deck[_index] = {
-          ...product,
-          'image_url': url,
-        };
-        _busyAction = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(backgroundColor: _kBrandGreen, content: Text('تم تحديث رابط صورة "$name" بنجاح')),
-      );
-    } catch (e) {
-      if (mounted) {
-        setState(() => _busyAction = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
-      }
-    }
+    if (updated == null || !mounted) return;
+    _changedAny = true;
+    setState(() {
+      _deck[_index] = {
+        ...product,
+        ...updated,
+      };
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 2),
+        backgroundColor: _kBrandGreen,
+        content: Text('تم حفظ تعديلات "${updated['name_ar'] ?? product['name_ar'] ?? ''}" بنجاح'),
+      ),
+    );
   }
 
   @override
@@ -1594,7 +1596,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                                   ..rotateZ(swipeProgress * 0.07),
                                 child: Container(
                                   width: double.infinity,
-                                  constraints: const BoxConstraints(maxHeight: 455),
+                                  constraints: const BoxConstraints(maxHeight: 470),
                                   padding: const EdgeInsets.all(18),
                                   decoration: BoxDecoration(
                                     color: Colors.white,
@@ -1638,79 +1640,95 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                                               ),
                                             ),
                                           ),
-                                        // Product Image Preview
-                                        ClipRRect(
-                                          borderRadius: BorderRadius.circular(18),
-                                          child: Container(
-                                            width: 110,
-                                            height: 110,
-                                            color: const Color(0xFFF8FAFC),
-                                            child: currentImgUrl.isNotEmpty
-                                                ? Image.network(
-                                                    currentImgUrl,
-                                                    fit: BoxFit.cover,
-                                                    errorBuilder: (_, __, ___) => const Center(
+                                        // Product Image Preview (tappable to edit)
+                                        GestureDetector(
+                                          onTap: _busyAction ? null : _editCurrentCardDetails,
+                                          child: ClipRRect(
+                                            borderRadius: BorderRadius.circular(18),
+                                            child: Container(
+                                              width: 108,
+                                              height: 108,
+                                              color: const Color(0xFFF8FAFC),
+                                              child: currentImgUrl.isNotEmpty
+                                                  ? Image.network(
+                                                      currentImgUrl,
+                                                      fit: BoxFit.cover,
+                                                      errorBuilder: (_, __, ___) => const Center(
+                                                        child: Icon(
+                                                          Icons.broken_image_outlined,
+                                                          size: 42,
+                                                          color: Color(0xFFD97706),
+                                                        ),
+                                                      ),
+                                                    )
+                                                  : const Center(
                                                       child: Icon(
-                                                        Icons.broken_image_outlined,
+                                                        Icons.hide_image_outlined,
                                                         size: 42,
                                                         color: Color(0xFFD97706),
                                                       ),
                                                     ),
-                                                  )
-                                                : const Center(
-                                                    child: Icon(
-                                                      Icons.hide_image_outlined,
-                                                      size: 42,
-                                                      color: Color(0xFFD97706),
-                                                    ),
-                                                  ),
+                                            ),
                                           ),
                                         ),
                                         const SizedBox(height: 12),
-                                        // Product Category (قسم المنتج)
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFFFEF3C7),
-                                            borderRadius: BorderRadius.circular(99),
-                                          ),
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              const Icon(Icons.category_rounded, size: 14, color: Color(0xFFB45309)),
-                                              const SizedBox(width: 5),
-                                              Flexible(
-                                                child: Text(
-                                                  'القسم: ${currentCategory.isNotEmpty ? currentCategory : 'بدون قسم'}',
-                                                  maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                    fontSize: 12.5,
-                                                    fontWeight: FontWeight.w800,
-                                                    color: Color(0xFF92400E),
+                                        // Product Category (قسم المنتج — tappable to edit)
+                                        InkWell(
+                                          onTap: _busyAction ? null : _editCurrentCardDetails,
+                                          borderRadius: BorderRadius.circular(99),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFFEF3C7),
+                                              borderRadius: BorderRadius.circular(99),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                const Icon(Icons.category_rounded, size: 14, color: Color(0xFFB45309)),
+                                                const SizedBox(width: 5),
+                                                Flexible(
+                                                  child: Text(
+                                                    'القسم: ${currentCategory.isNotEmpty ? currentCategory : 'بدون قسم'}',
+                                                    maxLines: 1,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      fontSize: 12.5,
+                                                      fontWeight: FontWeight.w800,
+                                                      color: Color(0xFF92400E),
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            ],
+                                                const SizedBox(width: 5),
+                                                const Icon(Icons.edit_rounded, size: 13, color: Color(0xFFB45309)),
+                                              ],
+                                            ),
                                           ),
                                         ),
                                         const SizedBox(height: 10),
-                                        // Product Name (اسم المنتج)
-                                        Text(
-                                          (current['name_ar'] ?? '').toString(),
-                                          textAlign: TextAlign.center,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.w900,
-                                            color: _kBrandDark,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 10),
-                                        // Product Image URL (رابط الصورة)
+                                        // Product Name (اسم المنتج — tappable to edit)
                                         InkWell(
-                                          onTap: _busyAction ? null : _editImageForCurrent,
+                                          onTap: _busyAction ? null : _editCurrentCardDetails,
+                                          borderRadius: BorderRadius.circular(10),
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                            child: Text(
+                                              (current['name_ar'] ?? '').toString(),
+                                              textAlign: TextAlign.center,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.w900,
+                                                color: _kBrandDark,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        // Product Image URL (رابط الصورة — tappable to edit)
+                                        InkWell(
+                                          onTap: _busyAction ? null : _editCurrentCardDetails,
                                           borderRadius: BorderRadius.circular(12),
                                           child: Container(
                                             width: double.infinity,
@@ -1737,7 +1755,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                                                     ),
                                                     Spacer(),
                                                     Text(
-                                                      'تعديل',
+                                                      'اضغط للتعديل',
                                                       style: TextStyle(
                                                         fontSize: 11,
                                                         fontWeight: FontWeight.w800,
@@ -1765,22 +1783,41 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                                           ),
                                         ),
                                         const SizedBox(height: 10),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFFF1F5F9),
-                                            borderRadius: BorderRadius.circular(12),
-                                          ),
-                                          child: Text(
-                                            'السعر: ${_toDouble(current['base_price'] ?? current['price']).toStringAsFixed(2)} ج.م  •  المخزون: ${_toInt(current['stock_quantity'])}',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w800,
-                                              fontSize: 12.5,
-                                              color: _kBrandPrimary,
+                                        InkWell(
+                                          onTap: _busyAction ? null : _editCurrentCardDetails,
+                                          borderRadius: BorderRadius.circular(12),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFF1F5F9),
+                                              borderRadius: BorderRadius.circular(12),
+                                            ),
+                                            child: Text(
+                                              'السعر: ${_toDouble(current['base_price'] ?? current['price']).toStringAsFixed(2)} ج.م  •  المخزون: ${_toInt(current['stock_quantity'])}',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w800,
+                                                fontSize: 12.5,
+                                                color: _kBrandPrimary,
+                                              ),
                                             ),
                                           ),
                                         ),
-                                        const SizedBox(height: 8),
+                                        const SizedBox(height: 10),
+                                        OutlinedButton.icon(
+                                          onPressed: _busyAction ? null : _editCurrentCardDetails,
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: _kBrandPrimary,
+                                            side: const BorderSide(color: _kBrandPrimary),
+                                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                          ),
+                                          icon: const Icon(Icons.edit_rounded, size: 16),
+                                          label: const Text(
+                                            'تعديل بيانات البطاقة (القسم، الاسم، الصورة، السعر)',
+                                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 6),
                                         Text(
                                           'بطاقة ${_index + 1} من ${_totalProducts > 0 ? _totalProducts : _deck.length}',
                                           style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
@@ -1812,10 +1849,15 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                       ),
                     ),
                     const SizedBox(width: 8),
-                    IconButton.filledTonal(
-                      tooltip: 'تعديل رابط الصورة',
-                      onPressed: _busyAction ? null : _editImageForCurrent,
-                      icon: const Icon(Icons.add_photo_alternate_rounded, color: _kBrandDark),
+                    FilledButton.tonalIcon(
+                      onPressed: _busyAction ? null : _editCurrentCardDetails,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFEF3C7),
+                        foregroundColor: const Color(0xFF92400E),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      ),
+                      icon: const Icon(Icons.edit_rounded, size: 18),
+                      label: const Text('تعديل', style: TextStyle(fontWeight: FontWeight.w900)),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -1833,6 +1875,279 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SwipeCardEditSheet extends StatefulWidget {
+  final MerchantApiClient api;
+  final Map<String, dynamic> product;
+  final List<Map<String, dynamic>> categories;
+
+  const _SwipeCardEditSheet({
+    required this.api,
+    required this.product,
+    required this.categories,
+  });
+
+  @override
+  State<_SwipeCardEditSheet> createState() => _SwipeCardEditSheetState();
+}
+
+class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _imageCtrl;
+  late final TextEditingController _priceCtrl;
+  late final TextEditingController _stockCtrl;
+  String? _selectedCategoryId;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.product;
+    _nameCtrl = TextEditingController(text: (p['name_ar'] ?? '').toString());
+    _imageCtrl = TextEditingController(text: (p['image_url'] ?? '').toString());
+    _priceCtrl = TextEditingController(text: _toDouble(p['base_price'] ?? p['price']).toString());
+    _stockCtrl = TextEditingController(text: _toInt(p['stock_quantity']).toString());
+
+    final catId = (p['category_id'] ?? '').toString();
+    if (catId.isNotEmpty && widget.categories.any((c) => '${c['id']}' == catId)) {
+      _selectedCategoryId = catId;
+    } else if (widget.categories.isNotEmpty) {
+      _selectedCategoryId = '${widget.categories.first['id']}';
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _imageCtrl.dispose();
+    _priceCtrl.dispose();
+    _stockCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'يرجى كتابة اسم المنتج');
+      return;
+    }
+    final price = double.tryParse(_priceCtrl.text.trim().replaceAll(',', '.'));
+    if (price == null || price < 0) {
+      setState(() => _error = 'يرجى إدخال سعر صحيح');
+      return;
+    }
+    final stock = int.tryParse(_stockCtrl.text.trim()) ?? _toInt(widget.product['stock_quantity']);
+    final imageUrl = _imageCtrl.text.trim();
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    try {
+      await widget.api.updateProduct(
+        productId: (widget.product['id'] ?? '').toString(),
+        nameAr: name,
+        categoryId: _selectedCategoryId,
+        imageUrl: imageUrl,
+        basePrice: price,
+        stockQuantity: stock < 0 ? 0 : stock,
+      );
+
+      String nextCategoryName = (widget.product['category_name'] ?? widget.product['category_name_ar'] ?? 'بدون قسم').toString();
+      if (_selectedCategoryId != null) {
+        final match = widget.categories.where((c) => '${c['id']}' == _selectedCategoryId);
+        if (match.isNotEmpty) {
+          nextCategoryName = (match.first['full_path_ar'] ?? match.first['name_ar'] ?? nextCategoryName).toString();
+        }
+      }
+
+      if (!mounted) return;
+      Navigator.pop<Map<String, dynamic>>(context, {
+        'name_ar': name,
+        if (_selectedCategoryId != null) 'category_id': _selectedCategoryId,
+        'category_name': nextCategoryName,
+        'category_name_ar': nextCategoryName,
+        'image_url': imageUrl,
+        'base_price': price,
+        'price': price,
+        'stock_quantity': stock < 0 ? 0 : stock,
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: EdgeInsets.fromLTRB(16, 14, 16, bottomInset + 18),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 44,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFCBD5E1),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Icon(Icons.edit_note_rounded, color: _kBrandPrimary, size: 26),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'تعديل معلومات البطاقة',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded),
+                    onPressed: () => Navigator.pop(context, null),
+                  ),
+                ],
+              ),
+              if (_error != null) ...[
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEE2E2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(color: Color(0xFFB91C1C), fontSize: 12.5, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+              if (widget.categories.isNotEmpty) ...[
+                DropdownButtonFormField<String>(
+                  value: _selectedCategoryId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'قسم المنتج',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: widget.categories
+                      .map(
+                        (c) => DropdownMenuItem<String>(
+                          value: '${c['id']}',
+                          child: Text(
+                            (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (v) => setState(() => _selectedCategoryId = v),
+                ),
+                const SizedBox(height: 10),
+              ],
+              TextField(
+                controller: _nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'اسم المنتج *',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _imageCtrl,
+                textDirection: TextDirection.ltr,
+                decoration: InputDecoration(
+                  labelText: 'رابط الصورة (URL)',
+                  hintText: 'https://...',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  suffixIcon: IconButton(
+                    tooltip: 'مسح الرابط',
+                    icon: const Icon(Icons.clear_rounded, size: 18),
+                    onPressed: () => _imageCtrl.clear(),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _priceCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(
+                        labelText: 'السعر (ج.م)',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      controller: _stockCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'المخزون',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _saving ? null : _save,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _kBrandPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                  icon: _saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.save_rounded),
+                  label: Text(
+                    _saving ? 'جاري حفظ التعديلات...' : 'حفظ التعديلات',
+                    style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14.5),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
