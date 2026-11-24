@@ -313,6 +313,8 @@ export const merchants = pgTable(
     lat: doublePrecision('lat'),
     lng: doublePrecision('lng'),
     token_version: integer('token_version').notNull().default(0),
+    swipe_deck_product_id: text('swipe_deck_product_id').notNull().default(''),
+    swipe_deck_index: integer('swipe_deck_index').notNull().default(0),
   },
   (table) => [index('pg_idx_merchants_status').on(table.verification_status, table.merchant_type)]
 );

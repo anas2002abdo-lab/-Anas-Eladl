@@ -881,6 +881,8 @@ export function initDatabase(): void {
     ['is_email_verified', 'ALTER TABLE merchants ADD COLUMN is_email_verified INTEGER NOT NULL DEFAULT 0'],
     ['lat', 'ALTER TABLE merchants ADD COLUMN lat REAL'],
     ['lng', 'ALTER TABLE merchants ADD COLUMN lng REAL'],
+    ['swipe_deck_product_id', "ALTER TABLE merchants ADD COLUMN swipe_deck_product_id TEXT NOT NULL DEFAULT ''"],
+    ['swipe_deck_index', 'ALTER TABLE merchants ADD COLUMN swipe_deck_index INTEGER NOT NULL DEFAULT 0'],
   ];
   for (const [col, sql] of merAlterDefs) {
     if (!merCols.some((c) => c.name === col)) {

@@ -340,6 +340,10 @@ class MerchantApiClient {
     bool offersOnly = false,
     bool noImageOnly = false,
     String availability = 'all', // all | available | unavailable
+    String? sort,
+    String? fromId,
+    String? afterId,
+    int? offset,
   }) async {
     final qp = <String, String>{
       'merchant_id': merchantId,
@@ -351,6 +355,10 @@ class MerchantApiClient {
     if (offersOnly) qp['offers_only'] = '1';
     if (noImageOnly) qp['no_image'] = '1';
     if (availability != 'all') qp['availability'] = availability;
+    if (sort != null && sort.trim().isNotEmpty) qp['sort'] = sort.trim();
+    if (fromId != null && fromId.trim().isNotEmpty) qp['from_id'] = fromId.trim();
+    if (afterId != null && afterId.trim().isNotEmpty) qp['after_id'] = afterId.trim();
+    if (offset != null && offset >= 0) qp['offset'] = '$offset';
 
     final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/products')
         .replace(queryParameters: qp);
@@ -518,6 +526,39 @@ class MerchantApiClient {
           body: jsonEncode({'is_open': isOpen}),
         )
         .timeout(const Duration(seconds: 20)));
+    _decode(res);
+  }
+
+  Future<Map<String, dynamic>> fetchSwipeDeckProgress(String merchantId) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchants/${Uri.encodeComponent(merchantId)}/swipe-progress',
+    );
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 15)));
+    final data = _decode(res);
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    return const <String, dynamic>{};
+  }
+
+  Future<void> saveSwipeDeckProgress({
+    required String merchantId,
+    required String productId,
+    required int cardIndex,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchants/${Uri.encodeComponent(merchantId)}/swipe-progress',
+    );
+    final res = await _authedRequest(() => http
+        .put(
+          uri,
+          headers: _headers(),
+          body: jsonEncode({
+            'product_id': productId,
+            'card_index': cardIndex,
+          }),
+        )
+        .timeout(const Duration(seconds: 15)));
     _decode(res);
   }
 }

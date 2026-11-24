@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/api_client.dart';
 
 const Color _kBrandPrimary = Color(0xFF9F1D20);
@@ -1304,18 +1306,28 @@ class _MerchantProductsSwipeDeck extends StatefulWidget {
 }
 
 class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> {
+  static const String _kEndSentinel = '__END__';
+
   final List<Map<String, dynamic>> _deck = [];
   List<Map<String, dynamic>> _categories = [];
   int _index = 0;
-  int _nextPage = 1;
+  int _baseOffset = 0;
   bool _hasMore = true;
-  int _totalProducts = 0;
+  bool _fetchingMore = false;
+  int _totalAvailable = 0;
   int _skippedCount = 0;
   int _hiddenCount = 0;
   bool _loading = true;
   bool _busyAction = false;
   bool _changedAny = false;
+  bool _completedAll = false;
   double _dragDx = 0;
+  String? _lastSavedProductId;
+  int _lastSavedCardIndex = -1;
+
+  String get _localBookmarkKey => 'otlobha_merchant_swipe_bookmark_${widget.merchantId}';
+
+  int get _currentAbsoluteIndex => (_baseOffset + _index - _hiddenCount).clamp(0, 999999);
 
   @override
   void initState() {
@@ -1324,7 +1336,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     if (_categories.isEmpty) {
       unawaited(_ensureCategoriesLoaded());
     }
-    _loadNextBatch();
+    unawaited(_initAndRestoreDeck());
   }
 
   Future<void> _ensureCategoriesLoaded() async {
@@ -1336,34 +1348,283 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     } catch (_) {}
   }
 
-  Future<void> _loadNextBatch() async {
-    if (!_hasMore) return;
-    setState(() => _loading = _deck.isEmpty);
+  Future<Map<String, dynamic>?> _readLocalBookmark() async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_localBookmarkKey);
+      if (raw == null || raw.trim().isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _writeLocalBookmark({
+    required String productId,
+    required int cardIndex,
+    required bool pendingSync,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _localBookmarkKey,
+        jsonEncode({
+          'product_id': productId,
+          'card_index': cardIndex,
+          'pending_sync': pendingSync,
+          'updated_at': DateTime.now().millisecondsSinceEpoch,
+        }),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _persistProgress({
+    required String productId,
+    required int cardIndex,
+    bool force = false,
+  }) async {
+    final safeIdx = cardIndex < 0 ? 0 : cardIndex;
+    if (!force && _lastSavedProductId == productId && _lastSavedCardIndex == safeIdx) {
+      return;
+    }
+    _lastSavedProductId = productId;
+    _lastSavedCardIndex = safeIdx;
+
+    // 1. Always write locally first so closing the app immediately never loses progress.
+    await _writeLocalBookmark(
+      productId: productId,
+      cardIndex: safeIdx,
+      pendingSync: true,
+    );
+
+    // 2. Persist to server account so logging out of the email or switching phones resumes identically.
+    try {
+      await widget.api.saveSwipeDeckProgress(
+        merchantId: widget.merchantId,
+        productId: productId,
+        cardIndex: safeIdx,
+      );
+      await _writeLocalBookmark(
+        productId: productId,
+        cardIndex: safeIdx,
+        pendingSync: false,
+      );
+    } catch (_) {
+      // Keep pending_sync=true locally so the next open automatically syncs it to server.
+    }
+  }
+
+  void _persistCurrentCardPosition({bool force = false}) {
+    if (_index < _deck.length) {
+      final productId = (_deck[_index]['id'] ?? '').toString().trim();
+      if (productId.isNotEmpty) {
+        unawaited(
+          _persistProgress(
+            productId: productId,
+            cardIndex: _currentAbsoluteIndex,
+            force: force,
+          ),
+        );
+      }
+    } else if (!_hasMore && _totalAvailable > 0) {
+      unawaited(
+        _persistProgress(
+          productId: _kEndSentinel,
+          cardIndex: _totalAvailable,
+          force: force,
+        ),
+      );
+    }
+  }
+
+  Future<void> _initAndRestoreDeck() async {
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _completedAll = false;
+      });
+    }
+
+    final local = await _readLocalBookmark();
+    if (local != null && local['pending_sync'] == true) {
+      final localPid = (local['product_id'] ?? '').toString().trim();
+      final localIdx = _toInt(local['card_index']);
+      try {
+        await widget.api.saveSwipeDeckProgress(
+          merchantId: widget.merchantId,
+          productId: localPid,
+          cardIndex: localIdx,
+        );
+        await _writeLocalBookmark(
+          productId: localPid,
+          cardIndex: localIdx,
+          pendingSync: false,
+        );
+      } catch (_) {}
+    }
+
+    String savedProductId = '';
+    int resolvedOffset = 0;
+    int totalAvailable = 0;
+    bool isCompleted = false;
+    bool loadedFromServer = false;
+
+    try {
+      final progress = await widget.api.fetchSwipeDeckProgress(widget.merchantId);
+      savedProductId = (progress['product_id'] ?? '').toString().trim();
+      resolvedOffset = _toInt(progress['resolved_offset']);
+      totalAvailable = _toInt(progress['total_available']);
+      isCompleted = progress['is_completed'] == true;
+      loadedFromServer = true;
+    } catch (_) {
+      if (local != null) {
+        savedProductId = (local['product_id'] ?? '').toString().trim();
+        resolvedOffset = _toInt(local['card_index']);
+        isCompleted = savedProductId == _kEndSentinel;
+      }
+    }
+
+    if (!mounted) return;
+
+    if (isCompleted && (totalAvailable > 0 || !loadedFromServer)) {
+      setState(() {
+        _deck.clear();
+        _index = 0;
+        _baseOffset = totalAvailable;
+        _totalAvailable = totalAvailable;
+        _hasMore = false;
+        _completedAll = true;
+        _loading = false;
+      });
+      return;
+    }
+
+    try {
+      MerchantProductsPageResult res;
+      if (savedProductId.isNotEmpty && savedProductId != _kEndSentinel) {
+        res = await widget.api.fetchStoreProductsPage(
+          merchantId: widget.merchantId,
+          limit: 30,
+          noImageOnly: false,
+          availability: 'available',
+          sort: 'id_asc',
+          fromId: savedProductId,
+        );
+        if (res.items.isEmpty && totalAvailable > 0) {
+          final fallbackOffset = resolvedOffset.clamp(0, totalAvailable - 1);
+          res = await widget.api.fetchStoreProductsPage(
+            merchantId: widget.merchantId,
+            limit: 30,
+            noImageOnly: false,
+            availability: 'available',
+            sort: 'id_asc',
+            offset: fallbackOffset,
+          );
+          resolvedOffset = fallbackOffset;
+        }
+      } else if (resolvedOffset > 0) {
+        res = await widget.api.fetchStoreProductsPage(
+          merchantId: widget.merchantId,
+          limit: 30,
+          noImageOnly: false,
+          availability: 'available',
+          sort: 'id_asc',
+          offset: resolvedOffset,
+        );
+      } else {
+        res = await widget.api.fetchStoreProductsPage(
+          merchantId: widget.merchantId,
+          limit: 30,
+          noImageOnly: false,
+          availability: 'available',
+          sort: 'id_asc',
+          offset: 0,
+        );
+      }
+
+      if (!mounted) return;
+      final computedTotal = totalAvailable > 0
+          ? totalAvailable
+          : (res.totalAll - res.totalUnavailable).clamp(res.items.length, 999999);
+      setState(() {
+        _deck
+          ..clear()
+          ..addAll(res.items);
+        _index = 0;
+        _baseOffset = resolvedOffset.clamp(0, computedTotal);
+        _totalAvailable = computedTotal;
+        _hasMore = res.hasMore;
+        _completedAll = res.items.isEmpty && computedTotal > 0;
+        _loading = false;
+      });
+
+      if (_deck.isNotEmpty) {
+        _persistCurrentCardPosition();
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _loadNextBatch() async {
+    if (!_hasMore || _fetchingMore) return;
+    _fetchingMore = true;
+    final wasAtEnd = _index >= _deck.length;
+    if (_deck.isEmpty && mounted) {
+      setState(() => _loading = true);
+    }
+    try {
+      final lastId = _deck.isNotEmpty ? (_deck.last['id'] ?? '').toString().trim() : '';
       final res = await widget.api.fetchStoreProductsPage(
         merchantId: widget.merchantId,
-        page: _nextPage,
         limit: 30,
         noImageOnly: false,
         availability: 'available',
+        sort: 'id_asc',
+        afterId: lastId.isNotEmpty ? lastId : null,
+        offset: lastId.isEmpty ? _baseOffset : 0,
       );
       if (!mounted) return;
       final existingIds = _deck.map((e) => '${e['id']}').toSet();
       final fresh = res.items.where((e) => !existingIds.contains('${e['id']}')).toList();
       setState(() {
         _deck.addAll(fresh);
-        _totalProducts = res.total;
-        _hasMore = res.hasMore;
-        _nextPage = res.page + 1;
+        if (_totalAvailable == 0) {
+          _totalAvailable = (res.totalAll - res.totalUnavailable).clamp(_deck.length, 999999);
+        }
+        _hasMore = res.hasMore && fresh.isNotEmpty;
         _loading = false;
       });
+      if (wasAtEnd) {
+        _persistCurrentCardPosition(force: true);
+      }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+    } finally {
+      _fetchingMore = false;
     }
   }
 
+  Future<void> _resetToFirstCard() async {
+    if (_busyAction) return;
+    setState(() {
+      _busyAction = true;
+      _loading = true;
+      _skippedCount = 0;
+      _hiddenCount = 0;
+      _baseOffset = 0;
+      _index = 0;
+      _completedAll = false;
+      _deck.clear();
+    });
+    await _persistProgress(productId: '', cardIndex: 0, force: true);
+    if (!mounted) return;
+    setState(() => _busyAction = false);
+    await _initAndRestoreDeck();
+  }
+
   void _maybePrefetch() {
-    if (_hasMore && (_deck.length - _index) <= 5) {
+    if (_hasMore && (_deck.length - _index) <= 6) {
       unawaited(_loadNextBatch());
     }
   }
@@ -1374,7 +1635,11 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
       _skippedCount++;
       _index++;
       _dragDx = 0;
+      if (_index >= _deck.length && !_hasMore) {
+        _completedAll = true;
+      }
     });
+    _persistCurrentCardPosition();
     _maybePrefetch();
   }
 
@@ -1394,9 +1659,14 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
       if (!mounted) return;
       setState(() {
         _hiddenCount++;
+        if (_totalAvailable > 0) _totalAvailable--;
         _index++;
         _busyAction = false;
+        if (_index >= _deck.length && !_hasMore) {
+          _completedAll = true;
+        }
       });
+      _persistCurrentCardPosition(force: true);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           duration: const Duration(seconds: 2),
@@ -1450,6 +1720,22 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     );
   }
 
+  Future<void> _closeDeck() async {
+    if (_index < _deck.length) {
+      final productId = (_deck[_index]['id'] ?? '').toString().trim();
+      if (productId.isNotEmpty) {
+        await _persistProgress(
+          productId: productId,
+          cardIndex: _currentAbsoluteIndex,
+          force: true,
+        );
+      }
+    }
+    if (mounted) {
+      Navigator.pop(context, _changedAny);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final current = _index < _deck.length ? _deck[_index] : null;
@@ -1458,6 +1744,10 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     final currentCategory = current != null
         ? (current['category_name'] ?? current['category_name_ar'] ?? 'بدون قسم').toString().trim()
         : '';
+    final displayTotal = _totalAvailable > 0 ? _totalAvailable : _deck.length;
+    final currentPosition = (_currentAbsoluteIndex + 1).clamp(1, displayTotal > 0 ? displayTotal : 1);
+    final remainingCount = (displayTotal - _currentAbsoluteIndex).clamp(0, 999999);
+    final canRestartFromBeginning = _currentAbsoluteIndex > 0 || _completedAll;
 
     return Directionality(
       textDirection: TextDirection.rtl,
@@ -1485,17 +1775,23 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                       children: [
                         const Text(
                           'قسم المنتجات (بطاقات السحب السريع)',
-                          style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900),
+                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900),
                         ),
                         Text(
-                          'متبقي ${(_totalProducts - _index).clamp(0, 99999)} • تم التخطي $_skippedCount • تم الإيقاف $_hiddenCount',
+                          'متبقي $remainingCount • تم التخطي $_skippedCount • تم الإيقاف $_hiddenCount',
                           style: const TextStyle(fontSize: 11.5, color: Color(0xFF64748B)),
                         ),
                       ],
                     ),
                   ),
+                  if (canRestartFromBeginning && !_loading)
+                    IconButton(
+                      tooltip: 'البدء من أول بطاقة',
+                      onPressed: _busyAction ? null : _resetToFirstCard,
+                      icon: const Icon(Icons.restart_alt_rounded, color: _kBrandPrimary),
+                    ),
                   FilledButton.tonalIcon(
-                    onPressed: () => Navigator.pop(context, _changedAny),
+                    onPressed: _closeDeck,
                     icon: const Icon(Icons.close_rounded, size: 18),
                     label: const Text('إغلاق'),
                   ),
@@ -1538,7 +1834,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
               ),
             ),
             Expanded(
-              child: _loading
+              child: _loading || (current == null && _hasMore && _fetchingMore)
                   ? const Center(child: CircularProgressIndicator())
                   : current == null
                       ? Center(
@@ -1556,14 +1852,31 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
-                                  'تم إيقاف ظهور $_hiddenCount منتج وتخطي $_skippedCount منتج.',
+                                  _skippedCount > 0 || _hiddenCount > 0
+                                      ? 'تم إيقاف ظهور $_hiddenCount منتج وتخطي $_skippedCount منتج.'
+                                      : 'تم الوصول لآخر بطاقة محفوظة على حسابك.',
+                                  textAlign: TextAlign.center,
                                   style: const TextStyle(color: Color(0xFF64748B)),
                                 ),
                                 const SizedBox(height: 16),
-                                FilledButton(
-                                  style: FilledButton.styleFrom(backgroundColor: _kBrandPrimary),
-                                  onPressed: () => Navigator.pop(context, _changedAny),
-                                  child: const Text('العودة لقسم منتجاتي'),
+                                Wrap(
+                                  spacing: 10,
+                                  runSpacing: 10,
+                                  alignment: WrapAlignment.center,
+                                  children: [
+                                    if (displayTotal > 0)
+                                      FilledButton.icon(
+                                        style: FilledButton.styleFrom(backgroundColor: const Color(0xFFD97706)),
+                                        onPressed: _resetToFirstCard,
+                                        icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                                        label: const Text('البدء من أول بطاقة'),
+                                      ),
+                                    FilledButton(
+                                      style: FilledButton.styleFrom(backgroundColor: _kBrandPrimary),
+                                      onPressed: _closeDeck,
+                                      child: const Text('العودة لقسم منتجاتي'),
+                                    ),
+                                  ],
                                 ),
                               ],
                             ),
@@ -1819,8 +2132,8 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
                                         ),
                                         const SizedBox(height: 6),
                                         Text(
-                                          'بطاقة ${_index + 1} من ${_totalProducts > 0 ? _totalProducts : _deck.length}',
-                                          style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
+                                          'بطاقة $currentPosition من $displayTotal • محفوظة تلقائياً',
+                                          style: const TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w700),
                                         ),
                                       ],
                                     ),

@@ -2183,6 +2183,98 @@ app.patch(
   }
 );
 
+app.get(
+  '/api/merchants/:id/swipe-progress',
+  requireAuth,
+  requireOwnership((req) => req.params.id, { allowRoles: [...ALL_ADMIN_ROLES] }),
+  (req, res) => {
+    const { id } = req.params;
+    const merchant = db
+      .prepare('SELECT id, swipe_deck_product_id, swipe_deck_index FROM merchants WHERE id = ?')
+      .get(id) as { id: string; swipe_deck_product_id?: string | null; swipe_deck_index?: number | null } | undefined;
+    if (!merchant) return res.status(404).json({ error: 'التاجر غير موجود' });
+
+    const savedProductId = String(merchant.swipe_deck_product_id || '').trim();
+    const savedIndex = Math.max(0, Math.trunc(Number(merchant.swipe_deck_index || 0)));
+
+    const totalRow = db
+      .prepare(
+        `SELECT COUNT(*) AS c
+         FROM products p
+         JOIN merchants m ON m.id = p.merchant_id
+         JOIN categories c ON c.id = p.category_id
+         WHERE p.merchant_id = ? AND p.is_available = 1`
+      )
+      .get(id) as { c?: number } | undefined;
+    const totalAvailable = Number(totalRow?.c || 0);
+
+    let resolvedOffset = 0;
+    let isCompleted = false;
+
+    if (totalAvailable === 0) {
+      resolvedOffset = 0;
+    } else if (savedProductId === '__END__') {
+      resolvedOffset = totalAvailable;
+      isCompleted = true;
+    } else if (savedProductId.length > 0) {
+      const beforeRow = db
+        .prepare(
+          `SELECT COUNT(*) AS c
+           FROM products p
+           JOIN merchants m ON m.id = p.merchant_id
+           JOIN categories c ON c.id = p.category_id
+           WHERE p.merchant_id = ? AND p.is_available = 1 AND p.id < ?`
+        )
+        .get(id, savedProductId) as { c?: number } | undefined;
+      const beforeCount = Number(beforeRow?.c || 0);
+      resolvedOffset = Math.min(beforeCount, Math.max(0, totalAvailable - 1));
+    } else if (savedIndex > 0) {
+      resolvedOffset = Math.min(savedIndex, Math.max(0, totalAvailable - 1));
+    }
+
+    res.json({
+      ok: true,
+      merchant_id: id,
+      product_id: savedProductId,
+      card_index: savedIndex,
+      resolved_offset: resolvedOffset,
+      total_available: totalAvailable,
+      is_completed: isCompleted,
+    });
+  }
+);
+
+app.put(
+  '/api/merchants/:id/swipe-progress',
+  requireAuth,
+  requireOwnership((req) => req.params.id, { allowRoles: [...ALL_ADMIN_ROLES] }),
+  (req, res) => {
+    const { id } = req.params;
+    const existing = db.prepare('SELECT id FROM merchants WHERE id = ?').get(id) as { id: string } | undefined;
+    if (!existing) return res.status(404).json({ error: 'التاجر غير موجود' });
+
+    const rawProductId = typeof req.body?.product_id === 'string' ? req.body.product_id.trim() : '';
+    if (rawProductId.length > 128) {
+      return res.status(400).json({ error: 'معرف المنتج غير صالح' });
+    }
+    const rawCardIndex = Number(req.body?.card_index ?? 0);
+    const cardIndex = Number.isFinite(rawCardIndex)
+      ? Math.max(0, Math.min(1000000, Math.trunc(rawCardIndex)))
+      : 0;
+
+    db.prepare(
+      'UPDATE merchants SET swipe_deck_product_id = ?, swipe_deck_index = ? WHERE id = ?'
+    ).run(rawProductId, cardIndex, id);
+
+    res.json({
+      ok: true,
+      merchant_id: id,
+      product_id: rawProductId,
+      card_index: cardIndex,
+    });
+  }
+);
+
 app.delete('/api/merchants/:id', requireAuth, requirePermission('merchants.verify'), (req, res) => {
   const { id } = req.params;
   const existing = db.prepare('SELECT * FROM merchants WHERE id = ?').get(id) as Record<string, unknown> | undefined;
@@ -4636,7 +4728,11 @@ app.get('/api/products', (req, res) => {
   const defaultLimit = paginated ? 60 : 250;
   const maxLimit = paginated ? 200 : 500;
   const limit = Math.min(maxLimit, Math.max(1, parseInt(String(req.query.limit || defaultLimit), 10) || defaultLimit));
-  const offset = (page - 1) * limit;
+  const rawOffset = req.query.offset !== undefined ? parseInt(String(req.query.offset), 10) : NaN;
+  const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : (page - 1) * limit;
+  const sortMode = String(req.query.sort || '').trim().toLowerCase();
+  const fromId = String(req.query.from_id || '').trim();
+  const afterId = String(req.query.after_id || '').trim();
 
   const clauses: string[] = [];
   const params: unknown[] = [];
@@ -4665,6 +4761,13 @@ app.get('/api/products', (req, res) => {
     clauses.push('p.is_available = 1');
   } else if (availabilityFilter === 'unavailable' || availabilityFilter === 'paused' || availabilityFilter === 'hidden') {
     clauses.push('p.is_available = 0');
+  }
+  if (afterId && afterId.length <= 128) {
+    clauses.push('p.id > ?');
+    params.push(afterId);
+  } else if (fromId && fromId.length <= 128) {
+    clauses.push('p.id >= ?');
+    params.push(fromId);
   }
 
   if (isAdminAuth(auth)) {
@@ -4734,6 +4837,7 @@ app.get('/api/products', (req, res) => {
            c.is_offers_section as category_is_offers
   `;
 
+  const ungroupedOrderSql = sortMode === 'id_asc' ? 'ORDER BY p.id ASC' : 'ORDER BY p.is_offer DESC, p.updated_at DESC';
   const buildSelectQuery = (fromSql: string) =>
     shouldGroupByMaster
       ? `SELECT * FROM (
@@ -4749,7 +4853,7 @@ app.get('/api/products', (req, res) => {
          LIMIT ? OFFSET ?`
       : `${selectColumnsSql}
          ${fromSql}
-         ORDER BY p.is_offer DESC, p.updated_at DESC
+         ${ungroupedOrderSql}
          LIMIT ? OFFSET ?`;
 
   let rows: Array<Record<string, unknown>> = [];
