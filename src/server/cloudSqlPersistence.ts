@@ -92,6 +92,8 @@ const TRANSIENT_PG_CODES = new Set([
   '57P01', // admin_shutdown
   '57P02', // crash_shutdown
   '57P03', // cannot_connect_now (Cloud SQL waking from scale-to-zero)
+  '57014', // query_canceled
+  '53300', // too_many_connections
   '08000', // connection_exception
   '08003', // connection_does_not_exist
   '08006', // connection_failure
@@ -118,6 +120,9 @@ function isTransientPgError(err: unknown): boolean {
     msg.includes('the database system is starting up') ||
     msg.includes('the database system is shutting down') ||
     msg.includes('timeout exceeded when trying to connect') ||
+    msg.includes('connection timeout') ||
+    msg.includes('too many clients') ||
+    msg.includes('remaining connection slots') ||
     msg.includes('socket hang up') ||
     msg.includes('econnreset') ||
     msg.includes('epipe') ||
@@ -138,8 +143,8 @@ async function sleepMs(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
-  const backoffs = [400, 1000, 2200];
+async function withPgRetry<T>(label: string, fn: () => Promise<T>, maxAttempts = 5): Promise<T> {
+  const backoffs = [350, 800, 1600, 2600];
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {

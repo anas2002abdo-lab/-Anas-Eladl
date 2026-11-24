@@ -385,6 +385,12 @@ function getClientIp(req: express.Request): string {
 }
 
 app.use(express.json({ limit: '25mb' }));
+app.use((req, _res, next) => {
+  if (req.body === undefined || req.body === null) {
+    req.body = {};
+  }
+  next();
+});
 registerCloudSyncRoutes(app);
 registerMasterCatalogRoutes(app);
 
@@ -4594,9 +4600,17 @@ app.delete('/api/categories/:id', requireAuth, requireRole('merchant', ...ALL_AD
 
   const linked = (db.prepare('SELECT COUNT(*) as c FROM products WHERE category_id = ?').get(id) as { c: number }).c;
   if (linked > 0) {
-    return res.status(400).json({ error: `لا يمكن حذف القسم لارتباطه بـ ${linked} منتجات؛ يمكنك إيقاف تفعيله بدلًا من الحذف` });
+    return res.status(400).json({ error: `لا يمكن حذف القسم لارتباطه بـ ${linked} منتجات؛ يمكنك إيقاف تفعيله أو نقل منتجاته أولًا` });
   }
-  db.prepare('DELETE FROM categories WHERE id = ?').run(id);
+
+  const deleteCategoryTx = db.transaction((categoryId: string) => {
+    db.prepare('UPDATE master_products SET category_id = NULL WHERE category_id = ?').run(categoryId);
+    db.prepare('UPDATE product_matching_requests SET category_id = NULL WHERE category_id = ?').run(categoryId);
+    db.prepare('UPDATE storefront_banners SET target_category_id = NULL WHERE target_category_id = ?').run(categoryId);
+    db.prepare('DELETE FROM categories WHERE id = ?').run(categoryId);
+  });
+  deleteCategoryTx(id);
+
   recordAuditLog({
     actor_name: auth.fullName,
     actor_role: auth.role,
@@ -5472,7 +5486,11 @@ app.delete('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMI
     return res.status(403).json({ error: 'غير مصرح لك بحذف منتج يتبع متجرًا آخر' });
   }
 
-  db.prepare('DELETE FROM products WHERE id = ?').run(id);
+  const deleteProductTx = db.transaction((productId: string) => {
+    db.prepare('DELETE FROM product_deals WHERE product_id = ?').run(productId);
+    db.prepare('DELETE FROM products WHERE id = ?').run(productId);
+  });
+  deleteProductTx(id);
   recordAuditLog({
     actor_name: auth.fullName,
     actor_role: auth.role,
@@ -13221,9 +13239,13 @@ async function startServer() {
     if (!req.path.startsWith('/api')) {
       return next(err);
     }
-    const e = err as { status?: number; statusCode?: number; type?: string; message?: string };
+    const e = err as { status?: number; statusCode?: number; type?: string; code?: string; message?: string };
     const status = typeof e?.status === 'number' ? e.status : typeof e?.statusCode === 'number' ? e.statusCode : 500;
-    console.error(`[API Error] ${req.method} ${req.originalUrl} -> status=${status} type=${e?.type || 'error'}`);
+    const errCode = String(e?.code || '');
+    const errMsg = String(e?.message || '');
+    console.error(
+      `[API Error] ${req.method} ${req.originalUrl} -> status=${status} type=${e?.type || 'error'} code=${errCode || 'none'} msg=${errMsg.slice(0, 240)}`
+    );
     if (e?.type === 'entity.too.large' || status === 413) {
       return res.status(413).json({
         error: 'حجم الصور أو البيانات المرفوعة أكبر من الحد المسموح، يرجى تقليل حجم الصور والمحاولة مرة أخرى',
@@ -13232,6 +13254,34 @@ async function startServer() {
     if (status === 400 && (e?.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
       return res.status(400).json({
         error: 'صيغة البيانات المرسلة غير صالحة',
+      });
+    }
+    if (errCode === 'SQLITE_CONSTRAINT_FOREIGNKEY' || errMsg.includes('FOREIGN KEY constraint failed')) {
+      return res.status(400).json({
+        error: 'لا يمكن إتمام العملية لارتباط هذا السجل ببيانات أخرى داخل المنظومة؛ يرجى مراجعة العناصر المرتبطة أولًا',
+      });
+    }
+    if (
+      errCode === 'SQLITE_CONSTRAINT_UNIQUE' ||
+      errCode === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
+      errMsg.includes('UNIQUE constraint failed')
+    ) {
+      return res.status(409).json({
+        error: 'هذه البيانات مسجلة بالفعل مسبقًا، يرجى التحقق من عدم التكرار',
+      });
+    }
+    if (
+      errCode === 'SQLITE_CONSTRAINT_NOTNULL' ||
+      errCode === 'SQLITE_CONSTRAINT_CHECK' ||
+      errMsg.includes('NOT NULL constraint failed')
+    ) {
+      return res.status(400).json({
+        error: 'يرجى استكمال جميع الحقول المطلوبة بصيغة صحيحة قبل الحفظ',
+      });
+    }
+    if (errCode === 'SQLITE_BUSY' || errCode === 'SQLITE_LOCKED') {
+      return res.status(503).json({
+        error: 'النظام يعالج عملية أخرى في نفس اللحظة، يرجى إعادة المحاولة فورًا',
       });
     }
     return res.status(status >= 400 && status < 600 ? status : 500).json({

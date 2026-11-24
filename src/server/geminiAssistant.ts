@@ -2,8 +2,23 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 export const OTLOBHA_ASSISTANT_MODEL = 'gemini-4-hydrogen';
 export const OTLOBHA_ASSISTANT_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
-const REQUEST_TIMEOUT_MS = 24_000;
-const MAX_RETRY_ATTEMPTS = 3;
+const PER_MODEL_TIMEOUT_MS = 12_000;
+const MODEL_OVERLOAD_COOLDOWN_MS = 90_000;
+
+interface ModelCandidate {
+  model: string;
+  thinkingLevel?: ThinkingLevel;
+  timeoutMs: number;
+}
+
+const ASSISTANT_MODEL_CANDIDATES: ModelCandidate[] = [
+  { model: OTLOBHA_ASSISTANT_MODEL, thinkingLevel: ThinkingLevel.LOW, timeoutMs: 10_000 },
+  { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 10_000 },
+  { model: 'gemini-2.5-flash', timeoutMs: PER_MODEL_TIMEOUT_MS },
+];
+
+// Circuit breaker: skip models that just returned 503 high-demand for 90s so users get fast replies
+const modelCooldownUntil = new Map<string, number>();
 
 export interface AssistantHistoryTurn {
   role: 'user' | 'assistant';
@@ -311,126 +326,156 @@ export async function runOtlobhaGeminiAssistant(
     parts: [{ text: t.text }],
   }));
 
-  const modelCandidates: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
-    { model: OTLOBHA_ASSISTANT_MODEL, thinkingLevel: ThinkingLevel.LOW },
-    { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
+  const now = Date.now();
+  const readyCandidates = ASSISTANT_MODEL_CANDIDATES.filter(
+    (c) => (modelCooldownUntil.get(c.model) ?? 0) <= now
+  );
+  const cooledCandidates = ASSISTANT_MODEL_CANDIDATES.filter(
+    (c) => (modelCooldownUntil.get(c.model) ?? 0) > now
+  );
+  const orderedCandidates = [...readyCandidates, ...cooledCandidates];
+
+  // Try all candidates once; if a brief 503 burst hits them all, do one quick recovery retry on flash-lite
+  const executionPlan: Array<{ candidate: ModelCandidate; delayBeforeMs: number }> = [
+    ...orderedCandidates.map((candidate) => ({ candidate, delayBeforeMs: 0 })),
+    {
+      candidate: ASSISTANT_MODEL_CANDIDATES[1], // gemini-3.1-flash-lite fast recovery
+      delayBeforeMs: 600,
+    },
   ];
 
   let lastErr: unknown = null;
-  for (const candidate of modelCandidates) {
-    for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
-      try {
-        const response = await withTimeout(
-          ai.models.generateContent({
-            model: candidate.model,
-            contents,
-            config: {
-              systemInstruction,
-              thinkingConfig: { thinkingLevel: candidate.thinkingLevel },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  reply_ar: {
-                    type: Type.STRING,
-                    description: 'رد واضح ومباشر ومفيد للمستخدم باللغة العربية.',
-                  },
-                  search_keywords: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'أسماء منتجات مفردة قصيرة للبحث بالكتالوج إن كان الطلب للشراء، وإلا فارغة.',
-                  },
-                  suggested_product_ids: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'معرّفات المنتجات الحقيقية من الكتالوج المرفق فقط.',
-                  },
-                  suggested_service: {
-                    type: Type.STRING,
-                    enum: ['none', 'pharmacy', 'rides', 'parcels', 'market', 'free_order'],
-                    description: 'خدمة مقترحة من اطلبها إن كانت مناسبة، وإلا "none".',
-                  },
-                  quick_prompts: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: '3 اقتراحات قصيرة لأسئلة متابعة مناسبة.',
-                  },
-                },
-                required: ['reply_ar', 'quick_prompts'],
-              },
+  let lastTransientErr: unknown = null;
+  for (const step of executionPlan) {
+    const { candidate, delayBeforeMs } = step;
+    if (delayBeforeMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayBeforeMs));
+    }
+    try {
+      const config: Record<string, unknown> = {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            reply_ar: {
+              type: Type.STRING,
+              description: 'رد واضح ومباشر ومفيد للمستخدم باللغة العربية.',
             },
-          }),
-          REQUEST_TIMEOUT_MS
-        );
-
-        const rawText = (response.text ?? '').trim();
-        if (!rawText) {
-          throw new GeminiAssistantError(
-            'لم يُرجع المساعد الذكي ردًا نصيًا لهذه الرسالة. يرجى المحاولة مرة أخرى.',
-            502,
-            'EMPTY_RESPONSE'
-          );
-        }
-
-        const parsed = parseJsonResponseText(rawText);
-        const replyAr = String(parsed?.reply_ar || rawText).trim();
-        const rawKeywords = Array.isArray(parsed?.search_keywords) ? parsed.search_keywords : [];
-        const rawProductIds = Array.isArray(parsed?.suggested_product_ids) ? parsed.suggested_product_ids : [];
-        const rawPrompts = Array.isArray(parsed?.quick_prompts) ? parsed.quick_prompts : [];
-        const rawService = String(parsed?.suggested_service || '').trim().toLowerCase();
-        const normalizedService = rawService === 'none' ? '' : rawService;
-
-        const validCatalogIds = new Set(input.catalogProducts.map((p) => p.id));
-        const suggestedProductIds = rawProductIds
-          .map((id: unknown) => String(id || '').trim())
-          .filter((id: string) => id.length > 0 && validCatalogIds.has(id))
-          .slice(0, 8);
-
-        const searchKeywords = rawKeywords
-          .map((k: unknown) => String(k || '').trim())
-          .filter((k: string) => k.length >= 2)
-          .slice(0, 6);
-
-        const quickPrompts = rawPrompts
-          .map((q: unknown) => String(q || '').trim())
-          .filter((q: string) => q.length >= 2 && q.length <= 60)
-          .slice(0, 4);
-
-        return {
-          reply_ar: replyAr,
-          search_keywords: searchKeywords,
-          suggested_product_ids: suggestedProductIds,
-          suggested_service: (ALLOWED_SERVICES.has(normalizedService) ? normalizedService : '') as AssistantRunOutput['suggested_service'],
-          quick_prompts:
-            quickPrompts.length > 0
-              ? quickPrompts
-              : ['أرخص العروض اليوم', 'مقاضي الفطار والألبان', 'اطلب من الصيدلية', 'طلب نصي حر'],
-          model: candidate.model,
-        };
-      } catch (err) {
-        lastErr = err;
-        const errStatus = Number((err as any)?.status || (err as any)?.statusCode || 0);
-        const errMsg = err instanceof Error ? err.message : String(err ?? '');
-        console.error(
-          `[OtlobhaAssistant] attempt ${attempt}/${MAX_RETRY_ATTEMPTS} failed on ${candidate.model} (status=${errStatus}): ${errMsg.slice(0, 260)}`
-        );
-
-        // Stop immediately on auth/key errors — failing over to another model won't help
-        if (errStatus === 401 || errStatus === 403) {
-          throw classifyGeminiError(err);
-        }
-
-        if (attempt < MAX_RETRY_ATTEMPTS && isRetryableError(err)) {
-          const jitter = Math.floor(Math.random() * 250);
-          const backoffMs = (attempt === 1 ? 700 : 1600) + jitter;
-          await new Promise((resolve) => setTimeout(resolve, backoffMs));
-          continue;
-        }
-        // Break inner retry loop so we immediately try the fallback model
-        break;
+            search_keywords: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: 'أسماء منتجات مفردة قصيرة للبحث بالكتالوج إن كان الطلب للشراء، وإلا فارغة.',
+            },
+            suggested_product_ids: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: 'معرّفات المنتجات الحقيقية من الكتالوج المرفق فقط.',
+            },
+            suggested_service: {
+              type: Type.STRING,
+              enum: ['none', 'pharmacy', 'rides', 'parcels', 'market', 'free_order'],
+              description: 'خدمة مقترحة من اطلبها إن كانت مناسبة، وإلا "none".',
+            },
+            quick_prompts: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: '3 اقتراحات قصيرة لأسئلة متابعة مناسبة.',
+            },
+          },
+          required: ['reply_ar', 'quick_prompts'],
+        },
+      };
+      if (candidate.thinkingLevel) {
+        config.thinkingConfig = { thinkingLevel: candidate.thinkingLevel };
       }
+
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: candidate.model,
+          contents,
+          config: config as any,
+        }),
+        candidate.timeoutMs
+      );
+
+      const rawText = (response.text ?? '').trim();
+      if (!rawText) {
+        throw new GeminiAssistantError(
+          'لم يُرجع المساعد الذكي ردًا نصيًا لهذه الرسالة. يرجى المحاولة مرة أخرى.',
+          502,
+          'EMPTY_RESPONSE'
+        );
+      }
+
+      modelCooldownUntil.delete(candidate.model);
+
+      const parsed = parseJsonResponseText(rawText);
+      const replyAr = String(parsed?.reply_ar || rawText).trim();
+      const rawKeywords = Array.isArray(parsed?.search_keywords) ? parsed.search_keywords : [];
+      const rawProductIds = Array.isArray(parsed?.suggested_product_ids) ? parsed.suggested_product_ids : [];
+      const rawPrompts = Array.isArray(parsed?.quick_prompts) ? parsed.quick_prompts : [];
+      const rawService = String(parsed?.suggested_service || '').trim().toLowerCase();
+      const normalizedService = rawService === 'none' ? '' : rawService;
+
+      const validCatalogIds = new Set(input.catalogProducts.map((p) => p.id));
+      const suggestedProductIds = rawProductIds
+        .map((id: unknown) => String(id || '').trim())
+        .filter((id: string) => id.length > 0 && validCatalogIds.has(id))
+        .slice(0, 8);
+
+      const searchKeywords = rawKeywords
+        .map((k: unknown) => String(k || '').trim())
+        .filter((k: string) => k.length >= 2)
+        .slice(0, 6);
+
+      const quickPrompts = rawPrompts
+        .map((q: unknown) => String(q || '').trim())
+        .filter((q: string) => q.length >= 2 && q.length <= 60)
+        .slice(0, 4);
+
+      return {
+        reply_ar: replyAr,
+        search_keywords: searchKeywords,
+        suggested_product_ids: suggestedProductIds,
+        suggested_service: (ALLOWED_SERVICES.has(normalizedService) ? normalizedService : '') as AssistantRunOutput['suggested_service'],
+        quick_prompts:
+          quickPrompts.length > 0
+            ? quickPrompts
+            : ['أرخص العروض اليوم', 'مقاضي الفطار والألبان', 'اطلب من الصيدلية', 'طلب نصي حر'],
+        model: candidate.model,
+      };
+    } catch (err) {
+      lastErr = err;
+      const errStatus = Number((err as any)?.status || (err as any)?.statusCode || 0);
+      const errMsg = err instanceof Error ? err.message : String(err ?? '');
+      const upper = errMsg.toUpperCase();
+      console.error(
+        `[OtlobhaAssistant] model=${candidate.model} failed (status=${errStatus}): ${errMsg.slice(0, 260)}`
+      );
+
+      // Stop immediately on auth/key errors — failing over to another model won't help
+      if (errStatus === 401 || errStatus === 403) {
+        throw classifyGeminiError(err);
+      }
+
+      if (
+        errStatus === 503 ||
+        errStatus === 429 ||
+        upper.includes('HIGH DEMAND') ||
+        upper.includes('UNAVAILABLE') ||
+        upper.includes('OVERLOADED') ||
+        upper.includes('TIMEOUT')
+      ) {
+        lastTransientErr = err;
+        modelCooldownUntil.set(candidate.model, Date.now() + MODEL_OVERLOAD_COOLDOWN_MS);
+      } else if (errStatus === 404 || upper.includes('NOT_FOUND')) {
+        // Put unavailable model on longer cooldown (10 min) so it doesn't slow down requests
+        modelCooldownUntil.set(candidate.model, Date.now() + 10 * 60_000);
+      }
+      continue;
     }
   }
 
-  throw classifyGeminiError(lastErr);
+  throw classifyGeminiError(lastTransientErr ?? lastErr);
 }

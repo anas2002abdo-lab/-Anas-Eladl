@@ -1260,10 +1260,14 @@ class _MerchantAddToOffersSheetState extends State<_MerchantAddToOffersSheet> {
   }
 }
 
-/// 4. Swipeable Card Deck for Products Without Images
-/// Swipe RIGHT -> Skip product
-/// Swipe LEFT  -> Hide/Pause product (is_available = false)
-Future<bool> showMerchantNoImageSwipeDeck({
+/// 4. Products Swipe Card Deck
+/// Displays all active merchant products as swipeable cards containing:
+/// - Product Category (قسم المنتج)
+/// - Product Name (اسم المنتج)
+/// - Image Preview & Image URL (رابط الصورة)
+/// Swipe RIGHT -> Skip to next product
+/// Swipe LEFT  -> Stop/Hide product (is_available = false)
+Future<bool> showMerchantProductsSwipeDeck({
   required BuildContext context,
   required MerchantApiClient api,
   required String merchantId,
@@ -1274,27 +1278,27 @@ Future<bool> showMerchantNoImageSwipeDeck({
     useSafeArea: true,
     enableDrag: false,
     backgroundColor: Colors.transparent,
-    builder: (ctx) => _MerchantNoImageSwipeDeck(api: api, merchantId: merchantId),
+    builder: (ctx) => _MerchantProductsSwipeDeck(api: api, merchantId: merchantId),
   );
   return changed == true;
 }
 
-class _MerchantNoImageSwipeDeck extends StatefulWidget {
+class _MerchantProductsSwipeDeck extends StatefulWidget {
   final MerchantApiClient api;
   final String merchantId;
 
-  const _MerchantNoImageSwipeDeck({required this.api, required this.merchantId});
+  const _MerchantProductsSwipeDeck({required this.api, required this.merchantId});
 
   @override
-  State<_MerchantNoImageSwipeDeck> createState() => _MerchantNoImageSwipeDeckState();
+  State<_MerchantProductsSwipeDeck> createState() => _MerchantProductsSwipeDeckState();
 }
 
-class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
+class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> {
   final List<Map<String, dynamic>> _deck = [];
   int _index = 0;
   int _nextPage = 1;
   bool _hasMore = true;
-  int _totalNoImage = 0;
+  int _totalProducts = 0;
   int _skippedCount = 0;
   int _hiddenCount = 0;
   bool _loading = true;
@@ -1316,7 +1320,7 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
         merchantId: widget.merchantId,
         page: _nextPage,
         limit: 30,
-        noImageOnly: true,
+        noImageOnly: false,
         availability: 'available',
       );
       if (!mounted) return;
@@ -1324,7 +1328,7 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
       final fresh = res.items.where((e) => !existingIds.contains('${e['id']}')).toList();
       setState(() {
         _deck.addAll(fresh);
-        _totalNoImage = res.total;
+        _totalProducts = res.total;
         _hasMore = res.hasMore;
         _nextPage = res.page + 1;
         _loading = false;
@@ -1385,21 +1389,23 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
     }
   }
 
-  Future<void> _addImageForCurrent() async {
+  Future<void> _editImageForCurrent() async {
     if (_busyAction || _index >= _deck.length) return;
     final product = _deck[_index];
     final id = (product['id'] ?? '').toString();
     final name = (product['name_ar'] ?? '').toString();
-    final ctrl = TextEditingController();
+    final existingUrl = (product['image_url'] ?? '').toString().trim();
+    final ctrl = TextEditingController(text: existingUrl);
 
     final url = await showDialog<String>(
       context: context,
       builder: (dCtx) => Directionality(
         textDirection: TextDirection.rtl,
         child: AlertDialog(
-          title: Text('إضافة صورة لـ "$name"', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+          title: Text('رابط صورة "$name"', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
           content: TextField(
             controller: ctrl,
+            textDirection: TextDirection.ltr,
             decoration: const InputDecoration(
               labelText: 'رابط الصورة (URL)',
               hintText: 'https://...',
@@ -1411,27 +1417,29 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
             FilledButton(
               style: FilledButton.styleFrom(backgroundColor: _kBrandPrimary),
               onPressed: () => Navigator.pop(dCtx, ctrl.text.trim()),
-              child: const Text('حفظ الصورة'),
+              child: const Text('حفظ الرابط'),
             ),
           ],
         ),
       ),
     );
 
-    if (url == null || url.isEmpty) return;
+    if (url == null) return;
     setState(() => _busyAction = true);
     try {
       await widget.api.updateProduct(productId: id, imageUrl: url);
       _changedAny = true;
       if (!mounted) return;
       setState(() {
-        _index++;
+        _deck[_index] = {
+          ...product,
+          'image_url': url,
+        };
         _busyAction = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(backgroundColor: _kBrandGreen, content: Text('تم حفظ صورة "$name" بنجاح')),
+        SnackBar(backgroundColor: _kBrandGreen, content: Text('تم تحديث رابط صورة "$name" بنجاح')),
       );
-      _maybePrefetch();
     } catch (e) {
       if (mounted) {
         setState(() => _busyAction = false);
@@ -1444,6 +1452,10 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
   Widget build(BuildContext context) {
     final current = _index < _deck.length ? _deck[_index] : null;
     final swipeProgress = (_dragDx / 110).clamp(-1.0, 1.0);
+    final currentImgUrl = current != null ? (current['image_url'] ?? '').toString().trim() : '';
+    final currentCategory = current != null
+        ? (current['category_name'] ?? current['category_name_ar'] ?? 'بدون قسم').toString().trim()
+        : '';
 
     return Directionality(
       textDirection: TextDirection.rtl,
@@ -1463,18 +1475,18 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.image_not_supported_rounded, color: Color(0xFFD97706), size: 24),
+                  const Icon(Icons.style_rounded, color: Color(0xFFD97706), size: 24),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'منتجات بدون صور (كروت السحب السريع)',
+                          'قسم المنتجات (بطاقات السحب السريع)',
                           style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900),
                         ),
                         Text(
-                          'متبقي ${(_totalNoImage - _index).clamp(0, 99999)} • تم التخطي $_skippedCount • تم الإخفاء $_hiddenCount',
+                          'متبقي ${(_totalProducts - _index).clamp(0, 99999)} • تم التخطي $_skippedCount • تم الإيقاف $_hiddenCount',
                           style: const TextStyle(fontSize: 11.5, color: Color(0xFF64748B)),
                         ),
                       ],
@@ -1513,7 +1525,7 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                   Row(
                     children: [
                       Text(
-                        'اسحب يسار لإغلاق الظهور',
+                        'اسحب يسار للإيقاف',
                         style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color(0xFFDC2626)),
                       ),
                       SizedBox(width: 4),
@@ -1536,7 +1548,7 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                                 const Icon(Icons.check_circle_rounded, size: 64, color: _kBrandGreen),
                                 const SizedBox(height: 12),
                                 const Text(
-                                  'انتهت مراجعة جميع المنتجات بدون صور!',
+                                  'انتهت مراجعة جميع المنتجات!',
                                   textAlign: TextAlign.center,
                                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900),
                                 ),
@@ -1557,7 +1569,7 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                         )
                       : Center(
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                             child: GestureDetector(
                               onHorizontalDragUpdate: _busyAction
                                   ? null
@@ -1582,8 +1594,8 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                                   ..rotateZ(swipeProgress * 0.07),
                                 child: Container(
                                   width: double.infinity,
-                                  constraints: const BoxConstraints(maxHeight: 390),
-                                  padding: const EdgeInsets.all(20),
+                                  constraints: const BoxConstraints(maxHeight: 455),
+                                  padding: const EdgeInsets.all(18),
                                   decoration: BoxDecoration(
                                     color: Colors.white,
                                     borderRadius: BorderRadius.circular(24),
@@ -1603,84 +1615,178 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                                       ),
                                     ],
                                   ),
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      if (swipeProgress.abs() > 0.2)
+                                  child: SingleChildScrollView(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        if (swipeProgress.abs() > 0.2)
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                            margin: const EdgeInsets.only(bottom: 10),
+                                            decoration: BoxDecoration(
+                                              color: swipeProgress > 0
+                                                  ? _kBrandGreen.withOpacity(0.14)
+                                                  : const Color(0xFFFEE2E2),
+                                              borderRadius: BorderRadius.circular(99),
+                                            ),
+                                            child: Text(
+                                              swipeProgress > 0 ? 'تخطي المنتج ←' : '→ إيقاف المنتج',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w900,
+                                                fontSize: 13.5,
+                                                color: swipeProgress > 0 ? _kBrandGreen : const Color(0xFFDC2626),
+                                              ),
+                                            ),
+                                          ),
+                                        // Product Image Preview
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(18),
+                                          child: Container(
+                                            width: 110,
+                                            height: 110,
+                                            color: const Color(0xFFF8FAFC),
+                                            child: currentImgUrl.isNotEmpty
+                                                ? Image.network(
+                                                    currentImgUrl,
+                                                    fit: BoxFit.cover,
+                                                    errorBuilder: (_, __, ___) => const Center(
+                                                      child: Icon(
+                                                        Icons.broken_image_outlined,
+                                                        size: 42,
+                                                        color: Color(0xFFD97706),
+                                                      ),
+                                                    ),
+                                                  )
+                                                : const Center(
+                                                    child: Icon(
+                                                      Icons.hide_image_outlined,
+                                                      size: 42,
+                                                      color: Color(0xFFD97706),
+                                                    ),
+                                                  ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        // Product Category (قسم المنتج)
                                         Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                                          margin: const EdgeInsets.only(bottom: 12),
+                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                                           decoration: BoxDecoration(
-                                            color: swipeProgress > 0
-                                                ? _kBrandGreen.withOpacity(0.14)
-                                                : const Color(0xFFFEE2E2),
+                                            color: const Color(0xFFFEF3C7),
                                             borderRadius: BorderRadius.circular(99),
                                           ),
-                                          child: Text(
-                                            swipeProgress > 0 ? 'تخطي المنتج ←' : '→ إغلاق ظهور المنتج',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w900,
-                                              fontSize: 13.5,
-                                              color: swipeProgress > 0 ? _kBrandGreen : const Color(0xFFDC2626),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(Icons.category_rounded, size: 14, color: Color(0xFFB45309)),
+                                              const SizedBox(width: 5),
+                                              Flexible(
+                                                child: Text(
+                                                  'القسم: ${currentCategory.isNotEmpty ? currentCategory : 'بدون قسم'}',
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    fontSize: 12.5,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: Color(0xFF92400E),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        // Product Name (اسم المنتج)
+                                        Text(
+                                          (current['name_ar'] ?? '').toString(),
+                                          textAlign: TextAlign.center,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w900,
+                                            color: _kBrandDark,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        // Product Image URL (رابط الصورة)
+                                        InkWell(
+                                          onTap: _busyAction ? null : _editImageForCurrent,
+                                          borderRadius: BorderRadius.circular(12),
+                                          child: Container(
+                                            width: double.infinity,
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFF8FAFC),
+                                              borderRadius: BorderRadius.circular(12),
+                                              border: Border.all(color: const Color(0xFFE2E8F0)),
+                                            ),
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                const Row(
+                                                  children: [
+                                                    Icon(Icons.link_rounded, size: 15, color: Color(0xFF475569)),
+                                                    SizedBox(width: 5),
+                                                    Text(
+                                                      'رابط الصورة:',
+                                                      style: TextStyle(
+                                                        fontSize: 11.5,
+                                                        fontWeight: FontWeight.w800,
+                                                        color: Color(0xFF475569),
+                                                      ),
+                                                    ),
+                                                    Spacer(),
+                                                    Text(
+                                                      'تعديل',
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                        fontWeight: FontWeight.w800,
+                                                        color: _kBrandPrimary,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  currentImgUrl.isNotEmpty ? currentImgUrl : 'لا يوجد رابط صورة (اضغط للإضافة)',
+                                                  textDirection: currentImgUrl.isNotEmpty ? TextDirection.ltr : TextDirection.rtl,
+                                                  maxLines: 2,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: TextStyle(
+                                                    fontSize: 11.5,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: currentImgUrl.isNotEmpty
+                                                        ? const Color(0xFF0F172A)
+                                                        : const Color(0xFF94A3B8),
+                                                  ),
+                                                ),
+                                              ],
                                             ),
                                           ),
                                         ),
-                                      Container(
-                                        width: 92,
-                                        height: 92,
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFFFEF3C7),
-                                          borderRadius: BorderRadius.circular(22),
-                                        ),
-                                        child: const Icon(
-                                          Icons.hide_image_outlined,
-                                          size: 46,
-                                          color: Color(0xFFD97706),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 16),
-                                      Text(
-                                        (current['name_ar'] ?? '').toString(),
-                                        textAlign: TextAlign.center,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontSize: 19,
-                                          fontWeight: FontWeight.w900,
-                                          color: _kBrandDark,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        (current['category_name'] ?? 'بدون قسم').toString(),
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w700,
-                                          color: Color(0xFF64748B),
-                                        ),
-                                      ),
-                                      const SizedBox(height: 14),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFFF1F5F9),
-                                          borderRadius: BorderRadius.circular(14),
-                                        ),
-                                        child: Text(
-                                          'السعر: ${_toDouble(current['base_price'] ?? current['price']).toStringAsFixed(2)} ج.م  •  المخزون: ${_toInt(current['stock_quantity'])}',
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w800,
-                                            fontSize: 13.5,
-                                            color: _kBrandPrimary,
+                                        const SizedBox(height: 10),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF1F5F9),
+                                            borderRadius: BorderRadius.circular(12),
+                                          ),
+                                          child: Text(
+                                            'السعر: ${_toDouble(current['base_price'] ?? current['price']).toStringAsFixed(2)} ج.م  •  المخزون: ${_toInt(current['stock_quantity'])}',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 12.5,
+                                              color: _kBrandPrimary,
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      const SizedBox(height: 14),
-                                      Text(
-                                        'كارت ${_index + 1} من ${_totalNoImage > 0 ? _totalNoImage : _deck.length}',
-                                        style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
-                                      ),
-                                    ],
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          'بطاقة ${_index + 1} من ${_totalProducts > 0 ? _totalProducts : _deck.length}',
+                                          style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
@@ -1707,8 +1813,8 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                     ),
                     const SizedBox(width: 8),
                     IconButton.filledTonal(
-                      tooltip: 'إضافة رابط صورة',
-                      onPressed: _busyAction ? null : _addImageForCurrent,
+                      tooltip: 'تعديل رابط الصورة',
+                      onPressed: _busyAction ? null : _editImageForCurrent,
                       icon: const Icon(Icons.add_photo_alternate_rounded, color: _kBrandDark),
                     ),
                     const SizedBox(width: 8),
@@ -1720,7 +1826,7 @@ class _MerchantNoImageSwipeDeckState extends State<_MerchantNoImageSwipeDeck> {
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                         icon: const Icon(Icons.visibility_off_rounded, size: 20),
-                        label: const Text('إغلاق (يسار)', style: TextStyle(fontWeight: FontWeight.w800)),
+                        label: const Text('إيقاف (يسار)', style: TextStyle(fontWeight: FontWeight.w800)),
                       ),
                     ),
                   ],

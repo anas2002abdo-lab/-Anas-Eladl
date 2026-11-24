@@ -4105,6 +4105,8 @@ export function registerMasterCatalogRoutes(app: Express): void {
     try {
       db.transaction(() => {
         db.prepare('DELETE FROM product_deals WHERE master_product_id = ? OR product_id IN (SELECT id FROM products WHERE master_product_id = ?)').run(id, id);
+        db.prepare('UPDATE product_matching_requests SET suggested_master_id = NULL WHERE suggested_master_id = ?').run(id);
+        db.prepare('UPDATE master_products SET merged_into_id = NULL WHERE merged_into_id = ?').run(id);
         db.prepare('DELETE FROM products WHERE master_product_id = ?').run(id);
         db.prepare('DELETE FROM product_images WHERE master_product_id = ?').run(id);
         db.prepare('DELETE FROM product_attributes WHERE master_product_id = ?').run(id);

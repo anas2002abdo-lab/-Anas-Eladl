@@ -1010,11 +1010,11 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                 const SizedBox(width: 8),
                 _buildProductsTopBarButton(
                   icon: Icons.style_rounded,
-                  label: 'بدون صور',
+                  label: 'قسم المنتجات',
                   color: const Color(0xFFD97706),
-                  badgeCount: _totalNoImageProducts,
+                  badgeCount: (_totalAllProducts - _totalUnavailableProducts).clamp(0, 999999),
                   onTap: () async {
-                    final changed = await showMerchantNoImageSwipeDeck(
+                    final changed = await showMerchantProductsSwipeDeck(
                       context: context,
                       api: widget.api,
                       merchantId: _merchantId,
