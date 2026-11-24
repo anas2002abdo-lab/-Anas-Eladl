@@ -1,13 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   Car,
   ChevronDown,
   ChevronLeft,
-  Flame,
-  Gift,
-  Leaf,
+  LayoutGrid,
   MapPin,
+  Menu,
+  Navigation,
   Package,
   Pill,
   Search,
@@ -15,7 +15,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   Store,
-  Truck,
   X,
 } from 'lucide-react';
 import type {
@@ -44,6 +43,9 @@ interface Props {
   selectedMerchantId: string;
   cartQtyMap: Record<string, number>;
   unreadNotifCount: number;
+  liveTrackingCount?: number;
+  onOpenLiveTracking?: () => void;
+  onOpenMenu?: () => void;
   onChangeFilter: (f: 'for_you' | 'fresh' | 'groceries' | 'offers' | 'free_delivery') => void;
   onSelectCategory: (catId: string) => void;
   onSelectBrand: (brand: string) => void;
@@ -58,6 +60,30 @@ interface Props {
   onDecrementProduct: (productId: string) => void;
 }
 
+const FALLBACK_HERO_IMAGES = [
+  '/src/assets/images/hero_otlobha_fresh_1795511317922.jpg',
+  '/src/assets/images/hero_otlobha_offers_1795511319332.jpg',
+];
+
+const FALLBACK_HERO_SLIDES: Array<Partial<StorefrontBannerRecord> & { id: string; title_ar: string }> = [
+  {
+    id: 'fallback_hero_1',
+    title_ar: 'كل احتياجات بيتك بأقل سعر في المنزلة',
+    subtitle_ar: 'قارن أسعار السوبر ماركت والمنتجات الطازجة وتصلك لباب البيت في دقائق',
+    cta_label: 'اكتشف العروض',
+    target_filter: 'offers',
+    image_url: FALLBACK_HERO_IMAGES[0],
+  },
+  {
+    id: 'fallback_hero_2',
+    title_ar: 'توصيل فوري للمقاضي والصيدليات والمشاوير',
+    subtitle_ar: 'منصة واحدة تجمع متاجر مدينتك مع تتبع مباشر حتى لحظة الاستلام',
+    cta_label: 'تسوّق الطازج',
+    target_filter: 'fresh',
+    image_url: FALLBACK_HERO_IMAGES[1],
+  },
+];
+
 export const OtlobhaStorefrontHome: React.FC<Props> = ({
   zones,
   selectedZoneId,
@@ -69,12 +95,14 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
   brands,
   loading,
   hasMore,
-  activeFilter,
   selectedCategoryId,
   selectedBrand,
   selectedMerchantId,
   cartQtyMap,
   unreadNotifCount,
+  liveTrackingCount = 0,
+  onOpenLiveTracking,
+  onOpenMenu,
   onChangeFilter,
   onSelectCategory,
   onSelectBrand,
@@ -90,16 +118,81 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
 }) => {
   const [zonePickerOpen, setZonePickerOpen] = useState(false);
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
+  const [activeSlideIdx, setActiveSlideIdx] = useState(0);
+  const [floatingOffset, setFloatingOffset] = useState(82);
+  const [isSearchPinned, setIsSearchPinned] = useState(false);
+  const heroSectionRef = useRef<HTMLElement | null>(null);
+  const initialHeroTopRef = useRef<number | null>(null);
 
   const activeZone = zones.find((z) => z.id === selectedZoneId) || zones[0];
-  const heroBanners = banners.filter((b) => b.banner_type === 'hero');
-  const stripBanners = banners.filter((b) => b.banner_type === 'strip');
+  const heroSlides = useMemo(() => {
+    const dbHeroes = banners.filter((b) => b.banner_type === 'hero' || !b.banner_type);
+    if (dbHeroes.length > 0) {
+      return dbHeroes.map((b, idx) => ({
+        ...b,
+        resolvedImage: b.image_url || FALLBACK_HERO_IMAGES[idx % FALLBACK_HERO_IMAGES.length],
+      }));
+    }
+    return FALLBACK_HERO_SLIDES.map((b, idx) => ({
+      ...b,
+      resolvedImage: b.image_url || FALLBACK_HERO_IMAGES[idx % FALLBACK_HERO_IMAGES.length],
+    }));
+  }, [banners]);
+
+  useEffect(() => {
+    setActiveSlideIdx(0);
+  }, [heroSlides.length]);
+
+  useEffect(() => {
+    if (heroSlides.length <= 1) return;
+    const timer = window.setInterval(() => {
+      setActiveSlideIdx((prev) => (prev + 1) % heroSlides.length);
+    }, 4500);
+    return () => window.clearInterval(timer);
+  }, [heroSlides.length]);
+
+  useEffect(() => {
+    const getRestOffset = () => (window.innerWidth >= 640 ? 90 : 78);
+
+    const updateFloatingPosition = () => {
+      const heroEl = heroSectionRef.current;
+      const restOffset = getRestOffset();
+      if (!heroEl) {
+        setFloatingOffset(restOffset);
+        setIsSearchPinned(false);
+        return;
+      }
+      const rectTop = heroEl.getBoundingClientRect().top;
+      if (initialHeroTopRef.current === null || rectTop > initialHeroTopRef.current) {
+        initialHeroTopRef.current = rectTop;
+      }
+      const scrolled = Math.max(0, initialHeroTopRef.current - rectTop);
+      const nextOffset = Math.max(0, restOffset - scrolled);
+      setFloatingOffset(nextOffset);
+      setIsSearchPinned(nextOffset <= 4);
+    };
+
+    updateFloatingPosition();
+    window.addEventListener('scroll', updateFloatingPosition, { passive: true, capture: true });
+    window.addEventListener('resize', updateFloatingPosition, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', updateFloatingPosition, true);
+      window.removeEventListener('resize', updateFloatingPosition);
+    };
+  }, []);
 
   const activeCatObj = categories.find((c) => c.id === selectedCategoryId);
   const activeMerchantObj = merchants.find((m) => m.id === selectedMerchantId);
   const hasScopedFilter = Boolean(selectedCategoryId || selectedBrand || selectedMerchantId);
 
-  const handleBannerClick = (b: StorefrontBannerRecord) => {
+  const displayCategories = useMemo(() => {
+    const allCats = categories || [];
+    const catIds = new Set(allCats.map((c) => c.id));
+    const rootCats = allCats.filter((c) => !c.parent_id || !catIds.has(c.parent_id));
+    return (rootCats.length > 0 ? rootCats : allCats).slice(0, 24);
+  }, [categories]);
+
+  const handleBannerClick = (b: Partial<StorefrontBannerRecord>) => {
     const tf = String(b.target_filter || '').trim();
     const serviceKey = (b.target_service || (tf.startsWith('service:') ? tf.slice('service:'.length) : '')).trim();
     if (serviceKey) {
@@ -133,53 +226,207 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
     else onChangeFilter('offers');
   };
 
+  const currentHero = heroSlides[activeSlideIdx % heroSlides.length] || heroSlides[0];
+
+  const otlobhaServices: Array<{
+    id: 'free_order' | 'pharmacy' | 'rides' | 'parcels' | 'market' | 'stores';
+    label: string;
+    subtitle: string;
+    icon: React.ComponentType<{ className?: string }>;
+    accentBg: string;
+    accentText: string;
+  }> = [
+    {
+      id: 'free_order',
+      label: 'طلب نصي حر',
+      subtitle: 'اكتب أي طلب',
+      icon: Sparkles,
+      accentBg: 'bg-[#FEF2F2]',
+      accentText: 'text-[#A92224]',
+    },
+    {
+      id: 'pharmacy',
+      label: 'الصيدليات',
+      subtitle: 'دواء وروشتة',
+      icon: Pill,
+      accentBg: 'bg-teal-50',
+      accentText: 'text-teal-700',
+    },
+    {
+      id: 'rides',
+      label: 'اطلبها مشوار',
+      subtitle: 'توصيل فوري',
+      icon: Car,
+      accentBg: 'bg-amber-50',
+      accentText: 'text-amber-700',
+    },
+    {
+      id: 'parcels',
+      label: 'طرود أي حاجة',
+      subtitle: 'استلام وتسليم',
+      icon: Package,
+      accentBg: 'bg-orange-50',
+      accentText: 'text-orange-700',
+    },
+    {
+      id: 'market',
+      label: 'سوق اطلبها',
+      subtitle: 'إعلانات مدينتك',
+      icon: ShoppingBag,
+      accentBg: 'bg-indigo-50',
+      accentText: 'text-indigo-700',
+    },
+    {
+      id: 'stores',
+      label: 'كل المتاجر',
+      subtitle: 'تصفح المحلات',
+      icon: Store,
+      accentBg: 'bg-slate-100',
+      accentText: 'text-slate-700',
+    },
+  ];
+
   return (
-    <div className="space-y-4 pb-28" dir="rtl">
-      {/* 1. STICKY TOP BAR: Otlobha Logo, Delivery Address, Notifications, Search Input */}
-      <div className="sticky top-0 z-20 bg-[#F6F7F9]/95 backdrop-blur-md pt-2 pb-2.5 space-y-2.5 border-b border-slate-200/70">
-        <div className="flex items-center justify-between gap-2">
-          {/* Address Selector + Otlobha Logo */}
-          <div className="flex items-center gap-2 min-w-0">
+    <div className="relative space-y-5 pb-36" dir="rtl">
+      {/* SINGLE TRULY FLOATING OVAL SEARCH BAR (82% width, hovers independently over Hero & stays pinned on scroll while offers scroll behind it) */}
+      <div
+        className={`sticky top-3 h-0 overflow-visible pointer-events-none flex justify-center !mt-0 !mb-0 ${
+          zonePickerOpen ? 'z-10' : 'z-40'
+        }`}
+      >
+        <div
+          style={{ transform: `translate3d(0, ${floatingOffset}px, 0)` }}
+          className="w-[82%] max-w-[680px] pointer-events-auto will-change-transform"
+        >
+          <button
+            type="button"
+            onClick={onOpenSearch}
+            className={`w-full rounded-full backdrop-blur-xl px-5 sm:px-7 flex items-center justify-between gap-3 text-slate-500 transition-[height,background-color,box-shadow,border-color] duration-200 cursor-pointer ${
+              isSearchPinned
+                ? 'h-[56px] sm:h-[64px] bg-white/95 border border-slate-200/90 shadow-[0_14px_38px_rgba(15,23,42,0.2)]'
+                : 'h-[64px] sm:h-[74px] lg:h-[84px] bg-white/92 border border-white/80 ring-4 ring-white/20 shadow-[0_22px_52px_rgba(0,0,0,0.34)] hover:bg-white'
+            }`}
+          >
+            <span className="flex items-center gap-3 min-w-0">
+              <span
+                className={`rounded-full bg-[#A92224] text-white flex items-center justify-center shrink-0 shadow-sm transition-all duration-200 ${
+                  isSearchPinned ? 'w-9 h-9' : 'w-10 h-10 sm:w-11 sm:h-11'
+                }`}
+              >
+                <Search className={isSearchPinned ? 'w-4 h-4 stroke-[2.5]' : 'w-5 h-5 stroke-[2.3]'} />
+              </span>
+              <span className="text-sm sm:text-base font-bold text-slate-700 truncate">
+                ابحث عن منتج، ماركة، أو قارن الأسعار...
+              </span>
+            </span>
+            <span className="hidden sm:inline text-xs font-black text-[#A92224] shrink-0">
+              بحث ذكي
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* 1. IMMERSIVE FULL-BLEED HERO BANNER WITH FLOATING HEADER (~612px) */}
+      <section
+        ref={heroSectionRef}
+        className="relative w-full h-[460px] sm:h-[540px] lg:h-[612px] rounded-[28px] sm:rounded-[32px] overflow-hidden shadow-[0_18px_48px_rgba(15,23,42,0.16)] bg-[#1A0D0E] !mt-0"
+      >
+        {/* Auto-Fading Background Slides */}
+        {heroSlides.map((slide, idx) => {
+          const isCurrent = idx === activeSlideIdx % heroSlides.length;
+          return (
+            <div
+              key={slide.id || idx}
+              aria-hidden={!isCurrent}
+              className={`absolute inset-0 transition-opacity duration-700 ease-in-out ${
+                isCurrent ? 'opacity-100 z-[1]' : 'opacity-0 z-0 pointer-events-none'
+              }`}
+            >
+              <img
+                src={slide.resolvedImage}
+                alt={slide.title_ar || 'عروض اطلبها'}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover scale-[1.01]"
+              />
+              {/* Measured Contrast Scrim for Crisp Floating White Overlay Text */}
+              <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/30 to-black/80" />
+            </div>
+          );
+        })}
+
+        {/* Floating Overlay Top Row: Store Logo + Delivery Location + Functional Header Actions */}
+        <div className="relative z-20 p-4 sm:p-6 flex items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
             <img
               src="/assets/aistudio/Picsart_25-11-19_14-05-26-471_82d5a262.jpg"
-              alt="اطلبها Otlobha"
-              className="w-10 h-10 rounded-xl object-contain bg-white p-0.5 border border-slate-200 shadow-xs shrink-0"
+              alt="شعار اطلبها"
+              className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl object-contain bg-white p-1 shadow-[0_6px_20px_rgba(0,0,0,0.28)] ring-2 ring-white/80 shrink-0"
             />
             <button
               type="button"
               onClick={() => setZonePickerOpen((p) => !p)}
-              className="text-right min-w-0 cursor-pointer"
+              className="min-w-0 text-right bg-black/35 hover:bg-black/50 backdrop-blur-md border border-white/20 rounded-2xl px-3.5 py-2 transition-colors cursor-pointer"
             >
-              <div className="text-[10px] font-bold text-slate-500 flex items-center gap-1">
+              <div className="text-[10.5px] font-bold text-amber-200/95 flex items-center gap-1 leading-none mb-1">
                 <span>التوصيل إلى</span>
-                <span className="text-[#A92224] font-black">• اطلبها</span>
+                <span aria-hidden="true">·</span>
+                <span>اطلبها</span>
               </div>
-              <div className="text-xs font-black text-slate-900 flex items-center gap-1 truncate">
-                <MapPin className="w-3.5 h-3.5 text-[#A92224] shrink-0" />
+              <div className="text-xs sm:text-sm font-extrabold text-white flex items-center gap-1 truncate">
+                <MapPin className="w-3.5 h-3.5 text-[#F5A623] shrink-0" />
                 <span className="truncate">{activeZone?.name_ar || 'وسط مدينة المنزلة'}</span>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <ChevronDown className="w-3.5 h-3.5 text-white/80 shrink-0" />
               </div>
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={onOpenNotifications}
-            aria-label="الإشعارات"
-            className="relative w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:border-[#A92224]/40 shrink-0 cursor-pointer"
-          >
-            <Bell className="w-4 h-4" />
-            {unreadNotifCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[#A92224] text-white text-[10px] font-black flex items-center justify-center">
-                {unreadNotifCount}
-              </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {onOpenLiveTracking && (
+              <button
+                type="button"
+                onClick={onOpenLiveTracking}
+                aria-label="تتبع GPS والشات مع الطيار"
+                className="relative w-11 h-11 rounded-2xl bg-black/35 hover:bg-black/50 backdrop-blur-md border border-white/20 text-white flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <Navigation className="w-4 h-4 text-amber-200" />
+                {liveTrackingCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-emerald-500 text-white text-[10px] font-black flex items-center justify-center tabular-nums">
+                    {liveTrackingCount}
+                  </span>
+                )}
+              </button>
             )}
-          </button>
+
+            <button
+              type="button"
+              onClick={onOpenNotifications}
+              aria-label="الإشعارات"
+              className="relative w-11 h-11 rounded-2xl bg-black/35 hover:bg-black/50 backdrop-blur-md border border-white/20 text-white flex items-center justify-center transition-colors cursor-pointer"
+            >
+              <Bell className="w-4 h-4" />
+              {unreadNotifCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[#A92224] text-white text-[10px] font-black flex items-center justify-center tabular-nums ring-2 ring-white/80">
+                  {unreadNotifCount}
+                </span>
+              )}
+            </button>
+
+            {onOpenMenu && (
+              <button
+                type="button"
+                onClick={onOpenMenu}
+                aria-label="القائمة الجانبية"
+                className="w-11 h-11 rounded-2xl bg-black/35 hover:bg-black/50 backdrop-blur-md border border-white/20 text-white flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <Menu className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Inline Zone Selector Dropdown */}
+        {/* Floating Delivery Zone Picker Dropdown */}
         {zonePickerOpen && zones.length > 0 && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-2 shadow-lg space-y-1 max-h-56 overflow-y-auto">
+          <div className="absolute top-[82px] right-4 left-4 sm:right-6 sm:left-auto sm:w-80 z-30 bg-white/98 backdrop-blur-xl rounded-2xl border border-slate-200 p-2 shadow-2xl space-y-1 max-h-60 overflow-y-auto">
             {zones.map((z) => (
               <button
                 key={z.id}
@@ -188,7 +435,7 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
                   onChangeZone(z.id);
                   setZonePickerOpen(false);
                 }}
-                className={`w-full text-right px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-between cursor-pointer ${
+                className={`w-full text-right px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between cursor-pointer transition-colors ${
                   z.id === selectedZoneId
                     ? 'bg-[#FEF2F2] text-[#A92224]'
                     : 'hover:bg-slate-50 text-slate-700'
@@ -196,278 +443,325 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
               >
                 <span>{z.name_ar}</span>
                 {z.remote_area_fee > 0 && (
-                  <span className="text-[10px] text-slate-400">+{z.remote_area_fee} ج.م</span>
+                  <span className="text-[11px] text-slate-400 tabular-nums">+{z.remote_area_fee} ج.م</span>
                 )}
               </button>
             ))}
           </div>
         )}
 
-        {/* Search Input Bar */}
-        <button
-          type="button"
-          onClick={onOpenSearch}
-          className="w-full h-11 rounded-2xl bg-white border border-slate-200/90 px-3.5 flex items-center justify-between gap-2 text-slate-400 text-sm shadow-xs hover:border-[#A92224]/50 transition cursor-pointer"
-        >
-          <span className="flex items-center gap-2.5 truncate">
-            <Search className="w-4 h-4 text-[#A92224] shrink-0" />
-            <span className="truncate">ابحث عن منتج، علامة تجارية، أو متجر...</span>
-          </span>
-          <span className="px-2 py-0.5 rounded-lg bg-[#FEF2F2] text-[#A92224] text-[10px] font-black shrink-0">
-            بحث ذكي
-          </span>
-        </button>
-      </div>
-
-      {/* 2. PROMOTIONAL HERO BANNERS CAROUSEL (Otlobha Official Palette) */}
-      {!hasScopedFilter && heroBanners.length > 0 && (
-        <div className="flex gap-3 overflow-x-auto pb-1 no-scrollbar snap-x">
-          {heroBanners.map((b, idx) => (
-            <button
-              key={b.id}
-              type="button"
-              onClick={() => handleBannerClick(b)}
-              className={`min-w-[88%] sm:min-w-[360px] snap-center rounded-3xl p-5 text-right text-white relative overflow-hidden shadow-md cursor-pointer transition hover:brightness-[1.03] ${
-                idx % 2 === 0
-                  ? 'bg-gradient-to-l from-[#A92224] via-[#8E1B1D] to-[#631214]'
-                  : 'bg-gradient-to-l from-[#5C2E1F] via-[#86191B] to-[#A92224]'
-              }`}
-            >
-              {b.image_url && (
-                <img
-                  src={b.image_url}
-                  alt={b.title_ar}
-                  className="absolute inset-0 w-full h-full object-cover opacity-20 pointer-events-none"
-                />
-              )}
-              <div className="relative z-10 flex items-center justify-between gap-3">
-                <div className="min-w-0 flex-1 space-y-1.5">
-                  {b.badge_ar && (
-                    <span className="inline-block px-2.5 py-0.5 rounded-lg bg-white/15 border border-[#F5A623]/50 text-[#FDE68A] text-[10px] font-black">
-                      {b.badge_ar}
-                    </span>
-                  )}
-                  <h2 className="text-base sm:text-lg font-black leading-snug line-clamp-2">{b.title_ar}</h2>
-                  {b.subtitle_ar && (
-                    <p className="text-xs text-white/85 leading-relaxed line-clamp-2">{b.subtitle_ar}</p>
-                  )}
-                </div>
-                <span className="shrink-0 inline-flex items-center gap-1 px-3.5 py-2.5 rounded-2xl bg-[#F5A623] text-[#3B180E] text-xs font-black shadow-md whitespace-nowrap">
-                  <span>{b.cta_label || 'تسوّق الآن'}</span>
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </span>
-              </div>
-              <div className="absolute -left-6 -bottom-6 w-28 h-28 rounded-full bg-[#F5A623]/15 pointer-events-none" />
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* 2B. PROMOTIONAL STRIP BANNERS (Supports Services, Categories, Merchants & Offers) */}
-      {!hasScopedFilter && stripBanners.length > 0 && (
-        <div className="space-y-2">
-          {stripBanners.map((b) => (
-            <button
-              key={b.id}
-              type="button"
-              onClick={() => handleBannerClick(b)}
-              className="w-full rounded-2xl bg-gradient-to-l from-[#FFFBEB] to-white border border-[#F5A623]/40 px-4 py-3 flex items-center justify-between gap-3 text-right shadow-xs hover:border-[#A92224]/50 transition cursor-pointer"
-            >
-              <div className="min-w-0 space-y-0.5">
-                <div className="flex items-center gap-2">
-                  {b.badge_ar && (
-                    <span className="px-2 py-0.5 rounded-md bg-[#A92224] text-white text-[10px] font-black shrink-0">
-                      {b.badge_ar}
-                    </span>
-                  )}
-                  <span className="font-black text-xs text-slate-900 truncate">{b.title_ar}</span>
-                </div>
-                {b.subtitle_ar && (
-                  <p className="text-[11px] text-slate-600 truncate">{b.subtitle_ar}</p>
-                )}
-              </div>
-              <span className="inline-flex items-center gap-1 text-[11px] font-black text-[#A92224] shrink-0">
-                <span>{b.cta_label || 'افتح الآن'}</span>
+        {/* Floating Lower Overlay: Editorial Hero Offers Copy (cleanly separated from floating search above) */}
+        <div className="absolute inset-x-0 bottom-0 z-20 px-4 sm:px-8 pb-7 sm:pb-10 flex flex-col items-center">
+          {/* Active Slide Headline & Action */}
+          <div
+            onClick={() => handleBannerClick(currentHero)}
+            className="w-full max-w-2xl text-center space-y-2.5 cursor-pointer"
+          >
+            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-black text-white leading-tight drop-shadow-[0_2px_10px_rgba(0,0,0,0.45)] text-balance">
+              {currentHero?.title_ar || 'كل احتياجات بيتك بأقل سعر في المنزلة'}
+            </h1>
+            {currentHero?.subtitle_ar && (
+              <p className="text-xs sm:text-sm text-white/90 font-medium max-w-xl mx-auto line-clamp-2 drop-shadow-[0_1px_6px_rgba(0,0,0,0.4)]">
+                {currentHero.subtitle_ar}
+              </p>
+            )}
+            <div className="pt-1.5 flex items-center justify-center gap-3">
+              <span className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#A92224] hover:bg-[#8E1B1D] text-white text-xs font-extrabold shadow-lg transition-colors">
+                <span>{currentHero?.cta_label || 'تسوّق الآن'}</span>
                 <ChevronLeft className="w-3.5 h-3.5" />
               </span>
-            </button>
-          ))}
+              {heroSlides.length > 1 && (
+                <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                  {heroSlides.map((s, idx) => (
+                    <button
+                      key={s.id || idx}
+                      type="button"
+                      aria-label={`عرض ${idx + 1}`}
+                      onClick={() => setActiveSlideIdx(idx)}
+                      className={`h-1.5 rounded-full transition-all duration-300 cursor-pointer ${
+                        idx === activeSlideIdx % heroSlides.length
+                          ? 'w-6 bg-[#F5A623]'
+                          : 'w-1.5 bg-white/50 hover:bg-white/80'
+                      }`}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      )}
+      </section>
 
-      {/* Compact Otlobha Multi-Services Access Row (Zero Feature Loss!) */}
-      {!hasScopedFilter && (
-        <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-          {[
-            { id: 'free_order', label: 'طلب نصي حر', icon: Sparkles },
-            { id: 'pharmacy', label: 'الصيدليات (فارما)', icon: Pill },
-            { id: 'rides', label: 'اطلبها مشوار', icon: Car },
-            { id: 'parcels', label: 'أي حاجة (طرود)', icon: Package },
-            { id: 'market', label: 'سوق اطلبها', icon: ShoppingBag },
-          ].map((srv) => {
+      {/* 2. SERVICES DIRECTLY BELOW HERO (Ad Banners Permanently Removed — Horizontal Swipeable Cards) */}
+      <section aria-label="خدمات اطلبها" className="space-y-2.5">
+        <div className="flex items-center justify-between px-1">
+          <h2 className="text-base font-black text-slate-900">خدمات اطلبها</h2>
+          <button
+            type="button"
+            onClick={() => onOpenService('hub')}
+            className="text-xs font-extrabold text-[#A92224] hover:underline flex items-center gap-0.5 cursor-pointer"
+          >
+            <span>عرض الكل</span>
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="flex gap-3 overflow-x-auto pb-1.5 no-scrollbar snap-x">
+          {otlobhaServices.map((srv) => {
             const Icon = srv.icon;
             return (
               <button
                 key={srv.id}
                 type="button"
-                onClick={() => onOpenService(srv.id as any)}
-                className="px-3 py-2 rounded-2xl bg-white border border-slate-200 hover:border-[#A92224]/50 text-xs font-extrabold text-slate-800 flex items-center gap-1.5 shrink-0 shadow-xs cursor-pointer"
+                onClick={() => onOpenService(srv.id)}
+                className="snap-start shrink-0 min-w-[132px] sm:min-w-[146px] bg-white hover:bg-slate-50/80 rounded-[20px] border border-slate-200/80 p-3.5 flex items-center gap-3 text-right shadow-[0_4px_16px_rgba(15,23,42,0.04)] hover:border-[#A92224]/40 transition-all duration-200 cursor-pointer active:scale-[0.98]"
               >
-                <Icon className="w-3.5 h-3.5 text-[#A92224]" />
-                <span>{srv.label}</span>
+                <span
+                  className={`w-11 h-11 rounded-2xl ${srv.accentBg} ${srv.accentText} flex items-center justify-center shrink-0`}
+                >
+                  <Icon className="w-5 h-5" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-xs font-black text-slate-900 whitespace-nowrap">
+                    {srv.label}
+                  </span>
+                  <span className="block text-[10.5px] font-medium text-slate-500 whitespace-nowrap mt-0.5">
+                    {srv.subtitle}
+                  </span>
+                </span>
               </button>
             );
           })}
         </div>
-      )}
+      </section>
 
-      {/* Active Scoped Filter Banner (Category / Brand / Merchant) */}
+      {/* Active Scoped Filter Summary (Only when Category / Brand / Merchant filter is active) */}
       {hasScopedFilter && (
-        <div className="bg-white rounded-2xl border border-red-200 px-3.5 py-2.5 flex items-center justify-between gap-2">
+        <div className="bg-white rounded-2xl border border-red-200/80 px-4 py-3 flex items-center justify-between gap-3 shadow-xs">
           <div className="text-xs font-bold text-slate-700 flex items-center gap-2 flex-wrap">
-            <span className="text-[#A92224] font-black">تصفية نشطة:</span>
-            {activeCatObj && <span className="px-2 py-0.5 rounded-lg bg-[#FEF2F2] text-[#A92224]">{activeCatObj.name_ar}</span>}
-            {selectedBrand && <span className="px-2 py-0.5 rounded-lg bg-[#FFFBEB] text-[#92400E]">علامة: {selectedBrand}</span>}
+            <span className="text-[#A92224] font-black">تصفية نشطة</span>
+            {activeCatObj && (
+              <>
+                <span aria-hidden="true" className="text-slate-300">·</span>
+                <span className="text-slate-900 font-extrabold">{activeCatObj.name_ar}</span>
+              </>
+            )}
+            {selectedBrand && (
+              <>
+                <span aria-hidden="true" className="text-slate-300">·</span>
+                <span className="text-amber-800 font-extrabold">{selectedBrand}</span>
+              </>
+            )}
             {activeMerchantObj && (
-              <span className="px-2 py-0.5 rounded-lg bg-slate-100 text-slate-800 flex items-center gap-1">
-                <Store className="w-3 h-3" /> {activeMerchantObj.business_name_ar}
-              </span>
+              <>
+                <span aria-hidden="true" className="text-slate-300">·</span>
+                <span className="text-slate-900 font-extrabold">{activeMerchantObj.business_name_ar}</span>
+              </>
             )}
           </div>
           <button
             type="button"
             onClick={onClearAllFilters}
-            className="text-xs font-black text-[#A92224] hover:underline flex items-center gap-0.5 shrink-0 cursor-pointer"
+            className="text-xs font-black text-[#A92224] hover:underline flex items-center gap-1 shrink-0 cursor-pointer"
           >
-            <X className="w-3.5 h-3.5" /> إلغاء
+            <X className="w-3.5 h-3.5" />
+            <span>مسح</span>
           </button>
         </div>
       )}
 
-      {/* 4. QUICK FILTER BUTTONS & TRENDING CATEGORIES (الأقسام الأكثر رواجًا) */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
-        <button
-          type="button"
-          onClick={() => setFilterDrawerOpen(true)}
-          className="h-10 px-3.5 rounded-2xl bg-white border border-slate-200 hover:border-[#A92224] text-xs font-extrabold text-slate-800 flex items-center gap-1.5 shrink-0 shadow-xs cursor-pointer"
-        >
-          <SlidersHorizontal className="w-3.5 h-3.5 text-[#A92224]" />
-          <span>الفلاتر</span>
-        </button>
+      {/* 3. CATEGORIES HORIZONTAL SCROLLABLE STRIP (EXACT 68px CARD HEIGHT) */}
+      <section aria-label="الأقسام" className="space-y-2.5">
+        <div className="flex items-center justify-between px-1">
+          <h2 className="text-base font-black text-slate-900">تصفح حسب القسم</h2>
+          <span className="text-xs font-semibold text-slate-500 tabular-nums">
+            {displayCategories.length} قسم
+          </span>
+        </div>
 
-        {/* زر الكل */}
-        <button
-          type="button"
-          onClick={() => {
-            if (hasScopedFilter) onClearAllFilters();
-            onSelectCategory('');
-          }}
-          className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer ${
-            !selectedCategoryId && !selectedBrand && !selectedMerchantId
-              ? 'bg-[#A92224] text-white shadow-sm'
-              : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224]/40'
-          }`}
-        >
-          الكل
-        </button>
+        <div className="flex items-center gap-2.5 overflow-x-auto pb-1.5 no-scrollbar snap-x">
+          {/* Filter Drawer Trigger Card (68px height) */}
+          <button
+            type="button"
+            onClick={() => setFilterDrawerOpen(true)}
+            className={`snap-start h-[68px] px-4 rounded-[18px] border flex items-center gap-2.5 shrink-0 transition-all cursor-pointer ${
+              hasScopedFilter
+                ? 'bg-[#86191B] border-[#86191B] text-white shadow-sm'
+                : 'bg-white border-slate-200/90 text-slate-800 hover:border-[#A92224]/50 shadow-[0_3px_12px_rgba(15,23,42,0.04)]'
+            }`}
+          >
+            <span
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                hasScopedFilter ? 'bg-white/15 text-[#F5A623]' : 'bg-[#FEF2F2] text-[#A92224]'
+              }`}
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+            </span>
+            <span className="text-right">
+              <span className="block text-xs font-black whitespace-nowrap">الفلاتر</span>
+              <span
+                className={`block text-[10px] font-medium whitespace-nowrap ${
+                  hasScopedFilter ? 'text-white/80' : 'text-slate-400'
+                }`}
+              >
+                تخصيص أدق
+              </span>
+            </span>
+          </button>
 
-        {/* مستطيلات الأقسام الرئيسية */}
-        {(() => {
-          const allCats = categories || [];
-          const catIds = new Set(allCats.map((c) => c.id));
-          const rootCats = allCats.filter((c) => !c.parent_id || !catIds.has(c.parent_id));
-          const displayCats = (rootCats.length > 0 ? rootCats : allCats).slice(0, 24);
-          return displayCats.map((cat) => {
+          {/* "الكل" Category Card (68px height) */}
+          <button
+            type="button"
+            onClick={() => {
+              if (hasScopedFilter) onClearAllFilters();
+              onSelectCategory('');
+            }}
+            className={`snap-start h-[68px] px-4 rounded-[18px] border flex items-center gap-2.5 shrink-0 transition-all cursor-pointer ${
+              !selectedCategoryId && !selectedBrand && !selectedMerchantId
+                ? 'bg-[#A92224] border-[#A92224] text-white shadow-[0_8px_20px_rgba(169,34,36,0.22)]'
+                : 'bg-white border-slate-200/90 text-slate-800 hover:border-[#A92224]/50 shadow-[0_3px_12px_rgba(15,23,42,0.04)]'
+            }`}
+          >
+            <span
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                !selectedCategoryId && !selectedBrand && !selectedMerchantId
+                  ? 'bg-white/15 text-white'
+                  : 'bg-slate-100 text-slate-700'
+              }`}
+            >
+              <LayoutGrid className="w-4 h-4" />
+            </span>
+            <span className="text-xs font-black whitespace-nowrap">الكل</span>
+          </button>
+
+          {/* Dynamic Categories Cards (68px height) */}
+          {displayCategories.map((cat) => {
             const active = selectedCategoryId === cat.id;
+            const thumb = (cat as unknown as { image_url?: string }).image_url;
             return (
               <button
                 key={cat.id}
                 type="button"
-                onClick={() => {
-                  if (active) {
-                    onSelectCategory('');
-                  } else {
-                    onSelectCategory(cat.id);
-                  }
-                }}
-                className={`h-10 px-4 rounded-2xl text-xs font-extrabold shrink-0 transition cursor-pointer whitespace-nowrap ${
+                onClick={() => onSelectCategory(active ? '' : cat.id)}
+                className={`snap-start h-[68px] px-3.5 rounded-[18px] border flex items-center gap-2.5 shrink-0 transition-all cursor-pointer ${
                   active
-                    ? 'bg-[#A92224] text-white shadow-sm'
-                    : 'bg-white border border-slate-200 text-slate-700 hover:border-[#A92224]/40'
+                    ? 'bg-[#A92224] border-[#A92224] text-white shadow-[0_8px_20px_rgba(169,34,36,0.22)]'
+                    : 'bg-white border-slate-200/90 text-slate-800 hover:border-[#A92224]/50 shadow-[0_3px_12px_rgba(15,23,42,0.04)]'
                 }`}
               >
-                {cat.name_ar}
+                {thumb ? (
+                  <img
+                    src={thumb}
+                    alt={cat.name_ar}
+                    referrerPolicy="no-referrer"
+                    className="w-10 h-10 rounded-xl object-cover bg-slate-100 shrink-0"
+                  />
+                ) : (
+                  <span
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-sm font-black ${
+                      active ? 'bg-white/15 text-white' : 'bg-[#FEF2F2] text-[#A92224]'
+                    }`}
+                  >
+                    {cat.name_ar.trim().slice(0, 1)}
+                  </span>
+                )}
+                <span className="text-right">
+                  <span className="block text-xs font-extrabold whitespace-nowrap">{cat.name_ar}</span>
+                  {typeof cat.products_count === 'number' && cat.products_count > 0 && (
+                    <span
+                      className={`block text-[10px] font-medium tabular-nums whitespace-nowrap ${
+                        active ? 'text-white/80' : 'text-slate-400'
+                      }`}
+                    >
+                      {cat.products_count} منتج
+                    </span>
+                  )}
+                </span>
               </button>
             );
-          });
-        })()}
-      </div>
+          })}
+        </div>
+      </section>
 
-      {/* 5. 2-COLUMN PRODUCT GRID (Responsive up to 4 cols on desktop) */}
-      {loading && products.length === 0 ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="bg-white rounded-2xl border border-slate-200/80 p-3 space-y-2 animate-pulse">
-              <div className="aspect-square rounded-xl bg-slate-100" />
-              <div className="h-3 bg-slate-100 rounded w-1/2" />
-              <div className="h-4 bg-slate-100 rounded w-full" />
-              <div className="h-4 bg-slate-100 rounded w-2/3" />
-            </div>
-          ))}
+      {/* 4. PRODUCTS GRID: 2 EQUAL COLUMNS WITH EXACT 16px GAP (gap-4) & LARGE CRISP IMAGES */}
+      <section aria-label="المنتجات" className="space-y-3">
+        <div className="flex items-center justify-between px-1">
+          <h2 className="text-base font-black text-slate-900">منتجات مختارة لك</h2>
+          {!loading && (
+            <span className="text-xs font-semibold text-slate-500 tabular-nums">
+              {products.length} منتج
+            </span>
+          )}
         </div>
-      ) : products.length === 0 ? (
-        <div className="bg-white rounded-3xl border border-slate-200 p-8 text-center space-y-2.5">
-          <Package className="w-10 h-10 mx-auto text-[#A92224]/40" />
-          <h4 className="font-black text-slate-900">لا توجد منتجات في هذا التصنيف حاليًا</h4>
-          <p className="text-xs text-slate-500">جرّب تصفح قسم آخر أو استخدم البحث الذكي أو الطلب النصي الحر.</p>
-          <div className="flex justify-center gap-2 pt-1">
-            <button
-              type="button"
-              onClick={onClearAllFilters}
-              className="px-4 py-2 rounded-xl bg-[#A92224] text-white text-xs font-bold cursor-pointer"
-            >
-              عرض جميع المنتجات
-            </button>
-            <button
-              type="button"
-              onClick={() => onOpenService('free_order')}
-              className="px-4 py-2 rounded-xl bg-[#FFFBEB] border border-[#F5A623] text-[#92400E] text-xs font-bold cursor-pointer"
-            >
-              طلب نصي حر
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-            {products.map((product) => (
-              <OtlobhaProductCard
-                key={product.id}
-                product={product}
-                cartQty={cartQtyMap[product.id] || 0}
-                onOpenDetails={onOpenProduct}
-                onAdd={onAddProduct}
-                onDecrement={onDecrementProduct}
-              />
+
+        {loading && products.length === 0 ? (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="bg-white rounded-[22px] border border-slate-200/80 p-3 space-y-2.5 animate-pulse"
+              >
+                <div className="aspect-square rounded-2xl bg-slate-100" />
+                <div className="h-3 bg-slate-100 rounded w-1/2" />
+                <div className="h-4 bg-slate-100 rounded w-full" />
+                <div className="h-4 bg-slate-100 rounded w-2/3" />
+              </div>
             ))}
           </div>
-
-          {hasMore && (
-            <div className="flex justify-center pt-2">
+        ) : products.length === 0 ? (
+          <div className="bg-white rounded-3xl border border-slate-200 p-8 text-center space-y-3">
+            <Package className="w-10 h-10 mx-auto text-[#A92224]/40" />
+            <h4 className="font-black text-slate-900">لا توجد منتجات في هذا التصنيف حاليًا</h4>
+            <p className="text-xs text-slate-500">جرّب تصفح قسم آخر أو استخدم البحث الذكي أو الطلب النصي الحر.</p>
+            <div className="flex justify-center gap-2.5 pt-1">
               <button
                 type="button"
-                onClick={onLoadMore}
-                disabled={loading}
-                className="px-6 py-2.5 rounded-2xl bg-white border border-slate-300 hover:border-[#A92224] text-xs font-black text-slate-800 shadow-xs cursor-pointer"
+                onClick={onClearAllFilters}
+                className="px-4 py-2.5 rounded-xl bg-[#A92224] text-white text-xs font-bold cursor-pointer"
               >
-                {loading ? 'جاري التحميل...' : 'عرض المزيد من المنتجات'}
+                عرض جميع المنتجات
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenService('free_order')}
+                className="px-4 py-2.5 rounded-xl bg-[#FFFBEB] border border-[#F5A623] text-[#92400E] text-xs font-bold cursor-pointer"
+              >
+                طلب نصي حر
               </button>
             </div>
-          )}
-        </>
-      )}
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              {products.map((product) => (
+                <OtlobhaProductCard
+                  key={product.id}
+                  product={product}
+                  cartQty={cartQtyMap[product.id] || 0}
+                  onOpenDetails={onOpenProduct}
+                  onAdd={onAddProduct}
+                  onDecrement={onDecrementProduct}
+                />
+              ))}
+            </div>
 
-      {/* FILTER DRAWER MODAL */}
+            {hasMore && (
+              <div className="flex justify-center pt-3">
+                <button
+                  type="button"
+                  onClick={onLoadMore}
+                  disabled={loading}
+                  className="px-7 py-3 rounded-full bg-white border border-slate-300 hover:border-[#A92224] text-xs font-black text-slate-800 shadow-xs cursor-pointer transition-colors"
+                >
+                  {loading ? 'جاري التحميل...' : 'عرض المزيد من المنتجات'}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* FILTER DRAWER MODAL (Preserved 100%) */}
       {filterDrawerOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/50 backdrop-blur-[2px] flex items-end sm:items-center justify-center sm:p-4"
@@ -498,7 +792,9 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
                 >
                   <option value="">كل المتاجر المتاحة</option>
                   {merchants.map((m) => (
-                    <option key={m.id} value={m.id}>{m.business_name_ar}</option>
+                    <option key={m.id} value={m.id}>
+                      {m.business_name_ar}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -512,7 +808,9 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
                 >
                   <option value="">كل الأقسام</option>
                   {categories.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name_ar}</option>
+                    <option key={c.id} value={c.id}>
+                      {c.full_path_ar || c.name_ar}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -520,22 +818,18 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
               {brands.length > 0 && (
                 <div>
                   <label className="text-xs font-black text-slate-700 block mb-1.5">العلامة التجارية</label>
-                  <div className="flex flex-wrap gap-1.5">
+                  <select
+                    value={selectedBrand}
+                    onChange={(e) => onSelectBrand(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm bg-white"
+                  >
+                    <option value="">كل الماركات</option>
                     {brands.map((b) => (
-                      <button
-                        key={b}
-                        type="button"
-                        onClick={() => onSelectBrand(selectedBrand === b ? '' : b)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border cursor-pointer ${
-                          selectedBrand === b
-                            ? 'bg-[#A92224] text-white border-[#A92224]'
-                            : 'bg-slate-50 text-slate-700 border-slate-200'
-                        }`}
-                      >
+                      <option key={b} value={b}>
                         {b}
-                      </button>
+                      </option>
                     ))}
-                  </div>
+                  </select>
                 </div>
               )}
             </div>
@@ -547,14 +841,14 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
                   onClearAllFilters();
                   setFilterDrawerOpen(false);
                 }}
-                className="flex-1 py-2.5 rounded-2xl bg-slate-100 text-slate-700 text-xs font-black cursor-pointer"
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-xs font-extrabold text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                إعادة ضبط
+                مسح الكل
               </button>
               <button
                 type="button"
                 onClick={() => setFilterDrawerOpen(false)}
-                className="flex-1 py-2.5 rounded-2xl bg-[#A92224] text-white text-xs font-black cursor-pointer"
+                className="flex-[2] py-2.5 rounded-xl bg-[#A92224] text-white text-xs font-black hover:bg-[#86191B] cursor-pointer"
               >
                 تطبيق الفلاتر
               </button>

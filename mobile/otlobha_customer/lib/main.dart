@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -1611,6 +1612,12 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     final unread = ((_bootstrap['notifications'] as List?) ?? [])
         .where((n) => n['is_read'] != true)
         .length;
+    final liveCount = ((_bootstrap['orders'] as List?) ?? [])
+            .where((o) => o['captain_id'] != null && o['status'] != 'delivered' && o['status'] != 'cancelled')
+            .length +
+        ((_bootstrap['trips'] as List?) ?? [])
+            .where((t) => t['status'] != 'completed' && t['status'] != 'cancelled')
+            .length;
     final cartTotalQty = _quickCart.values.fold<int>(0, (sum, q) => sum + q);
 
     final screens = [
@@ -1647,6 +1654,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onOpenService: (sub) => _switchTab(2, serviceSubView: sub),
         onOpenOffers: () => _switchTab(5),
         onRateCaptain: _showCaptainRatingDialog,
+        unreadCount: unread,
+        liveTrackingCount: liveCount,
+        onOpenLiveTracking: _showLiveTrackingSheet,
+        onOpenNotifications: _openNotifications,
+        onOpenDrawer: () => _scaffoldKey.currentState?.openDrawer(),
       ),
       StorefrontCategoriesScreen(
         key: _categoriesKey,
@@ -1784,91 +1796,87 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         textDirection: TextDirection.rtl,
         child: Scaffold(
           key: _scaffoldKey,
+          extendBody: true,
           drawer: _buildCustomerDrawer(context),
-        appBar: AppBar(
-          automaticallyImplyLeading: false,
-          flexibleSpace: Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.centerRight,
-                end: Alignment.centerLeft,
-                colors: [Color(0xFF9E1C1E), Color(0xFFB52325), Color(0xFFC8431D)],
-              ),
-              border: Border(
-                bottom: BorderSide(color: Color(0xFFF5A623), width: 2),
-              ),
-            ),
-          ),
-          title: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Container(
-                  color: Colors.white,
-                  padding: const EdgeInsets.all(2),
-                  child: Image.asset('assets/images/otlobha_logo.jpg', width: 34, height: 34, fit: BoxFit.contain),
-                ),
-              ),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  'اطلبها – المنزلة',
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            Builder(
-              builder: (_) {
-                final liveCount = ((_bootstrap['orders'] as List?) ?? [])
-                        .where((o) => o['captain_id'] != null && o['status'] != 'delivered' && o['status'] != 'cancelled')
-                        .length +
-                    ((_bootstrap['trips'] as List?) ?? [])
-                        .where((t) => t['status'] != 'completed' && t['status'] != 'cancelled')
-                        .length;
-                return IconButton(
-                  onPressed: _showLiveTrackingSheet,
-                  tooltip: 'تتبع GPS والشات مع الطيار',
-                  icon: Badge(
-                    backgroundColor: const Color(0xFF10B981),
-                    textColor: Colors.white,
-                    isLabelVisible: liveCount > 0,
-                    label: Text('$liveCount'),
-                    child: const Icon(Icons.navigation_outlined),
+          appBar: _index == 0
+              ? null
+              : AppBar(
+                  automaticallyImplyLeading: false,
+                  flexibleSpace: Container(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.centerRight,
+                        end: Alignment.centerLeft,
+                        colors: [Color(0xFF9E1C1E), Color(0xFFB52325), Color(0xFFC8431D)],
+                      ),
+                      border: Border(
+                        bottom: BorderSide(color: Color(0xFFF5A623), width: 2),
+                      ),
+                    ),
                   ),
-                );
-              },
-            ),
-            IconButton(
-              onPressed: _openNotifications,
-              tooltip: 'الإشعارات',
-              icon: Badge(
-                backgroundColor: const Color(0xFFF5A623),
-                textColor: Colors.black,
-                isLabelVisible: unread > 0,
-                label: Text('$unread'),
-                child: const Icon(Icons.notifications_outlined),
-              ),
-            ),
-            Builder(
-              builder: (ctx) => IconButton(
-                onPressed: () => Scaffold.of(ctx).openDrawer(),
-                tooltip: 'القائمة الجانبية',
-                icon: const Icon(Icons.menu),
-              ),
-            ),
-          ],
-        ),
-        body: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : Column(
-                children: [
-                  if (_isAuthenticated && !_isGuest && !_isEmailVerified && _customerEmail.trim().isNotEmpty)
-                    Material(
-                      color: const Color(0xFFFFF7ED),
-                      child: InkWell(
+                  title: Row(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Container(
+                          color: Colors.white,
+                          padding: const EdgeInsets.all(2),
+                          child: Image.asset('assets/images/otlobha_logo.jpg', width: 34, height: 34, fit: BoxFit.contain),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          'اطلبها – المنزلة',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
+                      ),
+                    ],
+                  ),
+                  actions: [
+                    IconButton(
+                      onPressed: _showLiveTrackingSheet,
+                      tooltip: 'تتبع GPS والشات مع الطيار',
+                      icon: Badge(
+                        backgroundColor: const Color(0xFF10B981),
+                        textColor: Colors.white,
+                        isLabelVisible: liveCount > 0,
+                        label: Text('$liveCount'),
+                        child: const Icon(Icons.navigation_outlined),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: _openNotifications,
+                      tooltip: 'الإشعارات',
+                      icon: Badge(
+                        backgroundColor: const Color(0xFFF5A623),
+                        textColor: Colors.black,
+                        isLabelVisible: unread > 0,
+                        label: Text('$unread'),
+                        child: const Icon(Icons.notifications_outlined),
+                      ),
+                    ),
+                    Builder(
+                      builder: (ctx) => IconButton(
+                        onPressed: () => Scaffold.of(ctx).openDrawer(),
+                        tooltip: 'القائمة الجانبية',
+                        icon: const Icon(Icons.menu),
+                      ),
+                    ),
+                  ],
+                ),
+          body: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : Column(
+                  children: [
+                    if (_isAuthenticated && !_isGuest && !_isEmailVerified && _customerEmail.trim().isNotEmpty)
+                      Material(
+                        color: const Color(0xFFFFF7ED),
+                        child: SafeArea(
+                          top: _index == 0,
+                          bottom: false,
+                          child: InkWell(
                         onTap: () => _openExternalVerifyEmailPage(),
                         child: Container(
                           width: double.infinity,
@@ -1917,6 +1925,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                         ),
                       ),
                     ),
+                  ),
                   Expanded(child: IndexedStack(index: _index, children: screens)),
                 ],
               ),
@@ -2154,6 +2163,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   }
 
   Widget _buildCustomerBottomBar(int cartTotalQty) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final dockWidth = (screenWidth * 0.89).clamp(280.0, 520.0);
+
     Widget sideTab({
       required int idx,
       required IconData icon,
@@ -2165,10 +2177,12 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       return Expanded(
         child: InkWell(
           onTap: () => _switchTab(idx),
+          borderRadius: BorderRadius.circular(24),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Badge(
                   backgroundColor: const Color(0xFFA92224),
@@ -2176,7 +2190,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                   label: Text('$badge'),
                   child: Icon(
                     active ? activeIcon : icon,
-                    size: 23,
+                    size: 24,
                     color: active ? const Color(0xFFA92224) : const Color(0xFF475569),
                   ),
                 ),
@@ -2187,7 +2201,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 10.5,
-                    fontWeight: active ? FontWeight.bold : FontWeight.w500,
+                    fontWeight: active ? FontWeight.w900 : FontWeight.w600,
                     color: active ? const Color(0xFFA92224) : const Color(0xFF475569),
                   ),
                 ),
@@ -2198,33 +2212,70 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       );
     }
 
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
-        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 12, offset: Offset(0, -3))],
-      ),
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 66,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              sideTab(idx: 0, icon: Icons.home_outlined, activeIcon: Icons.home_rounded, label: 'الرئيسية'),
-              sideTab(idx: 1, icon: Icons.category_outlined, activeIcon: Icons.category_rounded, label: 'الأقسام'),
-              Expanded(
-                child: GestureDetector(
-                  onTap: _openSmartAssistant,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      Transform.translate(
-                        offset: const Offset(0, -10),
-                        child: Container(
-                          width: 52,
-                          height: 52,
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Center(
+          heightFactor: 1.0,
+          child: SizedBox(
+            width: dockWidth,
+            height: 82,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.bottomCenter,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(34),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                    child: Container(
+                      height: 76,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.92),
+                        borderRadius: BorderRadius.circular(34),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.9),
+                          width: 1.4,
+                        ),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x240F172A),
+                            blurRadius: 28,
+                            offset: Offset(0, 10),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          sideTab(idx: 0, icon: Icons.home_outlined, activeIcon: Icons.home_rounded, label: 'الرئيسية'),
+                          sideTab(idx: 1, icon: Icons.category_outlined, activeIcon: Icons.category_rounded, label: 'الأقسام'),
+                          const Expanded(child: SizedBox()),
+                          sideTab(
+                            idx: 3,
+                            icon: Icons.shopping_cart_outlined,
+                            activeIcon: Icons.shopping_cart_rounded,
+                            label: 'السلة',
+                            badge: cartTotalQty,
+                          ),
+                          sideTab(idx: 4, icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded, label: 'حسابي'),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 12,
+                  child: GestureDetector(
+                    onTap: _openSmartAssistant,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 56,
+                          height: 56,
                           decoration: BoxDecoration(
                             gradient: const LinearGradient(
                               begin: Alignment.topRight,
@@ -2234,39 +2285,33 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                             shape: BoxShape.circle,
                             border: Border.all(
                               color: Colors.white,
-                              width: 3,
+                              width: 3.5,
                             ),
                             boxShadow: const [
-                              BoxShadow(color: Color(0x3DA92224), blurRadius: 12, offset: Offset(0, 4)),
+                              BoxShadow(
+                                color: Color(0x47A92224),
+                                blurRadius: 16,
+                                offset: Offset(0, 6),
+                              ),
                             ],
                           ),
-                          child: const Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 25),
+                          child: const Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 26),
                         ),
-                      ),
-                      Transform.translate(
-                        offset: const Offset(0, -6),
-                        child: const Text(
+                        const SizedBox(height: 2),
+                        const Text(
                           'المساعد',
                           style: TextStyle(
-                            fontSize: 11,
+                            fontSize: 10.5,
                             fontWeight: FontWeight.w900,
                             color: Color(0xFFA92224),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              sideTab(
-                idx: 3,
-                icon: Icons.shopping_cart_outlined,
-                activeIcon: Icons.shopping_cart_rounded,
-                label: 'السلة',
-                badge: cartTotalQty,
-              ),
-              sideTab(idx: 4, icon: Icons.person_outline_rounded, activeIcon: Icons.person_rounded, label: 'حسابي'),
-            ],
+              ],
+            ),
           ),
         ),
       ),

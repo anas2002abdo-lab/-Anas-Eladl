@@ -7552,7 +7552,17 @@ app.post('/api/notifications', requireAuth, requireRole(...ALL_ADMIN_ROLES), asy
 app.get('/api/mobile/notifications/background-poll', (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
+  const rawAuthHeader = String(req.headers.authorization || '').trim();
+  const hasBearerHeader = rawAuthHeader.toLowerCase().startsWith('bearer ') && rawAuthHeader.length > 10;
   const auth = optionalAuth(req);
+  if (hasBearerHeader && (!auth || auth.sessionId === 'portal_ctx_session')) {
+    return res.status(401).json({
+      ok: false,
+      authenticated: false,
+      error: 'token_expired',
+      needs_refresh: true,
+    });
+  }
   const rawRequested = String(req.query.app || '').toLowerCase();
   const requestedApp =
     rawRequested === 'captain' ? 'captain' : rawRequested === 'merchant' ? 'merchant' : 'customer';
@@ -7563,7 +7573,7 @@ app.get('/api/mobile/notifications/background-poll', (req, res) => {
   let customerIsVerified = false;
   let customerEmail = '';
 
-  if (auth && !isAdminAuth(auth)) {
+  if (auth && auth.sessionId !== 'portal_ctx_session' && !isAdminAuth(auth)) {
     appName = auth.role === 'captain' ? 'captain' : auth.role === 'merchant' ? 'merchant' : 'customer';
     recipientId = auth.id;
     if (auth.role === 'customer') {
@@ -7627,7 +7637,17 @@ app.get('/api/mobile/notifications/background-poll', (req, res) => {
 app.get('/api/mobile/notifications', requireAuth, (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
+  const rawAuthHeader = String(req.headers.authorization || '').trim();
+  const hasBearerHeader = rawAuthHeader.toLowerCase().startsWith('bearer ') && rawAuthHeader.length > 10;
   const auth = req.auth!;
+  if (hasBearerHeader && auth.sessionId === 'portal_ctx_session') {
+    return res.status(401).json({
+      ok: false,
+      authenticated: false,
+      error: 'token_expired',
+      needs_refresh: true,
+    });
+  }
   const isAdmin = isAdminAuth(auth);
   const appName = isAdmin ? String(req.query.app || 'customer') : auth.role;
   const recipientId = isAdmin ? (req.query.recipient_id ? String(req.query.recipient_id) : '') : auth.id;

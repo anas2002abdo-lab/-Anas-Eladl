@@ -30,11 +30,11 @@ export const OtlobhaProductCard: React.FC<Props> = ({
       : 0;
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-[0_2px_10px_rgba(15,23,42,0.04)] hover:shadow-[0_6px_20px_rgba(169,34,36,0.08)] transition-all duration-200 flex flex-col overflow-hidden group">
-      {/* Product Image Area */}
+    <article className="bg-white rounded-[22px] border border-slate-200/75 shadow-[0_4px_18px_rgba(15,23,42,0.045)] hover:shadow-[0_12px_28px_rgba(15,23,42,0.09)] transition-all duration-200 flex flex-col overflow-hidden group">
+      {/* Large, Crystal-Clear Square Product Showcase */}
       <div
         onClick={() => onOpenDetails(product.id)}
-        className="relative aspect-square bg-[#F9FAFB] p-3 flex items-center justify-center cursor-pointer overflow-hidden"
+        className="relative aspect-square bg-[#F8FAFC] p-2.5 flex items-center justify-center cursor-pointer overflow-hidden"
       >
         {product.image_url ? (
           <img
@@ -42,48 +42,48 @@ export const OtlobhaProductCard: React.FC<Props> = ({
             alt={product.name_ar}
             loading="lazy"
             referrerPolicy="no-referrer"
-            className="w-full h-full object-contain group-hover:scale-[1.03] transition-transform duration-200"
+            className="w-full h-full object-contain group-hover:scale-[1.04] transition-transform duration-300"
           />
         ) : (
-          <div className="w-16 h-16 rounded-2xl bg-[#FEF2F2] text-[#A92224]/70 flex items-center justify-center">
-            <Package className="w-8 h-8" />
+          <div className="w-20 h-20 rounded-2xl bg-[#FEF2F2] text-[#A92224]/70 flex items-center justify-center">
+            <Package className="w-9 h-9" />
           </div>
         )}
 
-        {/* Single disciplined top-right discount/offer ribbon */}
+        {/* Single disciplined top-right discount/offer indicator */}
         {discountPct > 0 ? (
-          <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-lg bg-[#A92224] text-white text-[10px] font-black shadow-sm">
+          <div className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded-xl bg-[#A92224] text-white text-[11px] font-extrabold shadow-sm tabular-nums">
             خصم {discountPct}%
           </div>
         ) : product.is_offer ? (
-          <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded-lg bg-[#F5A623] text-[#3B180E] text-[10px] font-black shadow-sm">
-            عرض مميز
+          <div className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded-xl bg-[#F5A623] text-[#3B180E] text-[11px] font-extrabold shadow-sm">
+            عرض
           </div>
         ) : null}
 
-        {/* Floating Quick Add (+) or Stepper at bottom-left of image */}
+        {/* Floating Quick Add (+) or Quantity Stepper */}
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute bottom-2 left-2 z-10"
+          className="absolute bottom-2.5 left-2.5 z-10"
         >
           {cartQty > 0 ? (
-            <div className="flex items-center gap-1 bg-[#A92224] text-white rounded-full px-1 py-1 shadow-md">
+            <div className="flex items-center gap-1 bg-[#A92224] text-white rounded-full p-1 shadow-[0_6px_16px_rgba(169,34,36,0.3)]">
               <button
                 type="button"
                 onClick={() => onAdd(product)}
                 aria-label="زيادة الكمية"
-                className="w-7 h-7 rounded-full bg-white/15 hover:bg-white/25 flex items-center justify-center cursor-pointer"
+                className="w-8 h-8 rounded-full bg-white/15 hover:bg-white/25 flex items-center justify-center cursor-pointer transition-colors"
               >
-                <Plus className="w-3.5 h-3.5" />
+                <Plus className="w-4 h-4" />
               </button>
-              <span className="min-w-[20px] text-center text-xs font-black tabular-nums">{cartQty}</span>
+              <span className="min-w-[22px] text-center text-xs font-black tabular-nums">{cartQty}</span>
               <button
                 type="button"
                 onClick={() => onDecrement(product.id)}
                 aria-label="تقليل الكمية"
-                className="w-7 h-7 rounded-full bg-white/15 hover:bg-white/25 flex items-center justify-center cursor-pointer"
+                className="w-8 h-8 rounded-full bg-white/15 hover:bg-white/25 flex items-center justify-center cursor-pointer transition-colors"
               >
-                <Minus className="w-3.5 h-3.5" />
+                <Minus className="w-4 h-4" />
               </button>
             </div>
           ) : (
@@ -91,7 +91,7 @@ export const OtlobhaProductCard: React.FC<Props> = ({
               type="button"
               onClick={() => onAdd(product)}
               aria-label="إضافة سريعة للسلة"
-              className="w-9 h-9 rounded-full bg-white border border-slate-200 text-[#A92224] hover:bg-[#A92224] hover:text-white hover:border-[#A92224] shadow-md flex items-center justify-center transition-colors cursor-pointer"
+              className="w-10 h-10 rounded-full bg-white border border-slate-200/90 text-[#A92224] hover:bg-[#A92224] hover:text-white hover:border-[#A92224] shadow-[0_6px_16px_rgba(15,23,42,0.12)] flex items-center justify-center transition-all duration-200 active:scale-95 cursor-pointer"
             >
               <Plus className="w-5 h-5 stroke-[2.5]" />
             </button>
@@ -99,63 +99,63 @@ export const OtlobhaProductCard: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Product Metadata Area */}
+      {/* Clean Editorial Metadata & Bold Price */}
       <div
         onClick={() => onOpenDetails(product.id)}
-        className="p-2.5 flex-1 flex flex-col justify-between gap-1.5 cursor-pointer"
+        className="p-3 flex-1 flex flex-col justify-between gap-2 cursor-pointer"
       >
-        <div className="space-y-0.5">
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-[11px] font-bold text-[#A92224] truncate">
+        <div className="space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 truncate">
+            <span className="text-[#A92224] font-bold truncate">
               {product.brand || product.category_name || 'اطلبها'}
             </span>
             {product.size_label && (
-              <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-md shrink-0">
-                {product.size_label}
-              </span>
+              <>
+                <span aria-hidden="true" className="text-slate-300">·</span>
+                <span className="text-slate-500 truncate">{product.size_label}</span>
+              </>
             )}
           </div>
-          <h4 className="text-[13px] font-extrabold text-slate-900 leading-snug line-clamp-2 min-h-[2.35rem]">
+          <h4 className="text-[13.5px] font-extrabold text-slate-900 leading-snug line-clamp-2 min-h-[2.4rem]">
             {product.name_ar}
           </h4>
         </div>
 
-        <div className="space-y-1 pt-1">
-          {/* Price Row */}
+        <div className="space-y-1.5 pt-1">
+          {/* Bold Tabular Price Row */}
           <div className="flex items-baseline gap-1.5 flex-wrap">
-            <span className="text-[15px] font-black text-slate-950 tabular-nums">
+            <span className="text-[16px] font-black text-slate-950 tabular-nums">
               {effPrice.toLocaleString('ar-EG')}
-              <span className="text-[10px] font-bold text-slate-600 mr-0.5">ج.م</span>
+              <span className="text-[11px] font-bold text-slate-500 mr-1">ج.م</span>
             </span>
             {hasDiscount && (
-              <span className="text-[11px] text-slate-400 line-through tabular-nums">
+              <span className="text-[11.5px] text-slate-400 line-through tabular-nums">
                 {product.base_price.toLocaleString('ar-EG')}
               </span>
             )}
           </div>
 
-          {/* Store / Multi-store Comparison Hint */}
-          <div className="flex items-center justify-between gap-1 text-[10px] pt-0.5 border-t border-slate-100">
-            <span className="text-slate-500 truncate flex items-center gap-1 font-semibold">
+          {/* Quiet Store Metadata Footer */}
+          <div className="flex items-center justify-between gap-1.5 text-[11px] pt-1.5 border-t border-slate-100">
+            <span className="text-slate-500 truncate flex items-center gap-1 font-medium">
               <Store className="w-3 h-3 text-slate-400 shrink-0" />
               <span className="truncate">{product.merchant_name}</span>
             </span>
             {product.stores_count > 1 && (
-              <span className="shrink-0 font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-md">
+              <span className="shrink-0 font-bold text-emerald-700 text-[10.5px] tabular-nums">
                 {product.stores_count} متاجر
               </span>
             )}
           </div>
 
-          {/* Optional Active Savings Deal Hint */}
           {product.active_deal && (
-            <div className="flex items-center gap-1 text-[10px] font-bold text-[#86191B] bg-[#FFFBEB] border border-[#F5A623]/40 rounded-lg px-2 py-1 truncate">
+            <div className="flex items-center gap-1 text-[10.5px] font-bold text-[#86191B] pt-0.5 truncate">
               <Gift className="w-3 h-3 text-[#D97706] shrink-0" />
               <span className="truncate">{product.active_deal.title_ar}</span>
             </div>
           )}
         </div>
       </div>
-    </div>
+    </article>
   );
 };

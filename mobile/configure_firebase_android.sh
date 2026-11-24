@@ -604,30 +604,35 @@ object OtlobhaBgPollEngine {{
             val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
 
             // 1. Primary endpoint: /api/mobile/notifications/background-poll (supports both logged-in and guest broadcasts)
-            var resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12", accessToken)
-            if (resp.code == 401 && refreshToken.isNotEmpty()) {{
+            val ts = System.currentTimeMillis()
+            var resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12&_t=$ts", accessToken)
+            val needsAuthRefresh = accessToken.isNotEmpty() && refreshToken.isNotEmpty() && (
+                resp.code == 401 ||
+                (resp.code in 200..299 && (resp.body?.contains("\\"authenticated\\":false") == true || resp.body?.contains("\\"authenticated\\": false") == true))
+            )
+            if (needsAuthRefresh) {{
                 val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
                 if (!refreshed.isNullOrEmpty()) {{
                     accessToken = refreshed
-                    resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12", accessToken)
+                    resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12&_t=${{System.currentTimeMillis()}}", accessToken)
                 }}
             }}
 
             // 2. Fallback endpoint: /api/mobile/notifications?app=... (works even on older backend versions)
             if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
-                resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE", accessToken)
+                resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE&_t=${{System.currentTimeMillis()}}", accessToken)
                 if (resp.code == 401 && refreshToken.isNotEmpty()) {{
                     val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
                     if (!refreshed.isNullOrEmpty()) {{
                         accessToken = refreshed
-                        resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE", accessToken)
+                        resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE&_t=${{System.currentTimeMillis()}}", accessToken)
                     }}
                 }}
             }}
 
             // 3. Guest fallback if authenticated token failed on /background-poll
             if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
-                resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12", "")
+                resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12&_t=${{System.currentTimeMillis()}}", "")
             }}
 
             val bodyText = resp.body

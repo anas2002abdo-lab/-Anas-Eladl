@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'config.dart';
 
 class MerchantApiException implements Exception {
@@ -13,8 +14,12 @@ class MerchantApiException implements Exception {
 }
 
 class MerchantApiClient {
+  static const String _prefAccessToken = 'otlobha_merchant_access_token';
+  static const String _prefRefreshToken = 'otlobha_merchant_refresh_token';
+
   String? accessToken;
   String? refreshToken;
+  Future<bool>? _refreshFuture;
 
   MerchantApiClient({this.accessToken, this.refreshToken});
 
@@ -27,6 +32,63 @@ class MerchantApiClient {
       map['Authorization'] = 'Bearer $accessToken';
     }
     return map;
+  }
+
+  Future<bool> _tryRefreshSession() async {
+    final currentRefresh = refreshToken?.trim() ?? '';
+    if (currentRefresh.isEmpty) return false;
+    if (_refreshFuture != null) return _refreshFuture!;
+
+    final future = () async {
+      try {
+        final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/auth/refresh');
+        final res = await http
+            .post(
+              uri,
+              headers: const {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+              },
+              body: jsonEncode({'refresh_token': currentRefresh}),
+            )
+            .timeout(const Duration(seconds: 15));
+        if (res.statusCode < 200 || res.statusCode >= 300) return false;
+        final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+        if (decoded is! Map) return false;
+        final tokens = decoded['tokens'];
+        if (tokens is! Map) return false;
+        final nextAccess = (tokens['access_token'] ?? '').toString().trim();
+        final nextRefresh = (tokens['refresh_token'] ?? '').toString().trim();
+        if (nextAccess.isEmpty) return false;
+        accessToken = nextAccess;
+        if (nextRefresh.isNotEmpty) refreshToken = nextRefresh;
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_prefAccessToken, nextAccess);
+          if (nextRefresh.isNotEmpty) {
+            await prefs.setString(_prefRefreshToken, nextRefresh);
+          }
+        } catch (_) {}
+        return true;
+      } catch (_) {
+        return false;
+      } finally {
+        _refreshFuture = null;
+      }
+    }();
+    _refreshFuture = future;
+    return future;
+  }
+
+  Future<http.Response> _authedRequest(Future<http.Response> Function() send) async {
+    var res = await send();
+    if (res.statusCode == 401 && (refreshToken?.trim().isNotEmpty ?? false)) {
+      final refreshed = await _tryRefreshSession();
+      if (refreshed) {
+        res = await send();
+      }
+    }
+    return res;
   }
 
   dynamic _decode(http.Response res) {
@@ -82,7 +144,7 @@ class MerchantApiClient {
     String? deviceLabel,
   }) async {
     final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/mobile/push/register');
-    final res = await http
+    final res = await _authedRequest(() => http
         .post(
           uri,
           headers: _headers(),
@@ -94,7 +156,7 @@ class MerchantApiClient {
             if (deviceLabel != null) 'device_label': deviceLabel,
           }),
         )
-        .timeout(const Duration(seconds: 15));
+        .timeout(const Duration(seconds: 15)));
     _decode(res);
   }
 
@@ -125,7 +187,7 @@ class MerchantApiClient {
 
   Future<void> unregisterPushToken({String? fcmToken, String? deviceId}) async {
     final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/mobile/push/unregister');
-    final res = await http
+    final res = await _authedRequest(() => http
         .post(
           uri,
           headers: _headers(),
@@ -134,13 +196,13 @@ class MerchantApiClient {
             if (deviceId != null) 'device_id': deviceId,
           }),
         )
-        .timeout(const Duration(seconds: 12));
+        .timeout(const Duration(seconds: 12)));
     _decode(res);
   }
 
   Future<List<Map<String, dynamic>>> fetchNotifications() async {
     final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/mobile/notifications?app=merchant');
-    final res = await http.get(uri, headers: _headers()).timeout(const Duration(seconds: 15));
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 15)));
     final data = _decode(res);
     if (data is List) {
       return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
@@ -152,13 +214,13 @@ class MerchantApiClient {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/mobile/notifications/${Uri.encodeComponent(id)}/read',
     );
-    final res = await http.patch(uri, headers: _headers()).timeout(const Duration(seconds: 12));
+    final res = await _authedRequest(() => http.patch(uri, headers: _headers()).timeout(const Duration(seconds: 12)));
     _decode(res);
   }
 
   Future<void> markAllNotificationsRead({List<String>? ids}) async {
     final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/mobile/notifications/read-all');
-    final res = await http
+    final res = await _authedRequest(() => http
         .patch(
           uri,
           headers: _headers(),
@@ -167,7 +229,7 @@ class MerchantApiClient {
             if (ids != null && ids.isNotEmpty) 'ids': ids,
           }),
         )
-        .timeout(const Duration(seconds: 12));
+        .timeout(const Duration(seconds: 12)));
     _decode(res);
   }
 
@@ -175,7 +237,7 @@ class MerchantApiClient {
     final uri = Uri.parse(
       '${MerchantAppConfig.normalizedBaseUrl}/api/orders?merchant_id=${Uri.encodeQueryComponent(merchantId)}&scope=merchant',
     );
-    final res = await http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20));
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20)));
     final data = _decode(res);
     if (data is List) {
       return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();

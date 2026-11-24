@@ -1729,8 +1729,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   return (
     <div className="flex flex-col min-h-[calc(100vh-140px)]">
       {/* Main Scrollable Content Area */}
-      <div className="flex-1 space-y-5 pb-6">
-        {/* Top Brand Strip (Logo-Inspired Crimson & Amber) */}
+      <div className="flex-1 space-y-5 pb-32">
+        {/* Top Brand Strip (Shown on secondary tabs; on Home tab the Hero Banner extends behind the floating overlay header) */}
+        {tab !== 'home' && (
         <header className="sticky top-0 z-30 bg-gradient-to-l from-[#9E1C1E] via-[#B52325] to-[#C8431D] text-white rounded-xl border-b-2 border-[#F5A623]/80 shadow-sm px-3.5 sm:px-4 py-2.5 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <img
@@ -1743,7 +1744,6 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                 {isAr ? 'اطلبها – المنزلة' : 'Otlobha Customer'}
               </p>
               <h2 className="text-sm sm:text-base font-bold truncate leading-tight">
-                {tab === 'home' && (isAr ? 'متجر اطلبها – مقارنة وأقل سعر' : 'Otlobha Store')}
                 {tab === 'categories' && (isAr ? 'الأقسام والتصنيفات' : 'Categories')}
                 {tab === 'services' && (isAr ? 'جميع خدمات اطلبها' : 'Services')}
                 {tab === 'offers' && (isAr ? 'العروض وكوبونات الخصم' : 'Offers & Coupons')}
@@ -1816,6 +1816,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
             </button>
           </div>
         </header>
+        )}
 
         {/* Live Order Preparation & Captain Pickup Tracker Banner (Visible whenever customer has an active order) */}
         {(() => {
@@ -2702,6 +2703,17 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
               selectedMerchantId={storefrontMerchantId}
               cartQtyMap={cart}
               unreadNotifCount={unreadCount}
+              liveTrackingCount={liveTrackingCount}
+              onOpenLiveTracking={() => {
+                setShowLiveTracking(!showLiveTracking);
+                setShowInbox(false);
+                setShowSideDrawer(false);
+              }}
+              onOpenMenu={() => {
+                setShowSideDrawer(true);
+                setShowInbox(false);
+                setShowLiveTracking(false);
+              }}
               onChangeFilter={(f) => setStorefrontFilter(f)}
               onSelectCategory={(catId) => setStorefrontCategoryId(catId)}
               onSelectBrand={(brand) => setStorefrontBrand(brand)}
@@ -5355,66 +5367,68 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         onOpenService={handleOpenOtlobhaService}
       />
 
-      {/* STICKY 5-TAB BOTTOM NAVIGATION BAR: الرئيسية | الأقسام | [المساعد الذكي المركزي] | السلة | حسابي */}
-      <nav
-        aria-label={isAr ? 'شريط التنقل السفلي لتطبيق العميل' : 'Customer Bottom Navigation'}
-        className="sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 rounded-t-3xl shadow-[0_-6px_24px_rgba(15,23,42,0.08)] px-1.5 sm:px-4 pt-1 pb-2"
-      >
-        <div className="grid grid-cols-5 items-end gap-1">
-          {bottomNavItems.map((item) => {
-            const Icon = item.icon;
-            const active = item.id !== 'assistant' && tab === item.id;
-            if (item.isCenterFeatured) {
+      {/* FLOATING 89% WIDTH BOTTOM NAVIGATION DOCK: الرئيسية | الأقسام | [المساعد الذكي المركزي] | السلة | حسابي */}
+      <div className="fixed bottom-3 inset-x-0 z-40 flex justify-center pointer-events-none px-2">
+        <nav
+          aria-label={isAr ? 'شريط التنقل السفلي لتطبيق العميل' : 'Customer Bottom Navigation'}
+          className="pointer-events-auto w-[89%] max-w-[560px] h-[82px] sm:h-[96px] bg-white/92 backdrop-blur-xl border border-slate-200/85 rounded-[34px] shadow-[0_14px_40px_rgba(15,23,42,0.18)] px-2.5 sm:px-5 flex items-center"
+        >
+          <div className="w-full grid grid-cols-5 items-center gap-1">
+            {bottomNavItems.map((item) => {
+              const Icon = item.icon;
+              const active = item.id !== 'assistant' && tab === item.id;
+              if (item.isCenterFeatured) {
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setAssistantModalOpen(true)}
+                    className="relative flex flex-col items-center justify-center gap-1 group cursor-pointer"
+                  >
+                    <div
+                      className={`-mt-7 w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center shadow-[0_10px_24px_rgba(169,34,36,0.34)] transition-transform duration-200 group-hover:scale-105 ring-4 ${
+                        assistantModalOpen
+                          ? 'bg-gradient-to-br from-[#86191B] via-[#A92224] to-[#F5A623] text-white ring-[#F5A623]/40'
+                          : 'bg-gradient-to-br from-[#A92224] via-[#C62F28] to-[#F5A623] text-white ring-white'
+                      }`}
+                    >
+                      <Icon className="w-6 h-6 sm:w-7 sm:h-7" />
+                    </div>
+                    <span
+                      className={`text-[10.5px] sm:text-xs whitespace-nowrap leading-none font-black ${
+                        assistantModalOpen ? 'text-[#A92224]' : 'text-slate-800'
+                      }`}
+                    >
+                      {item.label}
+                    </span>
+                  </button>
+                );
+              }
+
               return (
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setAssistantModalOpen(true)}
-                  className="relative flex flex-col items-center justify-end gap-1 pb-1 min-h-[56px] group cursor-pointer"
+                  onClick={() => setTab(item.id as BottomTab)}
+                  className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-2xl min-h-[54px] transition-all duration-200 cursor-pointer ${
+                    active ? 'text-[#A92224] bg-[#FEF2F2]/90 font-black' : 'text-slate-500 hover:bg-slate-100/70 font-bold'
+                  }`}
                 >
-                  <div
-                    className={`-mt-6 w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition-transform duration-150 group-hover:scale-105 ring-4 ${
-                      assistantModalOpen
-                        ? 'bg-gradient-to-br from-[#86191B] via-[#A92224] to-[#F5A623] text-white ring-[#F5A623]/40'
-                        : 'bg-gradient-to-br from-[#A92224] via-[#C62F28] to-[#F5A623] text-white ring-white'
-                    }`}
-                  >
-                    <Icon className="w-6 h-6" />
+                  <div className="relative">
+                    <Icon className="w-5 h-5 sm:w-[22px] sm:h-[22px]" />
+                    {typeof item.badge === 'number' && item.badge > 0 && (
+                      <span className="absolute -top-2 -end-2.5 min-w-[18px] h-[18px] px-1 bg-[#A92224] text-white rounded-full text-[10px] font-black flex items-center justify-center tabular-nums">
+                        {item.badge}
+                      </span>
+                    )}
                   </div>
-                  <span
-                    className={`text-[10px] sm:text-xs whitespace-nowrap leading-none font-black ${
-                      assistantModalOpen ? 'text-[#A92224]' : 'text-slate-800'
-                    }`}
-                  >
-                    {item.label}
-                  </span>
+                  <span className="text-[11px] sm:text-xs whitespace-nowrap leading-none">{item.label}</span>
                 </button>
               );
-            }
-
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setTab(item.id as BottomTab)}
-                className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-2xl min-h-[54px] transition-colors cursor-pointer ${
-                  active ? 'text-[#A92224] bg-[#FEF2F2] font-black' : 'text-slate-500 hover:bg-slate-50 font-bold'
-                }`}
-              >
-                <div className="relative">
-                  <Icon className="w-5 h-5" />
-                  {typeof item.badge === 'number' && item.badge > 0 && (
-                    <span className="absolute -top-2 -end-2.5 min-w-[18px] h-[18px] px-1 bg-[#A92224] text-white rounded-full text-[10px] font-black flex items-center justify-center tabular-nums">
-                      {item.badge}
-                    </span>
-                  )}
-                </div>
-                <span className="text-[11px] sm:text-xs whitespace-nowrap leading-none">{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+            })}
+          </div>
+        </nav>
+      </div>
     </div>
   );
 };

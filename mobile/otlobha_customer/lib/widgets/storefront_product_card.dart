@@ -58,13 +58,13 @@ class StorefrontProductCardWidget extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFEAECEF)),
         boxShadow: const [
           BoxShadow(
-            color: Color(0x0A0F172A),
-            blurRadius: 10,
-            offset: Offset(0, 2),
+            color: Color(0x0D0F172A),
+            blurRadius: 16,
+            offset: Offset(0, 6),
           ),
         ],
       ),
@@ -72,23 +72,29 @@ class StorefrontProductCardWidget extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Product Image + Discount Ribbon + Floating Quick Add (+)
+          // Large, crisp square product image stage + single disciplined ribbon + floating quick add
           GestureDetector(
             onTap: onTapDetails,
             child: AspectRatio(
-              aspectRatio: 1.08,
+              aspectRatio: 1.0,
               child: Container(
-                color: const Color(0xFFF9FAFB),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0xFFFAFAFA), Color(0xFFF3F4F6)],
+                  ),
+                ),
                 child: Stack(
                   children: [
                     Positioned.fill(
                       child: Padding(
-                        padding: const EdgeInsets.all(10),
+                        padding: const EdgeInsets.all(6),
                         child: imgUrl.isNotEmpty
                             ? Image.network(
                                 imgUrl,
                                 fit: BoxFit.contain,
-                                cacheWidth: 320,
+                                cacheWidth: 420,
                                 errorBuilder: (_, __, ___) => _imageFallback(),
                               )
                             : _imageFallback(),
@@ -96,19 +102,26 @@ class StorefrontProductCardWidget extends StatelessWidget {
                     ),
                     if (discountPct > 0)
                       Positioned(
-                        top: 8,
-                        right: 8,
+                        top: 9,
+                        right: 9,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                           decoration: BoxDecoration(
                             color: const Color(0xFFA92224),
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(10),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x33A92224),
+                                blurRadius: 8,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
                           ),
                           child: Text(
                             'خصم $discountPct%',
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 10,
+                              fontSize: 10.5,
                               fontWeight: FontWeight.w900,
                             ),
                           ),
@@ -116,19 +129,19 @@ class StorefrontProductCardWidget extends StatelessWidget {
                       )
                     else if (isOffer)
                       Positioned(
-                        top: 8,
-                        right: 8,
+                        top: 9,
+                        right: 9,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
                           decoration: BoxDecoration(
                             color: const Color(0xFFF5A623),
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(10),
                           ),
                           child: const Text(
-                            'عرض مميز',
+                            'عرض',
                             style: TextStyle(
                               color: Color(0xFF3B180E),
-                              fontSize: 10,
+                              fontSize: 10.5,
                               fontWeight: FontWeight.w900,
                             ),
                           ),
@@ -136,19 +149,19 @@ class StorefrontProductCardWidget extends StatelessWidget {
                       ),
                     // Floating Quick Add (+) / Stepper (Bottom-Left in RTL)
                     Positioned(
-                      bottom: 8,
-                      left: 8,
+                      bottom: 9,
+                      left: 9,
                       child: cartQty > 0
                           ? Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3.5),
                               decoration: BoxDecoration(
                                 color: const Color(0xFFA92224),
-                                borderRadius: BorderRadius.circular(24),
+                                borderRadius: BorderRadius.circular(28),
                                 boxShadow: const [
                                   BoxShadow(
-                                    color: Color(0x33A92224),
-                                    blurRadius: 8,
-                                    offset: Offset(0, 3),
+                                    color: Color(0x40A92224),
+                                    blurRadius: 12,
+                                    offset: Offset(0, 4),
                                   ),
                                 ],
                               ),
@@ -157,39 +170,39 @@ class StorefrontProductCardWidget extends StatelessWidget {
                                 children: [
                                   InkWell(
                                     onTap: onAdd,
-                                    borderRadius: BorderRadius.circular(14),
+                                    borderRadius: BorderRadius.circular(16),
                                     child: Container(
-                                      width: 26,
-                                      height: 26,
+                                      width: 28,
+                                      height: 28,
                                       decoration: BoxDecoration(
-                                        color: Colors.white.withOpacity(0.18),
+                                        color: Colors.white.withOpacity(0.2),
                                         shape: BoxShape.circle,
                                       ),
-                                      child: const Icon(Icons.add, size: 15, color: Colors.white),
+                                      child: const Icon(Icons.add, size: 16, color: Colors.white),
                                     ),
                                   ),
                                   Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 7),
+                                    padding: const EdgeInsets.symmetric(horizontal: 8),
                                     child: Text(
                                       '$cartQty',
                                       style: const TextStyle(
                                         color: Colors.white,
-                                        fontSize: 12,
+                                        fontSize: 13,
                                         fontWeight: FontWeight.w900,
                                       ),
                                     ),
                                   ),
                                   InkWell(
                                     onTap: onDecrement,
-                                    borderRadius: BorderRadius.circular(14),
+                                    borderRadius: BorderRadius.circular(16),
                                     child: Container(
-                                      width: 26,
-                                      height: 26,
+                                      width: 28,
+                                      height: 28,
                                       decoration: BoxDecoration(
-                                        color: Colors.white.withOpacity(0.18),
+                                        color: Colors.white.withOpacity(0.2),
                                         shape: BoxShape.circle,
                                       ),
-                                      child: const Icon(Icons.remove, size: 15, color: Colors.white),
+                                      child: const Icon(Icons.remove, size: 16, color: Colors.white),
                                     ),
                                   ),
                                 ],
@@ -198,20 +211,21 @@ class StorefrontProductCardWidget extends StatelessWidget {
                           : Material(
                               color: Colors.white,
                               shape: const CircleBorder(),
-                              elevation: 3,
+                              elevation: 4,
+                              shadowColor: const Color(0x260F172A),
                               child: InkWell(
                                 customBorder: const CircleBorder(),
                                 onTap: onAdd,
                                 child: Container(
-                                  width: 36,
-                                  height: 36,
+                                  width: 38,
+                                  height: 38,
                                   decoration: BoxDecoration(
                                     shape: BoxShape.circle,
                                     border: Border.all(color: const Color(0xFFE2E8F0)),
                                   ),
                                   child: const Icon(
-                                    Icons.add,
-                                    size: 20,
+                                    Icons.add_rounded,
+                                    size: 22,
                                     color: Color(0xFFA92224),
                                   ),
                                 ),
@@ -224,12 +238,12 @@ class StorefrontProductCardWidget extends StatelessWidget {
             ),
           ),
 
-          // Product Metadata & Price
+          // Product Metadata & Price (clean unboxed hierarchy)
           Expanded(
             child: InkWell(
               onTap: onTapDetails,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(10, 8, 10, 9),
+                padding: const EdgeInsets.fromLTRB(11, 9, 11, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -254,22 +268,15 @@ class StorefrontProductCardWidget extends StatelessWidget {
                               ),
                             ),
                             if (sizeLabel.isNotEmpty) ...[
-                              const SizedBox(width: 4),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFF1F5F9),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(
-                                  sizeLabel,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 9.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: Color(0xFF475569),
-                                  ),
+                              const SizedBox(width: 5),
+                              Text(
+                                sizeLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: Color(0xFF64748B),
                                 ),
                               ),
                             ],
@@ -281,7 +288,7 @@ class StorefrontProductCardWidget extends StatelessWidget {
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            fontSize: 12.5,
+                            fontSize: 13,
                             fontWeight: FontWeight.w800,
                             color: Color(0xFF0F172A),
                             height: 1.25,
@@ -299,7 +306,7 @@ class StorefrontProductCardWidget extends StatelessWidget {
                             Text(
                               _formatPrice(effPrice),
                               style: const TextStyle(
-                                fontSize: 15,
+                                fontSize: 16,
                                 fontWeight: FontWeight.w900,
                                 color: Color(0xFF0F172A),
                               ),
@@ -308,7 +315,7 @@ class StorefrontProductCardWidget extends StatelessWidget {
                             const Text(
                               'ج.م',
                               style: TextStyle(
-                                fontSize: 10,
+                                fontSize: 10.5,
                                 fontWeight: FontWeight.w700,
                                 color: Color(0xFF475569),
                               ),
@@ -321,7 +328,7 @@ class StorefrontProductCardWidget extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                    fontSize: 10.5,
+                                    fontSize: 11,
                                     color: Color(0xFF94A3B8),
                                     decoration: TextDecoration.lineThrough,
                                   ),
@@ -332,7 +339,7 @@ class StorefrontProductCardWidget extends StatelessWidget {
                         ),
                         const SizedBox(height: 5),
                         Container(
-                          padding: const EdgeInsets.only(top: 4),
+                          padding: const EdgeInsets.only(top: 5),
                           decoration: const BoxDecoration(
                             border: Border(top: BorderSide(color: Color(0xFFF1F5F9))),
                           ),
@@ -346,7 +353,7 @@ class StorefrontProductCardWidget extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                    fontSize: 10,
+                                    fontSize: 10.5,
                                     fontWeight: FontWeight.w600,
                                     color: Color(0xFF64748B),
                                   ),
@@ -354,19 +361,12 @@ class StorefrontProductCardWidget extends StatelessWidget {
                               ),
                               if (storesCount > 1) ...[
                                 const SizedBox(width: 4),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFECFDF5),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Text(
-                                    '$storesCount متاجر',
-                                    style: const TextStyle(
-                                      fontSize: 9.5,
-                                      fontWeight: FontWeight.w900,
-                                      color: Color(0xFF047857),
-                                    ),
+                                Text(
+                                  '$storesCount متاجر',
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w900,
+                                    color: Color(0xFF047857),
                                   ),
                                 ),
                               ],
@@ -375,31 +375,23 @@ class StorefrontProductCardWidget extends StatelessWidget {
                         ),
                         if (activeDealTitle.isNotEmpty) ...[
                           const SizedBox(height: 4),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFFBEB),
-                              borderRadius: BorderRadius.circular(7),
-                              border: Border.all(color: const Color(0x66F5A623)),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.card_giftcard, size: 11, color: Color(0xFFD97706)),
-                                const SizedBox(width: 4),
-                                Expanded(
-                                  child: Text(
-                                    activeDealTitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 9.5,
-                                      fontWeight: FontWeight.w800,
-                                      color: Color(0xFF86191B),
-                                    ),
+                          Row(
+                            children: [
+                              const Icon(Icons.card_giftcard_rounded, size: 11.5, color: Color(0xFFD97706)),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Text(
+                                  activeDealTitle,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF86191B),
                                   ),
                                 ),
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
                         ],
                       ],
@@ -417,15 +409,15 @@ class StorefrontProductCardWidget extends StatelessWidget {
   Widget _imageFallback() {
     return Center(
       child: Container(
-        width: 58,
-        height: 58,
+        width: 64,
+        height: 64,
         decoration: BoxDecoration(
           color: const Color(0xFFFEF2F2),
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
         ),
         child: const Icon(
           Icons.inventory_2_outlined,
-          size: 30,
+          size: 32,
           color: Color(0xFFA92224),
         ),
       ),

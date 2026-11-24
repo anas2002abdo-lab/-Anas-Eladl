@@ -515,7 +515,7 @@ export function getActiveTokensForAudience(params: {
     }
 
     // For operational order/trip dispatch (or when zone-filtered captain query yields 0 tokens),
-    // broadcast to all approved captains with registered tokens so no new order alert is silently dropped due to zone naming differences.
+    // broadcast to all active non-suspended captains with registered tokens so no new order alert is silently dropped.
     if (isOperational || !zone || tokens.size === 0) {
       const rows = db
         .prepare(
@@ -523,7 +523,7 @@ export function getActiveTokensForAudience(params: {
            FROM push_device_tokens t
            LEFT JOIN captains c ON c.id = t.user_id
            WHERE t.is_active = 1 AND t.user_role = 'captain'
-             AND (c.id IS NULL OR c.verification_status = 'approved')`
+             AND (c.id IS NULL OR COALESCE(c.verification_status, 'approved') NOT IN ('suspended', 'rejected'))`
         )
         .all() as Array<{ fcm_token: string }>;
       for (const r of rows) tokens.add(r.fcm_token);
@@ -778,7 +778,11 @@ export async function sendPushToTopic(
           visibility: 'public',
           priority: 'max',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          tag: payload.notificationId || undefined,
+          tag: payload.orderId
+            ? `order_${payload.orderId}`
+            : payload.tripId
+            ? `trip_${payload.tripId}`
+            : payload.notificationId || undefined,
         },
       },
       apns: {
@@ -935,13 +939,19 @@ export async function createAndSendNotification(params: {
 
   let fcmDelivery = await sendPushToTokens(tokens, pushPayload);
 
-  // For global broadcasts with 0 registered tokens OR 0 successful direct token sends,
-  // also send to the FCM broadcast topic so phones subscribed to otlobha_customer_all / otlobha_captain_all / otlobha_merchant_all / otlobha_all receive background pushes.
-  if (
+  // For broadcast notifications (or operational captain order/trip dispatches regardless of zone label),
+  // also send to the FCM broadcast topic when direct token sends are 0 — or always for captain operational
+  // dispatches so captains subscribed to otlobha_captain_all receive instant wake-up pushes (deduped by Android tag).
+  const isCaptainOperationalBroadcast =
     !params.recipientId &&
-    zoneTarget === 'all' &&
-    (tokens.length === 0 || fcmDelivery.sent_count === 0)
-  ) {
+    (appTarget === 'captain' || appTarget === 'all') &&
+    category === 'operational';
+  const shouldSendTopic =
+    !params.recipientId &&
+    (isCaptainOperationalBroadcast ||
+      (zoneTarget === 'all' && (tokens.length === 0 || fcmDelivery.sent_count === 0)));
+
+  if (shouldSendTopic) {
     const targetTopic =
       appTarget === 'all'
         ? 'otlobha_all'
