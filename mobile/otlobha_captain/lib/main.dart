@@ -197,10 +197,15 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
     if (state == AppLifecycleState.resumed) {
       push.refreshShownIdsFromStorage();
       if (_activeCaptainId != null && api.hasTokens) {
-        _silentSync();
-        if (push.currentToken == null || !push.isTokenSynced) {
-          push.registerForAuthenticatedCaptain(api);
-        }
+        unawaited(
+          api.reloadTokensFromStorage().then((_) {
+            if (!mounted || _activeCaptainId == null || !api.hasTokens) return;
+            _silentSync();
+            if (push.currentToken == null || !push.isTokenSynced) {
+              push.registerForAuthenticatedCaptain(api);
+            }
+          }),
+        );
       }
     }
   }

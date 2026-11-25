@@ -34,7 +34,25 @@ class MerchantApiClient {
     return map;
   }
 
+  Future<void> reloadTokensFromStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      try {
+        await prefs.reload();
+      } catch (_) {}
+      final savedAccess = prefs.getString(_prefAccessToken)?.trim();
+      final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
+      if (savedAccess != null && savedAccess.isNotEmpty) {
+        accessToken = savedAccess;
+      }
+      if (savedRefresh != null && savedRefresh.isNotEmpty) {
+        refreshToken = savedRefresh;
+      }
+    } catch (_) {}
+  }
+
   Future<bool> _tryRefreshSession() async {
+    await reloadTokensFromStorage();
     final currentRefresh = refreshToken?.trim() ?? '';
     if (currentRefresh.isEmpty) return false;
     if (_refreshFuture != null) return _refreshFuture!;
@@ -51,7 +69,7 @@ class MerchantApiClient {
               },
               body: jsonEncode({'refresh_token': currentRefresh}),
             )
-            .timeout(const Duration(seconds: 15));
+            .timeout(const Duration(seconds: 20));
         if (res.statusCode < 200 || res.statusCode >= 300) return false;
         final decoded = jsonDecode(utf8.decode(res.bodyBytes));
         if (decoded is! Map) return false;
@@ -81,11 +99,22 @@ class MerchantApiClient {
   }
 
   Future<http.Response> _authedRequest(Future<http.Response> Function() send) async {
+    if ((accessToken?.trim().isEmpty ?? true) && (refreshToken?.trim().isNotEmpty ?? false)) {
+      await _tryRefreshSession();
+    }
+    final sentAccess = accessToken;
     var res = await send();
-    if (res.statusCode == 401 && (refreshToken?.trim().isNotEmpty ?? false)) {
-      final refreshed = await _tryRefreshSession();
-      if (refreshed) {
+    if (res.statusCode == 401) {
+      await reloadTokensFromStorage();
+      if ((accessToken?.trim().isNotEmpty ?? false) && accessToken != sentAccess) {
         res = await send();
+        if (res.statusCode != 401) return res;
+      }
+      if (refreshToken?.trim().isNotEmpty ?? false) {
+        final refreshed = await _tryRefreshSession();
+        if (refreshed) {
+          res = await send();
+        }
       }
     }
     return res;

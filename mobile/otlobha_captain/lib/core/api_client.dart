@@ -28,7 +28,7 @@ class OtlobhaCaptainApi {
   String? _refreshToken;
   Future<bool>? _refreshFuture;
 
-  bool get hasTokens => (_accessToken ?? '').isNotEmpty;
+  bool get hasTokens => (_accessToken ?? '').isNotEmpty || (_refreshToken ?? '').isNotEmpty;
 
   Map<String, String> get wsHeaders =>
       (_accessToken != null && _accessToken!.isNotEmpty)
@@ -121,12 +121,32 @@ class OtlobhaCaptainApi {
     } catch (_) {}
   }
 
+  Future<void> reloadTokensFromStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      try {
+        await prefs.reload();
+      } catch (_) {}
+      final savedAccess = prefs.getString(_prefAccessToken)?.trim();
+      final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
+      if (savedAccess != null && savedAccess.isNotEmpty) {
+        _accessToken = savedAccess;
+      }
+      if (savedRefresh != null && savedRefresh.isNotEmpty) {
+        _refreshToken = savedRefresh;
+      }
+    } catch (_) {}
+  }
+
   Future<String?> restorePersistedSession() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final savedAccess = prefs.getString(_prefAccessToken);
-      final savedRefresh = prefs.getString(_prefRefreshToken);
-      final savedId = prefs.getString(_prefCaptainId);
+      try {
+        await prefs.reload();
+      } catch (_) {}
+      final savedAccess = prefs.getString(_prefAccessToken)?.trim();
+      final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
+      final savedId = prefs.getString(_prefCaptainId)?.trim();
       if (savedAccess != null && savedAccess.isNotEmpty) {
         _accessToken = savedAccess;
       }
@@ -170,8 +190,30 @@ class OtlobhaCaptainApi {
     }
   }
 
+  bool _isExplicitAuthInvalidation(http.Response res) {
+    if (res.statusCode != 401 && res.statusCode != 403) return false;
+    final ct = (res.headers['content-type'] ?? '').toLowerCase();
+    if (!ct.contains('application/json')) return false;
+    try {
+      final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+      if (decoded is! Map) return false;
+      final code = (decoded['code'] ?? '').toString().trim().toUpperCase();
+      if (code == 'SESSION_NOT_FOUND' ||
+          code == 'SESSION_REVOKED' ||
+          code == 'SESSION_EXPIRED' ||
+          code == 'ACCOUNT_INACTIVE') {
+        return true;
+      }
+      return decoded['error'] != null && res.statusCode == 401;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> _refreshAccessToken() async {
-    if (_refreshToken == null || _refreshToken!.isEmpty) return false;
+    await reloadTokensFromStorage();
+    final activeRefresh = (_refreshToken ?? '').trim();
+    if (activeRefresh.isEmpty) return false;
     if (_refreshFuture != null) return _refreshFuture!;
 
     _refreshFuture = () async {
@@ -180,25 +222,31 @@ class OtlobhaCaptainApi {
           () => http.post(
             _apiUri('/api/auth/refresh'),
             headers: _headers(json: true, includeAuth: false),
-            body: jsonEncode({'refresh_token': _refreshToken}),
+            body: jsonEncode({'refresh_token': activeRefresh}),
           ),
         );
         if (res.statusCode >= 200 && res.statusCode < 300) {
           final decoded = parseJsonResponse(res, endpointHint: '/api/auth/refresh');
           if (decoded is Map<String, dynamic>) {
             final tokens = decoded['tokens'] is Map ? decoded['tokens'] as Map : decoded;
-            final nextAccess = tokens['access_token']?.toString();
-            final nextRefresh = tokens['refresh_token']?.toString();
+            final nextAccess = tokens['access_token']?.toString().trim();
+            final nextRefresh = tokens['refresh_token']?.toString().trim();
             if (nextAccess != null && nextAccess.isNotEmpty) {
               _accessToken = nextAccess;
               if (nextRefresh != null && nextRefresh.isNotEmpty) {
                 _refreshToken = nextRefresh;
               }
+              await _persistTokensAsync();
               return true;
             }
           }
+          return false;
         }
-        clearTokens();
+        // Only clear persisted session on an explicit JSON 401/403 revocation from our auth server.
+        // Never log out the captain on 5xx, 429, cold-start 503, or transient network errors.
+        if (_isExplicitAuthInvalidation(res)) {
+          clearTokens();
+        }
         return false;
       } catch (_) {
         return false;
@@ -216,11 +264,24 @@ class OtlobhaCaptainApi {
     bool allowRefresh = true,
     Duration timeout = _defaultTimeout,
   }) async {
+    if ((_accessToken == null || _accessToken!.isEmpty) &&
+        allowRefresh &&
+        (_refreshToken?.trim().isNotEmpty ?? false)) {
+      await _refreshAccessToken();
+    }
+    final sentAccess = _accessToken;
     var res = await _execute(() => sender(_headers(json: json)), timeout: timeout);
-    if (res.statusCode == 401 && allowRefresh && _refreshToken != null && _refreshToken!.isNotEmpty) {
-      final ok = await _refreshAccessToken();
-      if (ok) {
+    if (res.statusCode == 401 && allowRefresh) {
+      await reloadTokensFromStorage();
+      if (_accessToken != null && _accessToken!.isNotEmpty && _accessToken != sentAccess) {
         res = await _execute(() => sender(_headers(json: json)), timeout: timeout);
+        if (res.statusCode != 401) return res;
+      }
+      if ((_refreshToken ?? '').trim().isNotEmpty) {
+        final ok = await _refreshAccessToken();
+        if (ok) {
+          res = await _execute(() => sender(_headers(json: json)), timeout: timeout);
+        }
       }
     }
     return res;

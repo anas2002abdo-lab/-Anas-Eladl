@@ -273,10 +273,15 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     if (state == AppLifecycleState.resumed) {
       push.refreshShownIdsFromStorage();
       if (_isAuthenticated && !_isGuest) {
-        _silentSync();
-        if (push.currentToken == null || !push.isTokenSynced) {
-          push.registerForAuthenticatedUser(api);
-        }
+        unawaited(
+          api.reloadTokensFromStorage().then((_) {
+            if (!mounted || !_isAuthenticated || _isGuest) return;
+            _silentSync();
+            if (push.currentToken == null || !push.isTokenSynced) {
+              push.registerForAuthenticatedUser(api);
+            }
+          }),
+        );
       }
     }
   }

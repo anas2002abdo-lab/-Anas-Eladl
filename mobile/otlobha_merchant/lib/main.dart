@@ -61,7 +61,11 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
       MerchantPushNotificationService.instance.scheduleNativeBackgroundSync();
       final merchantId = _merchant?['id']?.toString() ?? '';
       if (merchantId.isNotEmpty) {
-        MerchantPushNotificationService.instance.syncTokenWithBackend(_api, merchantId);
+        _api.reloadTokensFromStorage().then((_) {
+          if (mounted) {
+            MerchantPushNotificationService.instance.syncTokenWithBackend(_api, merchantId);
+          }
+        });
       }
     }
   }
@@ -73,14 +77,18 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
       await MerchantPushNotificationService.instance.syncGuestTokenWithBackend(_api);
 
       final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString(_tokenKey);
-      final refreshToken = prefs.getString(_refreshTokenKey);
+      try {
+        await prefs.reload();
+      } catch (_) {}
+      final token = prefs.getString(_tokenKey)?.trim();
+      final refreshToken = prefs.getString(_refreshTokenKey)?.trim();
       final rawMerchant = prefs.getString(_merchantKey);
-      if (token != null && token.isNotEmpty && rawMerchant != null && rawMerchant.isNotEmpty) {
+      final hasAnyToken = (token != null && token.isNotEmpty) || (refreshToken != null && refreshToken.isNotEmpty);
+      if (hasAnyToken && rawMerchant != null && rawMerchant.isNotEmpty) {
         final decoded = jsonDecode(rawMerchant);
         if (decoded is Map) {
-          _api.accessToken = token;
-          _api.refreshToken = refreshToken;
+          _api.accessToken = (token != null && token.isNotEmpty) ? token : null;
+          _api.refreshToken = (refreshToken != null && refreshToken.isNotEmpty) ? refreshToken : null;
           _merchant = Map<String, dynamic>.from(decoded);
           final merchantId = _merchant?['id']?.toString() ?? '';
           if (merchantId.isNotEmpty) {

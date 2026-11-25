@@ -1162,7 +1162,7 @@ app.post('/api/auth/refresh', (req, res) => {
 
   const result = rotateRefreshSession(req, res, rawRefresh);
   if (!result.ok) {
-    return res.status(result.status).json({ error: result.error });
+    return res.status(result.status).json({ error: result.error, code: result.code });
   }
 
   return res.json({
@@ -11027,6 +11027,9 @@ app.post('/api/auth/customer/reset-password-by-token', (req, res) => {
   db.prepare(
     'UPDATE customers SET password_hash = ?, is_email_verified = 1, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?'
   ).run(hashPassword(cleanPass), String(customer.id));
+  db.prepare(
+    "UPDATE user_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND user_role = 'customer' AND revoked_at IS NULL"
+  ).run(String(customer.id));
 
   recordAuditLog({
     actor_name: String(customer.full_name || email),
@@ -11553,6 +11556,9 @@ app.post('/api/mobile/customer/forgot-password/reset', (req, res) => {
   db.prepare(
     "UPDATE customers SET password_hash = ?, token_version = ?, is_email_verified = 1, last_login_at = datetime('now') WHERE id = ?"
   ).run(newHash, nextVersion, String(customer.id));
+  db.prepare(
+    "UPDATE user_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND user_role = 'customer' AND revoked_at IS NULL"
+  ).run(String(customer.id));
   db.prepare(
     "UPDATE notifications SET is_read = 1 WHERE recipient_id = ? AND deep_link = 'verify_email'"
   ).run(String(customer.id));

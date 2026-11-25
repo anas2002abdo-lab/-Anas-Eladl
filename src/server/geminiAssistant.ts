@@ -1,12 +1,13 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
-export const OTLOBHA_ASSISTANT_MODEL = 'gemini-4-hydrogen';
-export const OTLOBHA_ASSISTANT_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
-export const OTLOBHA_ASSISTANT_TERTIARY_MODEL = 'gemini-3.8-flash';
+export const OTLOBHA_ASSISTANT_MODEL = 'gemini-3.5-flash';
+export const OTLOBHA_ASSISTANT_FALLBACK_MODEL = 'gemini-3.6-flash';
+export const OTLOBHA_ASSISTANT_TERTIARY_MODEL = 'gemini-3.5-flash-lite';
 
-const PER_ATTEMPT_TIMEOUT_MS = 20_000;
+const PER_ATTEMPT_TIMEOUT_MS = 18_000;
 const TOTAL_REQUEST_BUDGET_MS = 38_000;
-const MODEL_OVERLOAD_COOLDOWN_MS = 15_000;
+const MODEL_OVERLOAD_COOLDOWN_MS = 45_000;
+const MODEL_QUOTA_COOLDOWN_MS = 120_000;
 
 interface ModelCandidate {
   model: string;
@@ -14,12 +15,14 @@ interface ModelCandidate {
 }
 
 const ASSISTANT_MODEL_CANDIDATES: ModelCandidate[] = [
-  { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
   { model: OTLOBHA_ASSISTANT_MODEL, thinkingLevel: ThinkingLevel.LOW },
-  { model: OTLOBHA_ASSISTANT_TERTIARY_MODEL, thinkingLevel: ThinkingLevel.LOW },
+  { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.LOW },
+  { model: OTLOBHA_ASSISTANT_TERTIARY_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
+  { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+  { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
 ];
 
-// Short circuit breaker: deprioritize models that just returned 503 for 15s (10m for 404)
+// Circuit breaker: deprioritize models returning 503 (45s), 429 (2m), or 404 (10m)
 const modelCooldownUntil = new Map<string, number>();
 
 export interface AssistantHistoryTurn {
@@ -480,10 +483,10 @@ export async function runOtlobhaGeminiAssistant(
   const steps: Array<{ candidate: ModelCandidate; waitBeforeMs: number }> = [
     ...round1.map((candidate, idx) => ({
       candidate,
-      waitBeforeMs: idx === 0 ? 0 : 400,
+      waitBeforeMs: idx === 0 ? 0 : 250,
     })),
-    { candidate: ASSISTANT_MODEL_CANDIDATES[0], waitBeforeMs: 1_500 },
-    { candidate: ASSISTANT_MODEL_CANDIDATES[2], waitBeforeMs: 2_000 },
+    { candidate: ASSISTANT_MODEL_CANDIDATES[0], waitBeforeMs: 1_200 },
+    { candidate: ASSISTANT_MODEL_CANDIDATES[1], waitBeforeMs: 1_500 },
   ];
 
   for (const step of steps) {
@@ -511,7 +514,7 @@ export async function runOtlobhaGeminiAssistant(
       const errMsg = String((err as any)?.message || err || '').toUpperCase();
       if (errStatus === 429 || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('QUOTA')) {
         rateLimitedInRequest.add(candidate.model);
-        modelCooldownUntil.set(candidate.model, Date.now() + 60_000);
+        modelCooldownUntil.set(candidate.model, Date.now() + MODEL_QUOTA_COOLDOWN_MS);
       }
       continue;
     }

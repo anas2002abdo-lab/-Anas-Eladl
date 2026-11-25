@@ -601,19 +601,31 @@ object OtlobhaBgPollEngine {{
                 FALLBACK_API_BASE
             }}
             var accessToken = prefs.getString(KEY_ACCESS_TOKEN, null)?.trim() ?: ""
-            val refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
+            var refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: ""
+            var refreshAttempted = false
+
+            if (accessToken.isEmpty() && refreshToken.isNotEmpty()) {{
+                refreshAttempted = true
+                val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
+                if (!refreshed.isNullOrEmpty()) {{
+                    accessToken = refreshed
+                    refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: refreshToken
+                }}
+            }}
 
             // 1. Primary endpoint: /api/mobile/notifications/background-poll (supports both logged-in and guest broadcasts)
             val ts = System.currentTimeMillis()
             var resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12&_t=$ts", accessToken)
-            val needsAuthRefresh = accessToken.isNotEmpty() && refreshToken.isNotEmpty() && (
+            val needsAuthRefresh = !refreshAttempted && accessToken.isNotEmpty() && refreshToken.isNotEmpty() && (
                 resp.code == 401 ||
                 (resp.code in 200..299 && (resp.body?.contains("\\"authenticated\\":false") == true || resp.body?.contains("\\"authenticated\\": false") == true))
             )
             if (needsAuthRefresh) {{
+                refreshAttempted = true
                 val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
                 if (!refreshed.isNullOrEmpty()) {{
                     accessToken = refreshed
+                    refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: refreshToken
                     resp = httpGet("$apiBase/api/mobile/notifications/background-poll?app=$APP_ROLE&limit=12&_t=${{System.currentTimeMillis()}}", accessToken)
                 }}
             }}
@@ -621,10 +633,12 @@ object OtlobhaBgPollEngine {{
             // 2. Fallback endpoint: /api/mobile/notifications?app=... (works even on older backend versions)
             if ((resp.code !in 200..299 || resp.body.isNullOrEmpty()) && accessToken.isNotEmpty()) {{
                 resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE&_t=${{System.currentTimeMillis()}}", accessToken)
-                if (resp.code == 401 && refreshToken.isNotEmpty()) {{
+                if (resp.code == 401 && !refreshAttempted && refreshToken.isNotEmpty()) {{
+                    refreshAttempted = true
                     val refreshed = tryRefreshToken(apiBase, refreshToken, prefs)
                     if (!refreshed.isNullOrEmpty()) {{
                         accessToken = refreshed
+                        refreshToken = prefs.getString(KEY_REFRESH_TOKEN, null)?.trim() ?: refreshToken
                         resp = httpGet("$apiBase/api/mobile/notifications?app=$APP_ROLE&_t=${{System.currentTimeMillis()}}", accessToken)
                     }}
                 }}

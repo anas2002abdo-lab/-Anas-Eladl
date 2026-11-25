@@ -4,8 +4,8 @@ import type { NextFunction, Request, Response } from 'express';
 import type { WebSocket } from 'ws';
 import { db, uid } from './db.ts';
 
-export const ACCESS_TOKEN_TTL_SEC = 4 * 60 * 60; // 4 hours
-export const REFRESH_TOKEN_TTL_SEC = 30 * 24 * 60 * 60; // 30 days
+export const ACCESS_TOKEN_TTL_SEC = 24 * 60 * 60; // 24 hours (live session & token_version checked on every request)
+export const REFRESH_TOKEN_TTL_SEC = 90 * 24 * 60 * 60; // 90 days sliding window
 
 export const ACCESS_COOKIE_NAME = 'otlobha_access_token';
 export const REFRESH_COOKIE_NAME = 'otlobha_refresh_token';
@@ -45,16 +45,34 @@ declare global {
   }
 }
 
+let persistedAccessSecret: string | null = null;
+let persistedRefreshSecret: string | null = null;
 let ephemeralAccessSecret: string | null = null;
 let ephemeralRefreshSecret: string | null = null;
 let devNoticeLogged = false;
+
+export function hydratePersistedAuthSecrets(secrets: { accessSecret?: string | null; refreshSecret?: string | null }): void {
+  const nextAccess = String(secrets.accessSecret || '').trim();
+  const nextRefresh = String(secrets.refreshSecret || '').trim();
+  if (nextAccess.length >= 32) {
+    persistedAccessSecret = nextAccess;
+  }
+  if (nextRefresh.length >= 32 && nextRefresh !== nextAccess) {
+    persistedRefreshSecret = nextRefresh;
+  }
+}
 
 export function validateAuthConfiguration(): { accessSecret: string; refreshSecret: string } {
   const envAccess = String(process.env.JWT_ACCESS_SECRET || '').trim();
   const envRefresh = String(process.env.JWT_REFRESH_SECRET || '').trim();
 
-  let accessSecret = envAccess.length >= 32 ? envAccess : '';
-  let refreshSecret = envRefresh.length >= 32 && envRefresh !== envAccess ? envRefresh : '';
+  let accessSecret = envAccess.length >= 32 ? envAccess : (persistedAccessSecret || '');
+  let refreshSecret =
+    envRefresh.length >= 32 && envRefresh !== accessSecret
+      ? envRefresh
+      : persistedRefreshSecret && persistedRefreshSecret !== accessSecret
+        ? persistedRefreshSecret
+        : '';
 
   if (!accessSecret) {
     if (!ephemeralAccessSecret) {
@@ -69,10 +87,10 @@ export function validateAuthConfiguration(): { accessSecret: string; refreshSecr
     refreshSecret = ephemeralRefreshSecret;
   }
 
-  if ((!envAccess || !envRefresh) && !devNoticeLogged) {
+  if (!envAccess && !persistedAccessSecret && !devNoticeLogged) {
     devNoticeLogged = true;
     console.warn(
-      '[Auth] JWT_ACCESS_SECRET / JWT_REFRESH_SECRET not set in environment; using ephemeral in-memory signing secrets.'
+      '[Auth] JWT_ACCESS_SECRET / JWT_REFRESH_SECRET not set in environment; waiting for Cloud SQL persisted secrets or using in-memory secrets.'
     );
   }
 
@@ -426,7 +444,7 @@ export function rotateRefreshSession(
   rawRefreshToken: string
 ):
   | { ok: true; actor: LoadedActor; tokens: IssuedTokens }
-  | { ok: false; status: number; error: string } {
+  | { ok: false; status: number; code: string; error: string } {
   const tokenHash = sha256Token(rawRefreshToken);
   const session = db
     .prepare('SELECT * FROM user_sessions WHERE refresh_token_hash = ?')
@@ -442,38 +460,34 @@ export function rotateRefreshSession(
 
   if (!session) {
     clearAuthCookies(req, res);
-    return { ok: false, status: 401, error: 'رمز التحديث غير صالح أو الجلسة غير موجودة' };
+    return {
+      ok: false,
+      status: 401,
+      code: 'SESSION_NOT_FOUND',
+      error: 'رمز التحديث غير صالح أو الجلسة غير موجودة',
+    };
   }
 
   if (session.revoked_at) {
-    const revokedMs = Date.parse(
-      session.revoked_at.includes('T') ? session.revoked_at : `${session.revoked_at.replace(' ', 'T')}Z`
-    );
-    const ageMs = Number.isFinite(revokedMs) ? Date.now() - revokedMs : Number.POSITIVE_INFINITY;
-    // Brief grace window for concurrent browser tab/reload refresh requests so we do not wipe the brand-new rotated session
-    if (ageMs >= 0 && ageMs < 10_000) {
-      return { ok: false, status: 401, error: 'تم تحديث الجلسة للتو في طلب متزامن، يرجى إعادة المحاولة' };
-    }
-    // Reuse detection: revoke all sessions for this user immediately
-    const activeRows = db
-      .prepare('SELECT id FROM user_sessions WHERE user_id = ? AND user_role = ? AND revoked_at IS NULL')
-      .all(session.user_id, session.user_role) as Array<{ id: string }>;
-    db.prepare("UPDATE user_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND user_role = ? AND revoked_at IS NULL").run(
-      session.user_id,
-      session.user_role
-    );
-    for (const row of activeRows) {
-      closeSocketsForSession(row.id, 4401, 'تم إبطال الجلسة');
-    }
     clearAuthCookies(req, res);
-    return { ok: false, status: 401, error: 'تم إبطال الجلسة مسبقًا، يرجى إعادة تسجيل الدخول' };
+    return {
+      ok: false,
+      status: 401,
+      code: 'SESSION_REVOKED',
+      error: 'تم إنهاء الجلسة مسبقًا، يرجى إعادة تسجيل الدخول',
+    };
   }
 
   if (Date.parse(session.expires_at) <= Date.now()) {
     db.prepare("UPDATE user_sessions SET revoked_at = datetime('now') WHERE id = ?").run(session.id);
     closeSocketsForSession(session.id, 4401, 'انتهت صلاحية الجلسة');
     clearAuthCookies(req, res);
-    return { ok: false, status: 401, error: 'انتهت صلاحية الجلسة، يرجى إعادة تسجيل الدخول' };
+    return {
+      ok: false,
+      status: 401,
+      code: 'SESSION_EXPIRED',
+      error: 'انتهت صلاحية الجلسة، يرجى إعادة تسجيل الدخول',
+    };
   }
 
   const actor = loadLiveActor(session.user_id, session.user_role);
@@ -481,21 +495,51 @@ export function rotateRefreshSession(
     db.prepare("UPDATE user_sessions SET revoked_at = datetime('now') WHERE id = ?").run(session.id);
     closeSocketsForSession(session.id, 4401, 'الحساب غير نشط');
     clearAuthCookies(req, res);
-    return { ok: false, status: 401, error: 'الحساب غير نشط أو غير موجود' };
+    return {
+      ok: false,
+      status: 401,
+      code: 'ACCOUNT_INACTIVE',
+      error: 'الحساب غير نشط أو غير موجود',
+    };
   }
 
-  const tokens = db.transaction(() => {
-    db.prepare("UPDATE user_sessions SET revoked_at = datetime('now') WHERE id = ?").run(session.id);
-    return issueSessionForUser(req, res, {
-      userId: actor.id,
-      role: actor.role,
-      actorType: actor.actorType,
-      tokenVersion: actor.tokenVersion,
-    });
-  })();
-  closeSocketsForSession(session.id, 4401, 'تم تدوير الجلسة');
+  // Sliding-window renewal on the same active session row:
+  // Keeps explicit logout, password-reset revocation, and account suspension instant,
+  // while preventing false-positive logouts when Android background push workers,
+  // concurrent app tabs, or dropped mobile 4G responses refresh the same session.
+  const nextExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_SEC * 1000).toISOString();
+  const ip =
+    req.ip || (req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : null);
+  const ua = String(req.headers['user-agent'] || '').slice(0, 300) || null;
 
-  return { ok: true, actor, tokens };
+  db.prepare('UPDATE user_sessions SET expires_at = ?, ip_address = COALESCE(?, ip_address), user_agent = COALESCE(?, user_agent) WHERE id = ?').run(
+    nextExpiresAt,
+    ip,
+    ua,
+    session.id
+  );
+
+  const accessToken = signAccessJwt({
+    sub: actor.id,
+    role: actor.role,
+    actorType: actor.actorType,
+    sid: session.id,
+    tv: actor.tokenVersion,
+  });
+
+  setAuthCookies(req, res, accessToken, rawRefreshToken);
+
+  return {
+    ok: true,
+    actor,
+    tokens: {
+      sessionId: session.id,
+      access_token: accessToken,
+      refresh_token: rawRefreshToken,
+      token_type: 'Bearer',
+      expires_in: ACCESS_TOKEN_TTL_SEC,
+    },
+  };
 }
 
 export function revokeCurrentSession(req: Request, res: Response): { revoked: boolean } {

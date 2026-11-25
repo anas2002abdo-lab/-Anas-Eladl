@@ -4,6 +4,7 @@ import { eq, getTableColumns, inArray, sql } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { isCloudSqlConfigured, pgDb } from '../db/index.ts';
 import * as schema from '../db/schema.ts';
+import { hydratePersistedAuthSecrets } from './auth.ts';
 
 export class CloudSqlUnavailableError extends Error {
   readonly statusCode = 503;
@@ -71,6 +72,8 @@ const SYNCED_TABLES: TableRegistryEntry[] = [
 
 const INITIALIZED_META_KEY = 'initialized_v1';
 const DATA_VERSION_META_KEY = 'data_version';
+const JWT_ACCESS_SECRET_META_KEY = 'jwt_access_secret_v1';
+const JWT_REFRESH_SECRET_META_KEY = 'jwt_refresh_secret_v1';
 const UPSERT_CHUNK_SIZE = 150;
 const DELETE_CHUNK_SIZE = 400;
 const READ_FRESHNESS_INTERVAL_MS = 4000;
@@ -480,6 +483,50 @@ export async function ensureHydratedFromCloudSql(
           localDataVersion = await seedCloudSqlFromSqlite(sqliteDb);
           lastVersionCheckAt = Date.now();
           console.log('[CloudSQL] Initialized fresh PostgreSQL database with Otlobha base seed data');
+        }
+
+        // Ensure durable JWT signing secrets exist in cloud_sql_meta so access tokens survive Cloud Run scale-to-zero & restarts
+        try {
+          const existingSecretRows = await withPgRetry('loadAuthSecrets', () =>
+            pgDb
+              .select()
+              .from(schema.cloudSqlMeta)
+              .where(inArray(schema.cloudSqlMeta.key, [JWT_ACCESS_SECRET_META_KEY, JWT_REFRESH_SECRET_META_KEY]))
+          );
+          let persistedAccess = existingSecretRows.find((r) => r.key === JWT_ACCESS_SECRET_META_KEY)?.value?.trim() || '';
+          let persistedRefresh = existingSecretRows.find((r) => r.key === JWT_REFRESH_SECRET_META_KEY)?.value?.trim() || '';
+
+          if (persistedAccess.length < 32 || persistedRefresh.length < 32) {
+            const candidateAccess = crypto.randomBytes(32).toString('hex');
+            const candidateRefresh = crypto.randomBytes(32).toString('hex');
+            await withPgRetry('seedAuthSecrets', async () => {
+              await pgDb
+                .insert(schema.cloudSqlMeta)
+                .values([
+                  { key: JWT_ACCESS_SECRET_META_KEY, value: candidateAccess, updated_at: new Date() },
+                  { key: JWT_REFRESH_SECRET_META_KEY, value: candidateRefresh, updated_at: new Date() },
+                ])
+                .onConflictDoNothing();
+            });
+            const verifiedRows = await withPgRetry('verifyAuthSecrets', () =>
+              pgDb
+                .select()
+                .from(schema.cloudSqlMeta)
+                .where(inArray(schema.cloudSqlMeta.key, [JWT_ACCESS_SECRET_META_KEY, JWT_REFRESH_SECRET_META_KEY]))
+            );
+            persistedAccess = verifiedRows.find((r) => r.key === JWT_ACCESS_SECRET_META_KEY)?.value?.trim() || candidateAccess;
+            persistedRefresh = verifiedRows.find((r) => r.key === JWT_REFRESH_SECRET_META_KEY)?.value?.trim() || candidateRefresh;
+          }
+
+          hydratePersistedAuthSecrets({
+            accessSecret: persistedAccess,
+            refreshSecret: persistedRefresh,
+          });
+        } catch (secretErr) {
+          console.warn(
+            '[CloudSQL] Auth secret hydration skipped:',
+            secretErr instanceof Error ? secretErr.message : secretErr
+          );
         }
 
         captureSnapshotFromSqlite(sqliteDb);
