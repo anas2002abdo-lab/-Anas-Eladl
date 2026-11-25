@@ -258,6 +258,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   const [storefrontLoading, setStorefrontLoading] = useState(false);
   const [storefrontPage, setStorefrontPage] = useState(1);
   const [storefrontHasMore, setStorefrontHasMore] = useState(false);
+  const storefrontShuffleSeedRef = useRef<string>('');
   const [storefrontFilter, setStorefrontFilter] = useState<
     'for_you' | 'fresh' | 'groceries' | 'offers' | 'free_delivery'
   >('for_you');
@@ -929,6 +930,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     const nextCat = opts?.categoryId !== undefined ? opts.categoryId : storefrontCategoryId;
     const nextBrand = opts?.brand !== undefined ? opts.brand : storefrontBrand;
     const nextMerchant = opts?.merchantId !== undefined ? opts.merchantId : storefrontMerchantId;
+    if (!opts?.append || !storefrontShuffleSeedRef.current) {
+      storefrontShuffleSeedRef.current = `${Date.now()}-${Math.floor(Math.random() * 1_000_000_000)}`;
+    }
     setStorefrontLoading(true);
     try {
       const res = await api.getStorefrontHome({
@@ -938,6 +942,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         merchant_id: nextMerchant || undefined,
         page: nextPage,
         limit: 24,
+        shuffle_seed: storefrontShuffleSeedRef.current,
       });
       setStorefrontBanners(res.banners || []);
       setStorefrontCategories(res.categories || []);

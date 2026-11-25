@@ -865,6 +865,7 @@ export const api = {
     brand?: string;
     page?: number;
     limit?: number;
+    shuffle_seed?: string;
   }) => {
     const qs = new URLSearchParams();
     if (params?.filter) qs.set('filter', params.filter);
@@ -873,12 +874,14 @@ export const api = {
     if (params?.brand) qs.set('brand', params.brand);
     if (params?.page) qs.set('page', String(params.page));
     if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.shuffle_seed) qs.set('shuffle_seed', params.shuffle_seed);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return request<{
       banners: any[];
       categories: any[];
       products: any[];
       brands: string[];
+      shuffle_seed?: string;
       pagination: { page: number; limit: number; total: number; has_more: boolean };
     }>(`/api/storefront/home${suffix}`);
   },

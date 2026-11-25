@@ -1499,6 +1499,7 @@ class OtlobhaCustomerApi {
     String? merchantId,
     int page = 1,
     int limit = 24,
+    String? shuffleSeed,
   }) async {
     final qp = <String, String>{
       'page': '$page',
@@ -1507,6 +1508,7 @@ class OtlobhaCustomerApi {
       if (categoryId != null && categoryId.isNotEmpty) 'category_id': categoryId,
       if (brand != null && brand.isNotEmpty) 'brand': brand,
       if (merchantId != null && merchantId.isNotEmpty) 'merchant_id': merchantId,
+      if (shuffleSeed != null && shuffleSeed.isNotEmpty) 'shuffle_seed': shuffleSeed,
     };
     final res = await _execute(
       () => http.get(

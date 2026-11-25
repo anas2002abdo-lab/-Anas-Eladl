@@ -2511,14 +2511,39 @@ export function registerMasterCatalogRoutes(app: Express): void {
   // A. Customer Storefront APIs
   // -------------------------------------------------------------------------
 
+  function seededProductScore(id: string, seed: string): number {
+    const input = `${seed}:${id}`;
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    h ^= h >>> 16;
+    h = Math.imul(h, 0x85ebca6b) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 0xc2b2ae35) >>> 0;
+    h ^= h >>> 16;
+    return h >>> 0;
+  }
+
   app.get('/api/storefront/home', (req: Request, res: Response) => {
     const filter = String(req.query.filter || 'for_you').trim(); // for_you | fresh | groceries | offers | free_delivery
     const categoryId = String(req.query.category_id || '').trim();
     const merchantId = String(req.query.merchant_id || '').trim();
     const brand = String(req.query.brand || '').trim();
+    const requestedSeed = String(req.query.shuffle_seed || '').trim();
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const limit = Math.min(40, Math.max(8, parseInt(String(req.query.limit || '24'), 10) || 24));
     const offset = (page - 1) * limit;
+    const isAllHomeFeed =
+      (filter === '' || filter === 'for_you' || filter === 'all') &&
+      !categoryId &&
+      !merchantId &&
+      !brand;
+
+    if (isAllHomeFeed) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    }
 
     const banners = (db
       .prepare('SELECT * FROM storefront_banners WHERE is_active = 1 ORDER BY sort_order ASC, created_at DESC')
@@ -2622,9 +2647,15 @@ export function registerMasterCatalogRoutes(app: Express): void {
           `)
           .get(...params) as { c: number });
 
-    const rawProducts = merchantId
-      ? (db
-          .prepare(`
+    const effectiveSeed = isAllHomeFeed
+      ? requestedSeed || `${Date.now()}-${Math.floor(Math.random() * 1_000_000_000)}`
+      : '';
+
+    let rawProducts: Array<Record<string, any>>;
+    if (isAllHomeFeed) {
+      const allDeduped = db
+        .prepare(`
+          SELECT * FROM (
             SELECT
               p.*,
               m.business_name_ar AS merchant_name,
@@ -2636,46 +2667,84 @@ export function registerMasterCatalogRoutes(app: Express): void {
               mp.brand AS master_brand,
               mp.size_label AS master_size_label,
               mp.image_url AS master_image_url,
-              mp.description AS master_description
+              mp.description AS master_description,
+              ROW_NUMBER() OVER (
+                PARTITION BY COALESCE(p.master_product_id, p.id)
+                ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC
+              ) AS rn
             FROM products p
             JOIN merchants m ON m.id = p.merchant_id
             LEFT JOIN categories c ON c.id = p.category_id
             LEFT JOIN master_products mp ON mp.id = p.master_product_id
             ${whereSql}
-            ORDER BY p.is_offer DESC, p.purchase_count DESC, COALESCE(p.sale_price, p.base_price) ASC, p.updated_at DESC
-            LIMIT ? OFFSET ?
-          `)
-          .all(...params, limit, offset) as Array<Record<string, any>>)
-      : (db
-          .prepare(`
-            SELECT * FROM (
-              SELECT
-                p.*,
-                m.business_name_ar AS merchant_name,
-                m.merchant_type,
-                c.name_ar AS category_name,
-                c.group_key AS category_group_key,
-                mp.canonical_name_ar AS master_name_ar,
-                mp.canonical_name_en AS master_name_en,
-                mp.brand AS master_brand,
-                mp.size_label AS master_size_label,
-                mp.image_url AS master_image_url,
-                mp.description AS master_description,
-                ROW_NUMBER() OVER (
-                  PARTITION BY COALESCE(p.master_product_id, p.id)
-                  ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC
-                ) AS rn
-              FROM products p
-              JOIN merchants m ON m.id = p.merchant_id
-              LEFT JOIN categories c ON c.id = p.category_id
-              LEFT JOIN master_products mp ON mp.id = p.master_product_id
-              ${whereSql}
-            ) sub
-            WHERE sub.rn = 1
-            ORDER BY sub.is_offer DESC, sub.purchase_count DESC, COALESCE(sub.sale_price, sub.base_price) ASC, sub.updated_at DESC
-            LIMIT ? OFFSET ?
-          `)
-          .all(...params, limit, offset) as Array<Record<string, any>>);
+          ) sub
+          WHERE sub.rn = 1
+        `)
+        .all(...params) as Array<Record<string, any>>;
+
+      allDeduped.sort((a, b) => {
+        const sa = seededProductScore(String(a.id || ''), effectiveSeed);
+        const sb = seededProductScore(String(b.id || ''), effectiveSeed);
+        if (sa !== sb) return sa - sb;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+      rawProducts = allDeduped.slice(offset, offset + limit);
+    } else if (merchantId) {
+      rawProducts = db
+        .prepare(`
+          SELECT
+            p.*,
+            m.business_name_ar AS merchant_name,
+            m.merchant_type,
+            c.name_ar AS category_name,
+            c.group_key AS category_group_key,
+            mp.canonical_name_ar AS master_name_ar,
+            mp.canonical_name_en AS master_name_en,
+            mp.brand AS master_brand,
+            mp.size_label AS master_size_label,
+            mp.image_url AS master_image_url,
+            mp.description AS master_description
+          FROM products p
+          JOIN merchants m ON m.id = p.merchant_id
+          LEFT JOIN categories c ON c.id = p.category_id
+          LEFT JOIN master_products mp ON mp.id = p.master_product_id
+          ${whereSql}
+          ORDER BY p.is_offer DESC, p.purchase_count DESC, COALESCE(p.sale_price, p.base_price) ASC, p.updated_at DESC
+          LIMIT ? OFFSET ?
+        `)
+        .all(...params, limit, offset) as Array<Record<string, any>>;
+    } else {
+      rawProducts = db
+        .prepare(`
+          SELECT * FROM (
+            SELECT
+              p.*,
+              m.business_name_ar AS merchant_name,
+              m.merchant_type,
+              c.name_ar AS category_name,
+              c.group_key AS category_group_key,
+              mp.canonical_name_ar AS master_name_ar,
+              mp.canonical_name_en AS master_name_en,
+              mp.brand AS master_brand,
+              mp.size_label AS master_size_label,
+              mp.image_url AS master_image_url,
+              mp.description AS master_description,
+              ROW_NUMBER() OVER (
+                PARTITION BY COALESCE(p.master_product_id, p.id)
+                ORDER BY p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC
+              ) AS rn
+            FROM products p
+            JOIN merchants m ON m.id = p.merchant_id
+            LEFT JOIN categories c ON c.id = p.category_id
+            LEFT JOIN master_products mp ON mp.id = p.master_product_id
+            ${whereSql}
+          ) sub
+          WHERE sub.rn = 1
+          ORDER BY sub.is_offer DESC, sub.purchase_count DESC, COALESCE(sub.sale_price, sub.base_price) ASC, sub.updated_at DESC
+          LIMIT ? OFFSET ?
+        `)
+        .all(...params, limit, offset) as Array<Record<string, any>>;
+    }
 
     const dedupedRows = rawProducts;
 
@@ -2695,6 +2764,7 @@ export function registerMasterCatalogRoutes(app: Express): void {
       categories: rolledCategories,
       products: enrichStorefrontProducts(dedupedRows),
       brands: brands.map((b) => b.brand_name),
+      ...(effectiveSeed ? { shuffle_seed: effectiveSeed } : {}),
       pagination: {
         page,
         limit,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../core/api_client.dart';
@@ -82,6 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loadingMore = false;
   bool _hasMore = false;
   int _page = 1;
+  String _shuffleSeed = '';
   String? _error;
 
   List<Map<String, dynamic>> _banners = [];
@@ -191,6 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _fetchStorefront({required bool reset}) async {
     if (reset) {
+      _shuffleSeed = '${DateTime.now().microsecondsSinceEpoch}_${math.Random().nextInt(1 << 30)}';
       if (mounted) {
         setState(() {
           _loading = true;
@@ -200,6 +203,9 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else {
       if (_loadingMore || !_hasMore) return;
+      if (_shuffleSeed.isEmpty) {
+        _shuffleSeed = '${DateTime.now().microsecondsSinceEpoch}_${math.Random().nextInt(1 << 30)}';
+      }
       if (mounted) setState(() => _loadingMore = true);
     }
 
@@ -212,6 +218,7 @@ class _HomeScreenState extends State<HomeScreen> {
         merchantId: widget.selectedMerchantId.isNotEmpty ? widget.selectedMerchantId : null,
         page: targetPage,
         limit: 24,
+        shuffleSeed: _shuffleSeed,
       );
       if (!mounted) return;
 
