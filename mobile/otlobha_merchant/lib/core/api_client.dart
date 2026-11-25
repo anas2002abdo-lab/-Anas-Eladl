@@ -411,6 +411,35 @@ class MerchantApiClient {
     return [];
   }
 
+  Future<Map<String, dynamic>> createCategory({
+    required String nameAr,
+    String? parentId,
+    String? imageUrl,
+  }) async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/categories');
+    final payload = <String, dynamic>{
+      'name_ar': nameAr.trim(),
+    };
+    if (parentId != null && parentId.trim().isNotEmpty) {
+      payload['parent_id'] = parentId.trim();
+    }
+    if (imageUrl != null && imageUrl.trim().isNotEmpty) {
+      payload['image_url'] = imageUrl.trim();
+    }
+    final res = await _authedRequest(() => http
+        .post(
+          uri,
+          headers: _headers(),
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 20)));
+    final data = _decode(res);
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    return <String, dynamic>{};
+  }
+
   Future<void> updateProduct({
     required String productId,
     String? nameAr,

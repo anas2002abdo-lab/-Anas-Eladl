@@ -216,6 +216,7 @@ class _MerchantEditProductSheetState extends State<_MerchantEditProductSheet> {
   late final TextEditingController _imageCtrl;
   late final TextEditingController _weightStepCtrl;
 
+  late List<Map<String, dynamic>> _categories;
   String? _selectedCategoryId;
   bool _isAvailable = true;
   bool _isOffer = false;
@@ -229,6 +230,7 @@ class _MerchantEditProductSheetState extends State<_MerchantEditProductSheet> {
   void initState() {
     super.initState();
     final p = widget.product;
+    _categories = List<Map<String, dynamic>>.from(widget.categories);
     _nameCtrl = TextEditingController(text: (p['name_ar'] ?? '').toString());
     _priceCtrl = TextEditingController(text: '${_toDouble(p['base_price'] ?? p['price'])}');
     final rawSale = p['sale_price'];
@@ -248,7 +250,7 @@ class _MerchantEditProductSheetState extends State<_MerchantEditProductSheet> {
     _weightStepCtrl = TextEditingController(text: '$_weightStep');
 
     final catId = (p['category_id'] ?? '').toString().trim();
-    if (catId.isNotEmpty && widget.categories.any((c) => '${c['id']}' == catId)) {
+    if (catId.isNotEmpty && _categories.any((c) => '${c['id']}' == catId)) {
       _selectedCategoryId = catId;
     }
   }
@@ -391,30 +393,20 @@ class _MerchantEditProductSheetState extends State<_MerchantEditProductSheet> {
                 ),
               ),
               const SizedBox(height: 10),
-              if (widget.categories.isNotEmpty) ...[
-                DropdownButtonFormField<String>(
-                  value: _selectedCategoryId,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'القسم',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  items: widget.categories
-                      .map(
-                        (c) => DropdownMenuItem<String>(
-                          value: '${c['id']}',
-                          child: Text(
-                            (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) => setState(() => _selectedCategoryId = v),
-                ),
-                const SizedBox(height: 10),
-              ],
+              _CategorySelectorWithAdd(
+                api: widget.api,
+                categories: _categories,
+                selectedCategoryId: _selectedCategoryId,
+                labelText: 'القسم',
+                onChanged: (v) => setState(() => _selectedCategoryId = v),
+                onCategoryCreated: (newId, updatedCats) {
+                  setState(() {
+                    _categories = updatedCats;
+                    _selectedCategoryId = newId;
+                  });
+                },
+              ),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   Expanded(
@@ -598,6 +590,7 @@ class _MerchantAddProductSheetState extends State<_MerchantAddProductSheet> {
   final _imageCtrl = TextEditingController();
   final _weightStepCtrl = TextEditingController(text: '0.25');
 
+  late List<Map<String, dynamic>> _categories;
   String? _selectedCategoryId;
   bool _isWeighted = false;
   double _weightStep = 0.25;
@@ -608,8 +601,9 @@ class _MerchantAddProductSheetState extends State<_MerchantAddProductSheet> {
   @override
   void initState() {
     super.initState();
-    if (widget.categories.isNotEmpty) {
-      _selectedCategoryId = '${widget.categories.first['id']}';
+    _categories = List<Map<String, dynamic>>.from(widget.categories);
+    if (_categories.isNotEmpty) {
+      _selectedCategoryId = '${_categories.first['id']}';
     }
   }
 
@@ -660,7 +654,7 @@ class _MerchantAddProductSheetState extends State<_MerchantAddProductSheet> {
     try {
       String? catPath;
       if (_selectedCategoryId != null) {
-        final found = widget.categories.where((c) => '${c['id']}' == _selectedCategoryId);
+        final found = _categories.where((c) => '${c['id']}' == _selectedCategoryId);
         if (found.isNotEmpty) {
           catPath = (found.first['full_path_ar'] ?? found.first['name_ar'] ?? '').toString();
         }
@@ -761,30 +755,20 @@ class _MerchantAddProductSheetState extends State<_MerchantAddProductSheet> {
                 ),
               ),
               const SizedBox(height: 10),
-              if (widget.categories.isNotEmpty) ...[
-                DropdownButtonFormField<String>(
-                  value: _selectedCategoryId,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'القسم',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  items: widget.categories
-                      .map(
-                        (c) => DropdownMenuItem<String>(
-                          value: '${c['id']}',
-                          child: Text(
-                            (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) => setState(() => _selectedCategoryId = v),
-                ),
-                const SizedBox(height: 10),
-              ],
+              _CategorySelectorWithAdd(
+                api: widget.api,
+                categories: _categories,
+                selectedCategoryId: _selectedCategoryId,
+                labelText: 'القسم',
+                onChanged: (v) => setState(() => _selectedCategoryId = v),
+                onCategoryCreated: (newId, updatedCats) {
+                  setState(() {
+                    _categories = updatedCats;
+                    _selectedCategoryId = newId;
+                  });
+                },
+              ),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   Expanded(
@@ -1307,11 +1291,14 @@ class _MerchantProductsSwipeDeck extends StatefulWidget {
 
 class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> {
   static const String _kEndSentinel = '__END__';
+  static const int _kPageSize = 50;
 
   final List<Map<String, dynamic>> _deck = [];
   List<Map<String, dynamic>> _categories = [];
   int _index = 0;
   int _baseOffset = 0;
+  int _nextPage = 1;
+  bool _serverSupportsCursor = false;
   bool _hasMore = true;
   bool _fetchingMore = false;
   int _totalAvailable = 0;
@@ -1321,6 +1308,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
   bool _busyAction = false;
   bool _changedAny = false;
   bool _completedAll = false;
+  String? _loadError;
   double _dragDx = 0;
   String? _lastSavedProductId;
   int _lastSavedCardIndex = -1;
@@ -1337,6 +1325,14 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
       unawaited(_ensureCategoriesLoaded());
     }
     unawaited(_initAndRestoreDeck());
+  }
+
+  @override
+  void dispose() {
+    if (_deck.isNotEmpty) {
+      _persistCurrentCardPosition(force: true);
+    }
+    super.dispose();
   }
 
   Future<void> _ensureCategoriesLoaded() async {
@@ -1390,7 +1386,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     _lastSavedProductId = productId;
     _lastSavedCardIndex = safeIdx;
 
-    // 1. Always write locally first so closing the app immediately never loses progress.
+    // 1. Always write locally first so closing the app or logging out immediately never loses progress.
     await _writeLocalBookmark(
       productId: productId,
       cardIndex: safeIdx,
@@ -1410,7 +1406,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
         pendingSync: false,
       );
     } catch (_) {
-      // Keep pending_sync=true locally so the next open automatically syncs it to server.
+      // Keep pending_sync=true locally so the next open automatically syncs it once server is reachable.
     }
   }
 
@@ -1426,7 +1422,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
           ),
         );
       }
-    } else if (!_hasMore && _totalAvailable > 0) {
+    } else if (!_hasMore && _completedAll && _totalAvailable > 0) {
       unawaited(
         _persistProgress(
           productId: _kEndSentinel,
@@ -1442,6 +1438,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
       setState(() {
         _loading = true;
         _completedAll = false;
+        _loadError = null;
       });
     }
 
@@ -1477,6 +1474,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
       isCompleted = progress['is_completed'] == true;
       loadedFromServer = true;
     } catch (_) {
+      loadedFromServer = false;
       if (local != null) {
         savedProductId = (local['product_id'] ?? '').toString().trim();
         resolvedOffset = _toInt(local['card_index']);
@@ -1485,6 +1483,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     }
 
     if (!mounted) return;
+    _serverSupportsCursor = loadedFromServer;
 
     if (isCompleted && (totalAvailable > 0 || !loadedFromServer)) {
       setState(() {
@@ -1501,105 +1500,221 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
 
     try {
       MerchantProductsPageResult res;
-      if (savedProductId.isNotEmpty && savedProductId != _kEndSentinel) {
-        res = await widget.api.fetchStoreProductsPage(
-          merchantId: widget.merchantId,
-          limit: 30,
-          noImageOnly: false,
-          availability: 'available',
-          sort: 'id_asc',
-          fromId: savedProductId,
-        );
-        if (res.items.isEmpty && totalAvailable > 0) {
-          final fallbackOffset = resolvedOffset.clamp(0, totalAvailable - 1);
+      int initialIndex = 0;
+      int initialBaseOffset = 0;
+      int nextPage = 2;
+
+      if (_serverSupportsCursor) {
+        if (savedProductId.isNotEmpty && savedProductId != _kEndSentinel) {
           res = await widget.api.fetchStoreProductsPage(
             merchantId: widget.merchantId,
-            limit: 30,
+            page: 1,
+            limit: _kPageSize,
             noImageOnly: false,
             availability: 'available',
             sort: 'id_asc',
-            offset: fallbackOffset,
+            fromId: savedProductId,
           );
-          resolvedOffset = fallbackOffset;
+          if (res.items.isEmpty && totalAvailable > 0) {
+            final fallbackOffset = resolvedOffset.clamp(0, totalAvailable - 1);
+            res = await widget.api.fetchStoreProductsPage(
+              merchantId: widget.merchantId,
+              page: (fallbackOffset ~/ _kPageSize) + 1,
+              limit: _kPageSize,
+              noImageOnly: false,
+              availability: 'available',
+              sort: 'id_asc',
+              offset: fallbackOffset,
+            );
+            resolvedOffset = fallbackOffset;
+          }
+        } else {
+          res = await widget.api.fetchStoreProductsPage(
+            merchantId: widget.merchantId,
+            page: (resolvedOffset ~/ _kPageSize) + 1,
+            limit: _kPageSize,
+            noImageOnly: false,
+            availability: 'available',
+            sort: 'id_asc',
+            offset: resolvedOffset,
+          );
         }
-      } else if (resolvedOffset > 0) {
-        res = await widget.api.fetchStoreProductsPage(
-          merchantId: widget.merchantId,
-          limit: 30,
-          noImageOnly: false,
-          availability: 'available',
-          sort: 'id_asc',
-          offset: resolvedOffset,
-        );
+        initialBaseOffset = resolvedOffset;
+        initialIndex = 0;
+        nextPage = (resolvedOffset ~/ _kPageSize) + 2;
       } else {
+        // Fallback mode when backend is running an older version without /swipe-progress & keyset params:
+        // Use standard page-based pagination so we resume directly on the saved page and traverse ALL products.
+        final targetPage = resolvedOffset > 0 ? (resolvedOffset ~/ _kPageSize) + 1 : 1;
         res = await widget.api.fetchStoreProductsPage(
           merchantId: widget.merchantId,
-          limit: 30,
+          page: targetPage,
+          limit: _kPageSize,
           noImageOnly: false,
           availability: 'available',
           sort: 'id_asc',
-          offset: 0,
         );
+        if (res.items.isEmpty && targetPage > 1) {
+          res = await widget.api.fetchStoreProductsPage(
+            merchantId: widget.merchantId,
+            page: 1,
+            limit: _kPageSize,
+            noImageOnly: false,
+            availability: 'available',
+            sort: 'id_asc',
+          );
+          initialBaseOffset = 0;
+          initialIndex = 0;
+          nextPage = 2;
+        } else {
+          initialBaseOffset = (res.page - 1) * res.limit;
+          nextPage = res.page + 1;
+          if (savedProductId.isNotEmpty && savedProductId != _kEndSentinel) {
+            final foundAt = res.items.indexWhere((e) => '${e['id']}' == savedProductId);
+            if (foundAt >= 0) {
+              initialIndex = foundAt;
+            } else if (res.items.isNotEmpty) {
+              initialIndex = (resolvedOffset - initialBaseOffset).clamp(0, res.items.length - 1);
+            }
+          } else if (resolvedOffset > 0 && res.items.isNotEmpty) {
+            initialIndex = (resolvedOffset - initialBaseOffset).clamp(0, res.items.length - 1);
+          }
+        }
       }
 
       if (!mounted) return;
       final computedTotal = totalAvailable > 0
           ? totalAvailable
-          : (res.totalAll - res.totalUnavailable).clamp(res.items.length, 999999);
+          : (res.totalAll > 0 ? (res.totalAll - res.totalUnavailable) : res.total).clamp(res.items.length, 999999);
+
       setState(() {
         _deck
           ..clear()
           ..addAll(res.items);
-        _index = 0;
-        _baseOffset = resolvedOffset.clamp(0, computedTotal);
+        _index = res.items.isNotEmpty ? initialIndex.clamp(0, res.items.length - 1) : 0;
+        _baseOffset = initialBaseOffset.clamp(0, computedTotal);
+        _nextPage = nextPage;
         _totalAvailable = computedTotal;
-        _hasMore = res.hasMore;
+        _hasMore = _serverSupportsCursor
+            ? res.hasMore
+            : (res.hasMore || res.page < res.totalPages);
         _completedAll = res.items.isEmpty && computedTotal > 0;
         _loading = false;
       });
 
+      // Only persist current position if we actually have items (never overwrite a saved bookmark on empty load).
       if (_deck.isNotEmpty) {
-        _persistCurrentCardPosition();
+        _lastSavedProductId = (_deck[_index]['id'] ?? '').toString().trim();
+        _lastSavedCardIndex = _currentAbsoluteIndex;
+        _maybePrefetch();
       }
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _loadError = e.toString();
+        });
+      }
     }
   }
 
   Future<void> _loadNextBatch() async {
     if (!_hasMore || _fetchingMore) return;
     _fetchingMore = true;
-    final wasAtEnd = _index >= _deck.length;
-    if (_deck.isEmpty && mounted) {
-      setState(() => _loading = true);
+    if (mounted) {
+      setState(() {
+        _loadError = null;
+        if (_deck.isEmpty || _index >= _deck.length) {
+          _loading = true;
+        }
+      });
     }
     try {
-      final lastId = _deck.isNotEmpty ? (_deck.last['id'] ?? '').toString().trim() : '';
-      final res = await widget.api.fetchStoreProductsPage(
-        merchantId: widget.merchantId,
-        limit: 30,
-        noImageOnly: false,
-        availability: 'available',
-        sort: 'id_asc',
-        afterId: lastId.isNotEmpty ? lastId : null,
-        offset: lastId.isEmpty ? _baseOffset : 0,
-      );
-      if (!mounted) return;
       final existingIds = _deck.map((e) => '${e['id']}').toSet();
-      final fresh = res.items.where((e) => !existingIds.contains('${e['id']}')).toList();
+      MerchantProductsPageResult res;
+      List<Map<String, dynamic>> fresh = const [];
+
+      if (_serverSupportsCursor) {
+        final lastId = _deck.isNotEmpty ? (_deck.last['id'] ?? '').toString().trim() : '';
+        res = await widget.api.fetchStoreProductsPage(
+          merchantId: widget.merchantId,
+          page: _nextPage,
+          limit: _kPageSize,
+          noImageOnly: false,
+          availability: 'available',
+          sort: 'id_asc',
+          afterId: lastId.isNotEmpty ? lastId : null,
+          offset: lastId.isEmpty ? _baseOffset : 0,
+        );
+        fresh = res.items.where((e) => !existingIds.contains('${e['id']}')).toList();
+
+        // Safety fallback: if server ignored after_id and returned duplicates while claiming hasMore,
+        // automatically switch to page-based pagination so we NEVER stop at 30/50 products!
+        if (fresh.isEmpty && (res.hasMore || res.page < res.totalPages)) {
+          _serverSupportsCursor = false;
+          res = await widget.api.fetchStoreProductsPage(
+            merchantId: widget.merchantId,
+            page: _nextPage,
+            limit: _kPageSize,
+            noImageOnly: false,
+            availability: 'available',
+            sort: 'id_asc',
+          );
+          fresh = res.items.where((e) => !existingIds.contains('${e['id']}')).toList();
+          _nextPage = res.page + 1;
+        }
+      } else {
+        // Page-based pagination: loop past any duplicate-only page caused by hidden items shifting offsets.
+        var pageToFetch = _nextPage;
+        res = const MerchantProductsPageResult.empty();
+        for (var attempts = 0; attempts < 3; attempts++) {
+          res = await widget.api.fetchStoreProductsPage(
+            merchantId: widget.merchantId,
+            page: pageToFetch,
+            limit: _kPageSize,
+            noImageOnly: false,
+            availability: 'available',
+            sort: 'id_asc',
+          );
+          fresh = res.items.where((e) => !existingIds.contains('${e['id']}')).toList();
+          pageToFetch = res.page + 1;
+          if (fresh.isNotEmpty || (!res.hasMore && res.page >= res.totalPages)) {
+            break;
+          }
+        }
+        _nextPage = pageToFetch;
+      }
+
+      if (!mounted) return;
+      final stillHasMore = _serverSupportsCursor
+          ? (res.hasMore && fresh.isNotEmpty)
+          : (res.hasMore || res.page < res.totalPages);
+
       setState(() {
         _deck.addAll(fresh);
         if (_totalAvailable == 0) {
-          _totalAvailable = (res.totalAll - res.totalUnavailable).clamp(_deck.length, 999999);
+          _totalAvailable = (res.totalAll > 0 ? (res.totalAll - res.totalUnavailable) : res.total)
+              .clamp(_deck.length, 999999);
         }
-        _hasMore = res.hasMore && fresh.isNotEmpty;
+        _hasMore = stillHasMore;
+        if (_index >= _deck.length && !_hasMore) {
+          _completedAll = true;
+        }
         _loading = false;
       });
-      if (wasAtEnd) {
+
+      if (_index < _deck.length) {
+        _persistCurrentCardPosition();
+      } else if (!_hasMore && _completedAll) {
         _persistCurrentCardPosition(force: true);
       }
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _loadError = e.toString();
+        });
+      }
     } finally {
       _fetchingMore = false;
     }
@@ -1610,9 +1725,11 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     setState(() {
       _busyAction = true;
       _loading = true;
+      _loadError = null;
       _skippedCount = 0;
       _hiddenCount = 0;
       _baseOffset = 0;
+      _nextPage = 1;
       _index = 0;
       _completedAll = false;
       _deck.clear();
@@ -1624,7 +1741,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
   }
 
   void _maybePrefetch() {
-    if (_hasMore && (_deck.length - _index) <= 6) {
+    if (_hasMore && !_fetchingMore && (_deck.length - _index) <= 10) {
       unawaited(_loadNextBatch());
     }
   }
@@ -1700,6 +1817,11 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
         api: widget.api,
         product: product,
         categories: _categories,
+        onCategoriesChanged: (updatedCats) {
+          if (mounted) {
+            setState(() => _categories = updatedCats);
+          }
+        },
       ),
     );
 
@@ -1836,6 +1958,39 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
             Expanded(
               child: _loading || (current == null && _hasMore && _fetchingMore)
                   ? const Center(child: CircularProgressIndicator())
+                  : current == null && _hasMore
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.cloud_sync_rounded, size: 56, color: Color(0xFFD97706)),
+                                const SizedBox(height: 12),
+                                const Text(
+                                  'يوجد المزيد من المنتجات للمراجعة',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w900),
+                                ),
+                                if (_loadError != null && _loadError!.trim().isNotEmpty) ...[
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _loadError!,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+                                  ),
+                                ],
+                                const SizedBox(height: 16),
+                                FilledButton.icon(
+                                  style: FilledButton.styleFrom(backgroundColor: _kBrandPrimary),
+                                  onPressed: _deck.isEmpty ? _initAndRestoreDeck : _loadNextBatch,
+                                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                                  label: const Text('تحميل الدفعة التالية'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        )
                   : current == null
                       ? Center(
                           child: Padding(
@@ -2198,11 +2353,13 @@ class _SwipeCardEditSheet extends StatefulWidget {
   final MerchantApiClient api;
   final Map<String, dynamic> product;
   final List<Map<String, dynamic>> categories;
+  final ValueChanged<List<Map<String, dynamic>>>? onCategoriesChanged;
 
   const _SwipeCardEditSheet({
     required this.api,
     required this.product,
     required this.categories,
+    this.onCategoriesChanged,
   });
 
   @override
@@ -2214,6 +2371,7 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
   late final TextEditingController _imageCtrl;
   late final TextEditingController _priceCtrl;
   late final TextEditingController _stockCtrl;
+  late List<Map<String, dynamic>> _categories;
   String? _selectedCategoryId;
   bool _saving = false;
   String? _error;
@@ -2222,16 +2380,17 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
   void initState() {
     super.initState();
     final p = widget.product;
+    _categories = List<Map<String, dynamic>>.from(widget.categories);
     _nameCtrl = TextEditingController(text: (p['name_ar'] ?? '').toString());
     _imageCtrl = TextEditingController(text: (p['image_url'] ?? '').toString());
     _priceCtrl = TextEditingController(text: _toDouble(p['base_price'] ?? p['price']).toString());
     _stockCtrl = TextEditingController(text: _toInt(p['stock_quantity']).toString());
 
     final catId = (p['category_id'] ?? '').toString();
-    if (catId.isNotEmpty && widget.categories.any((c) => '${c['id']}' == catId)) {
+    if (catId.isNotEmpty && _categories.any((c) => '${c['id']}' == catId)) {
       _selectedCategoryId = catId;
-    } else if (widget.categories.isNotEmpty) {
-      _selectedCategoryId = '${widget.categories.first['id']}';
+    } else if (_categories.isNotEmpty) {
+      _selectedCategoryId = '${_categories.first['id']}';
     }
   }
 
@@ -2275,7 +2434,7 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
 
       String nextCategoryName = (widget.product['category_name'] ?? widget.product['category_name_ar'] ?? 'بدون قسم').toString();
       if (_selectedCategoryId != null) {
-        final match = widget.categories.where((c) => '${c['id']}' == _selectedCategoryId);
+        final match = _categories.where((c) => '${c['id']}' == _selectedCategoryId);
         if (match.isNotEmpty) {
           nextCategoryName = (match.first['full_path_ar'] ?? match.first['name_ar'] ?? nextCategoryName).toString();
         }
@@ -2360,30 +2519,21 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
                   ),
                 ),
               ],
-              if (widget.categories.isNotEmpty) ...[
-                DropdownButtonFormField<String>(
-                  value: _selectedCategoryId,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'قسم المنتج',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  items: widget.categories
-                      .map(
-                        (c) => DropdownMenuItem<String>(
-                          value: '${c['id']}',
-                          child: Text(
-                            (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) => setState(() => _selectedCategoryId = v),
-                ),
-                const SizedBox(height: 10),
-              ],
+              _CategorySelectorWithAdd(
+                api: widget.api,
+                categories: _categories,
+                selectedCategoryId: _selectedCategoryId,
+                labelText: 'قسم المنتج',
+                onChanged: (v) => setState(() => _selectedCategoryId = v),
+                onCategoryCreated: (newId, updatedCats) {
+                  setState(() {
+                    _categories = updatedCats;
+                    _selectedCategoryId = newId;
+                  });
+                  widget.onCategoriesChanged?.call(updatedCats);
+                },
+              ),
+              const SizedBox(height: 10),
               TextField(
                 controller: _nameCtrl,
                 decoration: const InputDecoration(
@@ -2462,6 +2612,313 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CategorySelectorWithAdd extends StatelessWidget {
+  final MerchantApiClient api;
+  final List<Map<String, dynamic>> categories;
+  final String? selectedCategoryId;
+  final String labelText;
+  final ValueChanged<String?> onChanged;
+  final void Function(String newCategoryId, List<Map<String, dynamic>> updatedCategories) onCategoryCreated;
+
+  const _CategorySelectorWithAdd({
+    required this.api,
+    required this.categories,
+    required this.selectedCategoryId,
+    required this.labelText,
+    required this.onChanged,
+    required this.onCategoryCreated,
+  });
+
+  Future<void> _openCreateDialog(BuildContext context) async {
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => _CreateCategoryDialog(
+        api: api,
+        categories: categories,
+      ),
+    );
+    if (result == null) return;
+    final newId = (result['id'] ?? '').toString().trim();
+    final updatedCats = (result['categories'] as List<Map<String, dynamic>>?) ?? categories;
+    final createdName = (result['name_ar'] ?? '').toString().trim();
+    if (newId.isNotEmpty) {
+      onCategoryCreated(newId, updatedCats);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 2),
+            backgroundColor: _kBrandGreen,
+            content: Text('تم إضافة القسم "$createdName" واختياره بنجاح ✓'),
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final validSelected = (selectedCategoryId != null &&
+            categories.any((c) => '${c['id']}' == selectedCategoryId))
+        ? selectedCategoryId
+        : null;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: DropdownButtonFormField<String>(
+            value: validSelected,
+            isExpanded: true,
+            decoration: InputDecoration(
+              labelText: labelText,
+              hintText: categories.isEmpty ? 'لا توجد أقسام بعد — أضف قسمًا جديدًا' : 'اختر القسم',
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: categories
+                .map(
+                  (c) => DropdownMenuItem<String>(
+                    value: '${c['id']}',
+                    child: Text(
+                      (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: categories.isEmpty ? null : onChanged,
+          ),
+        ),
+        const SizedBox(width: 8),
+        FilledButton.tonalIcon(
+          onPressed: () => _openCreateDialog(context),
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFFFEF3C7),
+            foregroundColor: const Color(0xFF92400E),
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 13),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          icon: const Icon(Icons.add_circle_outline_rounded, size: 18),
+          label: const Text(
+            'قسم جديد',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CreateCategoryDialog extends StatefulWidget {
+  final MerchantApiClient api;
+  final List<Map<String, dynamic>> categories;
+
+  const _CreateCategoryDialog({
+    required this.api,
+    required this.categories,
+  });
+
+  @override
+  State<_CreateCategoryDialog> createState() => _CreateCategoryDialogState();
+}
+
+class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
+  final TextEditingController _nameCtrl = TextEditingController();
+  final TextEditingController _imageCtrl = TextEditingController();
+  String? _parentId;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _imageCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'يرجى كتابة اسم القسم الجديد');
+      return;
+    }
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    try {
+      final created = await widget.api.createCategory(
+        nameAr: name,
+        parentId: _parentId,
+        imageUrl: _imageCtrl.text.trim(),
+      );
+      final newId = (created['id'] ?? '').toString().trim();
+      if (newId.isEmpty) {
+        throw Exception('تعذر استلام معرف القسم الجديد من الخادم');
+      }
+
+      List<Map<String, dynamic>> refreshed = List<Map<String, dynamic>>.from(widget.categories);
+      try {
+        final serverCats = await widget.api.fetchCategories();
+        if (serverCats.isNotEmpty) {
+          refreshed = serverCats;
+        }
+      } catch (_) {}
+
+      if (!refreshed.any((c) => '${c['id']}' == newId)) {
+        String fullPath = name;
+        if (_parentId != null) {
+          final parentMatch = refreshed.where((c) => '${c['id']}' == _parentId);
+          if (parentMatch.isNotEmpty) {
+            final pName = (parentMatch.first['full_path_ar'] ?? parentMatch.first['name_ar'] ?? '')
+                .toString()
+                .replaceAll(';', '')
+                .trim();
+            if (pName.isNotEmpty) {
+              fullPath = '$pName > $name';
+            }
+          }
+        }
+        refreshed.add({
+          'id': newId,
+          'name_ar': name,
+          'full_path_ar': fullPath,
+          'parent_id': _parentId,
+          'image_url': _imageCtrl.text.trim(),
+        });
+      }
+
+      if (!mounted) return;
+      Navigator.pop<Map<String, dynamic>>(context, {
+        'id': newId,
+        'name_ar': name,
+        'categories': refreshed,
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Directionality(
+      textDirection: TextDirection.rtl,
+      child: AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.create_new_folder_rounded, color: _kBrandPrimary, size: 24),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'إضافة قسم جديد',
+                style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w900),
+              ),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (_error != null) ...[
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEE2E2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(color: Color(0xFFB91C1C), fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+              TextField(
+                controller: _nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'اسم القسم الجديد *',
+                  hintText: 'مثال: مخبوزات طازجة أو بقالة > زيوت',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 10),
+              if (widget.categories.isNotEmpty) ...[
+                DropdownButtonFormField<String?>(
+                  value: _parentId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'القسم الأب (اختياري)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('بدون (قسم رئيسي)'),
+                    ),
+                    ...widget.categories.map(
+                      (c) => DropdownMenuItem<String?>(
+                        value: '${c['id']}',
+                        child: Text(
+                          (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
+                  onChanged: (v) => setState(() => _parentId = v),
+                ),
+                const SizedBox(height: 10),
+              ],
+              TextField(
+                controller: _imageCtrl,
+                textDirection: TextDirection.ltr,
+                decoration: const InputDecoration(
+                  labelText: 'رابط صورة القسم (اختياري)',
+                  hintText: 'https://...',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: _saving ? null : () => Navigator.pop(context, null),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton.icon(
+            onPressed: _saving ? null : _submit,
+            style: FilledButton.styleFrom(backgroundColor: _kBrandPrimary),
+            icon: _saving
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Icon(Icons.check_rounded, size: 18),
+            label: Text(_saving ? 'جاري الإضافة...' : 'إضافة واختيار'),
+          ),
+        ],
       ),
     );
   }

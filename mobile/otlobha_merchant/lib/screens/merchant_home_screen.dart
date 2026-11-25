@@ -1024,6 +1024,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                       merchantId: _merchantId,
                       categories: _categories,
                     );
+                    await _loadCategories();
                     if (changed) {
                       await _refreshProducts(page: _productsPage);
                     }
@@ -1289,6 +1290,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                                             product: p,
                                             categories: _categories,
                                           );
+                                          await _loadCategories();
                                           if (updated) {
                                             await _refreshProducts(page: _productsPage);
                                             _snack('تم حفظ تعديلات المنتج بنجاح');
@@ -1403,6 +1405,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                             merchantId: _merchantId,
                             categories: _categories,
                           );
+                          await _loadCategories();
                           if (added) {
                             await _refreshApprovalRequests();
                             await _refreshProducts(page: 1);
