@@ -5,12 +5,16 @@ import {
   Check,
   CreditCard,
   Headphones,
+  Link2,
   MessageSquare,
+  QrCode,
   RefreshCw,
   Save,
   Send,
   ShieldCheck,
   Smartphone,
+  Trash2,
+  Upload,
   UserCheck,
 } from 'lucide-react';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
@@ -57,6 +61,46 @@ const ORDER_STATUS_AR: Record<string, { ar: string; en: string; cls: string }> =
   ready_for_pickup: { ar: 'جاهز للاستلام', en: 'Ready', cls: 'bg-indigo-100 text-indigo-800' },
   on_the_way: { ar: 'في الطريق', en: 'On The Way', cls: 'bg-teal-100 text-teal-800' },
 };
+
+function compressQrImageFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('تعذّر قراءة صورة الباركود'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('الملف المختار ليس صورة صالحة'));
+      img.onload = () => {
+        const maxDim = 900;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxDim || h > maxDim) {
+          const ratio = Math.min(maxDim / w, maxDim / h);
+          w = Math.max(1, Math.round(w * ratio));
+          h = Math.max(1, Math.round(h * ratio));
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(String(reader.result || ''));
+          return;
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const pngData = canvas.toDataURL('image/png');
+        if (pngData.length <= 450_000) {
+          resolve(pngData);
+        } else {
+          resolve(canvas.toDataURL('image/jpeg', 0.9));
+        }
+      };
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export const OverviewSection: React.FC<Props> = ({
   lang,
@@ -1024,12 +1068,12 @@ export const OverviewSection: React.FC<Props> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                {isAr ? 'إعدادات الدفع ووسائل التحصيل المالي' : 'Payment Settings & Gateways'}
+                {isAr ? 'وحدة تحكم الدفع (فودافون كاش · إنستا باي · كاش)' : 'Payment Control Unit (Vodafone Cash · InstaPay · COD)'}
               </h3>
               <p className="text-xs text-slate-500">
                 {isAr
-                  ? 'التحكم المباشر في قنوات الدفع التي تظهر لكل عميل عند إتمام الطلب (كاش عند الاستلام، بطاقة شبكة/POS مع الكابتن، محفظة إلكترونية)'
-                  : 'Control customer payment methods: Cash on Delivery, POS Card with Captain, and Wallets'}
+                  ? 'أضف رقم فودافون كاش وصورة باركود ورابط إنستا باي لتظهر للعميل فورًا عند اختيار وسيلة الدفع مع زر إرفاق صورة التحويل'
+                  : 'Configure Vodafone Cash wallet number, InstaPay QR barcode and copyable link shown to customers at checkout'}
               </p>
             </div>
           </div>
@@ -1056,8 +1100,227 @@ export const OverviewSection: React.FC<Props> = ({
         {!paymentSettings ? (
           <div className="h-32 bg-slate-50 border border-slate-100 rounded-xl animate-pulse" />
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* 1. Cash On Delivery */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* 1. Vodafone Cash Control Unit */}
+            <div
+              className={`rounded-xl border p-4 transition-all space-y-3 ${
+                paymentSettings.vodafone_cash_enabled
+                  ? 'bg-rose-50/40 border-rose-200'
+                  : 'bg-slate-50 border-slate-200 opacity-75'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-9 h-9 rounded-lg flex items-center justify-center font-bold ${
+                      paymentSettings.vodafone_cash_enabled ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-500'
+                    }`}
+                  >
+                    <Smartphone className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900">{isAr ? 'وحدة تحكم فودافون كاش' : 'Vodafone Cash Control'}</h4>
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        paymentSettings.vodafone_cash_enabled ? 'bg-red-100 text-red-800' : 'bg-slate-200 text-slate-600'
+                      }`}
+                    >
+                      {paymentSettings.vodafone_cash_enabled ? (isAr ? 'مفعّل للعملاء' : 'Enabled') : (isAr ? 'معطّل مؤقتًا' : 'Disabled')}
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleSavePaymentSettings({ vodafone_cash_enabled: !paymentSettings.vodafone_cash_enabled })}
+                  className={`px-2.5 py-1 rounded text-xs font-bold transition-colors ${
+                    paymentSettings.vodafone_cash_enabled
+                      ? 'bg-red-600 text-white hover:bg-red-700'
+                      : 'bg-slate-300 text-slate-700 hover:bg-slate-400'
+                  }`}
+                >
+                  {paymentSettings.vodafone_cash_enabled ? (isAr ? 'إيقاف' : 'Disable') : (isAr ? 'تفعيل' : 'Enable')}
+                </button>
+              </div>
+
+              <div className="space-y-2.5 pt-2 border-t border-rose-200/70 text-xs">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    {isAr ? 'رقم فودافون كاش (الذي سيرسل عليه العميل المبلغ):' : 'Vodafone Cash Wallet Number:'}
+                  </label>
+                  <input
+                    type="tel"
+                    dir="ltr"
+                    placeholder="010XXXXXXXX"
+                    value={paymentSettings.vodafone_cash_number || ''}
+                    onChange={(e) =>
+                      setPaymentSettings({ ...paymentSettings, vodafone_cash_number: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-white border border-rose-200 rounded-lg text-sm font-mono-num font-bold text-slate-900 focus:outline-none focus:border-red-500 text-left"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    {isAr ? 'إرشادات التحويل للعميل:' : 'Customer Instructions:'}
+                  </label>
+                  <input
+                    type="text"
+                    value={paymentSettings.vodafone_cash_instructions_ar || ''}
+                    onChange={(e) =>
+                      setPaymentSettings({ ...paymentSettings, vodafone_cash_instructions_ar: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-red-500"
+                  />
+                </div>
+                <p className="text-[11px] text-rose-800 bg-white/80 border border-rose-100 rounded-lg px-2.5 py-1.5">
+                  {isAr
+                    ? 'عند اختيار العميل «فودافون كاش» سيظهر له هذا الرقم قابل للنسخ + زر «إضافة صورة التحويل» لإرفاق الإيصال مع الطلب.'
+                    : 'Customers see this number with one-tap copy and a receipt upload button.'}
+                </p>
+              </div>
+            </div>
+
+            {/* 2. InstaPay Control Unit */}
+            <div
+              className={`rounded-xl border p-4 transition-all space-y-3 ${
+                paymentSettings.instapay_enabled
+                  ? 'bg-purple-50/40 border-purple-200'
+                  : 'bg-slate-50 border-slate-200 opacity-75'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className={`w-9 h-9 rounded-lg flex items-center justify-center font-bold ${
+                      paymentSettings.instapay_enabled ? 'bg-purple-600 text-white' : 'bg-slate-200 text-slate-500'
+                    }`}
+                  >
+                    <QrCode className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900">{isAr ? 'وحدة تحكم إنستا باي (InstaPay)' : 'InstaPay Control'}</h4>
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        paymentSettings.instapay_enabled ? 'bg-purple-100 text-purple-800' : 'bg-slate-200 text-slate-600'
+                      }`}
+                    >
+                      {paymentSettings.instapay_enabled ? (isAr ? 'مفعّل للعملاء' : 'Enabled') : (isAr ? 'معطّل مؤقتًا' : 'Disabled')}
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleSavePaymentSettings({ instapay_enabled: !paymentSettings.instapay_enabled })}
+                  className={`px-2.5 py-1 rounded text-xs font-bold transition-colors ${
+                    paymentSettings.instapay_enabled
+                      ? 'bg-purple-600 text-white hover:bg-purple-700'
+                      : 'bg-slate-300 text-slate-700 hover:bg-slate-400'
+                  }`}
+                >
+                  {paymentSettings.instapay_enabled ? (isAr ? 'إيقاف' : 'Disable') : (isAr ? 'تفعيل' : 'Enable')}
+                </button>
+              </div>
+
+              <div className="space-y-2.5 pt-2 border-t border-purple-200/70 text-xs">
+                <div className="flex flex-col sm:flex-row items-start gap-3">
+                  <div className="shrink-0">
+                    {paymentSettings.instapay_qr_image_url ? (
+                      <div className="relative w-24 h-24 rounded-xl border border-purple-200 bg-white p-1.5 shadow-xs">
+                        <img
+                          src={paymentSettings.instapay_qr_image_url}
+                          alt="InstaPay QR"
+                          className="w-full h-full object-contain rounded"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setPaymentSettings({ ...paymentSettings, instapay_qr_image_url: '' })}
+                          className="absolute -top-2 -left-2 w-6 h-6 rounded-full bg-rose-600 text-white flex items-center justify-center shadow hover:bg-rose-700"
+                          title={isAr ? 'حذف صورة الباركود' : 'Remove QR image'}
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="w-24 h-24 rounded-xl border-2 border-dashed border-purple-200 bg-white flex flex-col items-center justify-center text-purple-400 gap-1">
+                        <QrCode className="w-7 h-7" />
+                        <span className="text-[10px] font-semibold text-center px-1">{isAr ? 'لا يوجد باركود' : 'No QR'}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-w-0 space-y-2 w-full">
+                    <label className="block text-[11px] font-bold text-slate-700">
+                      {isAr ? 'صورة باركود / QR إنستا باي:' : 'InstaPay QR Barcode Image:'}
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{isAr ? 'رفع صورة باركود إنستا باي' : 'Upload InstaPay QR'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!file) return;
+                          try {
+                            const dataUrl = await compressQrImageFile(file);
+                            setPaymentSettings((prev) => (prev ? { ...prev, instapay_qr_image_url: dataUrl } : prev));
+                            onNotify?.(isAr ? 'تم تحميل صورة باركود إنستا باي — اضغط «حفظ إعدادات الدفع» للتأكيد' : 'QR loaded — click Save');
+                          } catch (err) {
+                            onNotify?.((err as Error).message);
+                          }
+                        }}
+                      />
+                    </label>
+                    <input
+                      type="text"
+                      dir="ltr"
+                      placeholder="أو الصق رابط صورة الباركود (https://...)"
+                      value={paymentSettings.instapay_qr_image_url?.startsWith('data:') ? '' : paymentSettings.instapay_qr_image_url || ''}
+                      onChange={(e) =>
+                        setPaymentSettings({ ...paymentSettings, instapay_qr_image_url: e.target.value })
+                      }
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-700 focus:outline-none focus:border-purple-500 text-left"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="flex items-center gap-1 text-[11px] font-bold text-slate-700 mb-1">
+                    <Link2 className="w-3.5 h-3.5 text-purple-600" />
+                    <span>{isAr ? 'رابط / عنوان إنستا باي القابل للنسخ (يظهر أسفل الباركود):' : 'Copyable InstaPay Link / IPA:'}</span>
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    placeholder="https://ipn.eg/S/... أو username@instapay"
+                    value={paymentSettings.instapay_link || ''}
+                    onChange={(e) =>
+                      setPaymentSettings({ ...paymentSettings, instapay_link: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-white border border-purple-200 rounded-lg text-xs font-mono-num font-bold text-slate-900 focus:outline-none focus:border-purple-500 text-left"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    {isAr ? 'إرشادات إنستا باي للعميل:' : 'Customer Instructions:'}
+                  </label>
+                  <input
+                    type="text"
+                    value={paymentSettings.instapay_instructions_ar || ''}
+                    onChange={(e) =>
+                      setPaymentSettings({ ...paymentSettings, instapay_instructions_ar: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Cash On Delivery */}
             <div
               className={`rounded-xl border p-4 transition-all space-y-3 ${
                 paymentSettings.cod_enabled
@@ -1129,7 +1392,7 @@ export const OverviewSection: React.FC<Props> = ({
               </div>
             </div>
 
-            {/* 2. Network / POS Card Machine */}
+            {/* 4. Network / POS Card Machine */}
             <div
               className={`rounded-xl border p-4 transition-all space-y-3 ${
                 paymentSettings.network_pos_enabled
@@ -1196,75 +1459,6 @@ export const OverviewSection: React.FC<Props> = ({
                       setPaymentSettings({ ...paymentSettings, network_instructions_ar: e.target.value })
                     }
                     className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* 3. Digital Wallet & InstaPay */}
-            <div
-              className={`rounded-xl border p-4 transition-all space-y-3 ${
-                paymentSettings.wallet_enabled
-                  ? 'bg-purple-50/40 border-purple-200'
-                  : 'bg-slate-50 border-slate-200 opacity-75'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <div
-                    className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
-                      paymentSettings.wallet_enabled ? 'bg-purple-600 text-white' : 'bg-slate-200 text-slate-500'
-                    }`}
-                  >
-                    <Smartphone className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-900">{isAr ? 'محفظة إلكترونية / إنستاباي' : 'Wallet & InstaPay'}</h4>
-                    <span
-                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        paymentSettings.wallet_enabled ? 'bg-purple-100 text-purple-800' : 'bg-slate-200 text-slate-600'
-                      }`}
-                    >
-                      {paymentSettings.wallet_enabled ? (isAr ? 'مفعّل للعملاء' : 'Enabled') : (isAr ? 'معطّل مؤقتًا' : 'Disabled')}
-                    </span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleSavePaymentSettings({ wallet_enabled: !paymentSettings.wallet_enabled })}
-                  className={`px-2.5 py-1 rounded text-xs font-bold transition-colors ${
-                    paymentSettings.wallet_enabled
-                      ? 'bg-purple-600 text-white hover:bg-purple-700'
-                      : 'bg-slate-300 text-slate-700 hover:bg-slate-400'
-                  }`}
-                >
-                  {paymentSettings.wallet_enabled ? (isAr ? 'إيقاف' : 'Disable') : (isAr ? 'تفعيل' : 'Enable')}
-                </button>
-              </div>
-
-              <div className="space-y-2 pt-2 border-t border-slate-200/60 text-xs">
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    {isAr ? 'حالة التفعيل عبر المنصة:' : 'Platform Status:'}
-                  </label>
-                  <p className="text-[11px] text-slate-600 bg-white p-2 border border-slate-200 rounded-lg">
-                    {isAr
-                      ? 'فودافون كاش، أورنج، اتصالات، وشبكة InstaPay المعتمدة'
-                      : 'Vodafone Cash, Orange, Etisalat, InstaPay'}
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    {isAr ? 'إرشادات المحفظة للعميل:' : 'Customer Instructions:'}
-                  </label>
-                  <input
-                    type="text"
-                    value={paymentSettings.wallet_instructions_ar}
-                    onChange={(e) =>
-                      setPaymentSettings({ ...paymentSettings, wallet_instructions_ar: e.target.value })
-                    }
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-700 focus:outline-none focus:border-purple-500"
                   />
                 </div>
               </div>

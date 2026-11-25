@@ -82,7 +82,6 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loadingMore = false;
   bool _hasMore = false;
   int _page = 1;
-  int _totalCount = 0;
   String? _error;
 
   List<Map<String, dynamic>> _banners = [];
@@ -264,7 +263,6 @@ class _HomeScreenState extends State<HomeScreen> {
         }
         _page = targetPage;
         _hasMore = pagination['has_more'] == true;
-        _totalCount = (pagination['total'] as num?)?.toInt() ?? _products.length;
         _loading = false;
         _loadingMore = false;
         _error = null;
@@ -1600,50 +1598,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-                // 6. Products Section Header
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
-                    child: Row(
-                      children: [
-                        const Text(
-                          'تصفح المنتجات',
-                          style: TextStyle(
-                            fontSize: 16.5,
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xFF0F172A),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        if (!_loading)
-                          Text(
-                            '$_totalCount منتج',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF64748B),
-                            ),
-                          ),
-                        const Spacer(),
-                        const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.swipe_rounded, size: 14, color: Color(0xFFA92224)),
-                            SizedBox(width: 4),
-                            Text(
-                              'اسحب بين التفاصيل',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
-                                color: Color(0xFFA92224),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+                // 6. Compact spacing before Products Grid
+                const SliverToBoxAdapter(child: SizedBox(height: 10)),
 
                 // 7. Products 2-Column Grid with 16px Gap
                 if (_loading)

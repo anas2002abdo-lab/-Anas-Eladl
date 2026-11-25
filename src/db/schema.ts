@@ -165,6 +165,13 @@ export const paymentSettings = pgTable('payment_settings', {
   cod_instructions_ar: text('cod_instructions_ar').notNull().default(''),
   network_instructions_ar: text('network_instructions_ar').notNull().default(''),
   wallet_instructions_ar: text('wallet_instructions_ar').notNull().default(''),
+  vodafone_cash_enabled: integer('vodafone_cash_enabled').notNull().default(1),
+  vodafone_cash_number: text('vodafone_cash_number').notNull().default(''),
+  vodafone_cash_instructions_ar: text('vodafone_cash_instructions_ar').notNull().default(''),
+  instapay_enabled: integer('instapay_enabled').notNull().default(1),
+  instapay_qr_image_url: text('instapay_qr_image_url').notNull().default(''),
+  instapay_link: text('instapay_link').notNull().default(''),
+  instapay_instructions_ar: text('instapay_instructions_ar').notNull().default(''),
   updated_at: text('updated_at').notNull().default(''),
 });
 
@@ -531,6 +538,7 @@ export const orders = pgTable(
     discount_amount: doublePrecision('discount_amount').notNull().default(0),
     total_amount: doublePrecision('total_amount').notNull().default(0),
     payment_method: text('payment_method').notNull().default('cash'),
+    payment_proof_image_url: text('payment_proof_image_url'),
     prescription_status: text('prescription_status'),
     prescription_image_url: text('prescription_image_url'),
     delivery_proof_image_url: text('delivery_proof_image_url'),

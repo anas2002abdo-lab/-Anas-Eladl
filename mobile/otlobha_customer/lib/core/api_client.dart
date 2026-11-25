@@ -982,6 +982,16 @@ class OtlobhaCustomerApi {
     return _decode(res, endpointHint: '/api/orders/bundle');
   }
 
+  Future<Map<String, dynamic>> getPaymentSettings() async {
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/payment-settings'),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/payment-settings');
+  }
+
   Future<Map<String, dynamic>> requestRide(Map<String, dynamic> payload) async {
     final res = await _sendWithAuth(
       (h) => http.post(_apiUri('/api/mobile/rides'), headers: h, body: jsonEncode(payload)),
@@ -1500,7 +1510,7 @@ class OtlobhaCustomerApi {
           if (history.isNotEmpty) 'history': history,
         }),
       ),
-      timeout: const Duration(seconds: 35),
+      timeout: const Duration(seconds: 45),
     );
     return _decode(res, endpointHint: '/api/storefront/assistant');
   }

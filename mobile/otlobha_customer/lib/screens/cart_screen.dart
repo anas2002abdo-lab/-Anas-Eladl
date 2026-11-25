@@ -1,4 +1,8 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import '../core/api_client.dart';
 
 class CartScreen extends StatefulWidget {
@@ -59,9 +63,35 @@ class _CartScreenState extends State<CartScreen> {
   final TextEditingController _freeTextCtrl = TextEditingController();
   final TextEditingController _orderNotesCtrl = TextEditingController();
   late final TextEditingController _couponCtrl = TextEditingController(text: widget.couponCode);
+  final ImagePicker _imagePicker = ImagePicker();
   bool _isExpress = false;
   bool _submitting = false;
   String _paymentMethod = 'cash'; // cash | instapay | vodafone_cash
+  Map<String, dynamic> _paymentSettings = const {};
+  String? _paymentProofDataUrl;
+  Uint8List? _paymentProofBytes;
+
+  @override
+  void initState() {
+    super.initState();
+    final bootPay = widget.bootstrap['payment_settings'];
+    if (bootPay is Map) {
+      _paymentSettings = Map<String, dynamic>.from(bootPay);
+    }
+    _refreshPaymentSettings();
+  }
+
+  Future<void> _refreshPaymentSettings() async {
+    try {
+      final live = await widget.api.getPaymentSettings();
+      if (!mounted) return;
+      setState(() {
+        _paymentSettings = live;
+      });
+    } catch (_) {
+      // Fall back silently to bootstrap payment_settings
+    }
+  }
 
   @override
   void dispose() {
@@ -82,11 +112,424 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
+  Future<void> _copyText(String value, String label) async {
+    final clean = value.trim();
+    if (clean.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: clean));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('تم نسخ $label: $clean'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _pickTransferReceipt(ImageSource source) async {
+    try {
+      final picked = await _imagePicker.pickImage(
+        source: source,
+        maxWidth: 1200,
+        imageQuality: 78,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      final dataUrl = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      if (!mounted) return;
+      setState(() {
+        _paymentProofBytes = bytes;
+        _paymentProofDataUrl = dataUrl;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تم إرفاق صورة إيصال التحويل بنجاح'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('تعذّر اختيار الصورة: $e')),
+      );
+    }
+  }
+
+  void _showReceiptSourceSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'إضافة صورة إيصال التحويل',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 15),
+              ),
+              const SizedBox(height: 12),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Color(0xFFFEF2F2),
+                  child: Icon(Icons.photo_library_rounded, color: Color(0xFFA92224)),
+                ),
+                title: const Text('اختيار من معرض الصور', style: TextStyle(fontWeight: FontWeight.bold)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickTransferReceipt(ImageSource.gallery);
+                },
+              ),
+              ListTile(
+                leading: const CircleAvatar(
+                  backgroundColor: Color(0xFFEEF2FF),
+                  child: Icon(Icons.camera_alt_rounded, color: Color(0xFF4F46E5)),
+                ),
+                title: const Text('التقاط صورة بالكاميرا', style: TextStyle(fontWeight: FontWeight.bold)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickTransferReceipt(ImageSource.camera);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Uint8List? _tryDecodeDataUrl(String raw) {
+    final trimmed = raw.trim();
+    if (!trimmed.startsWith('data:image/')) return null;
+    final comma = trimmed.indexOf(',');
+    if (comma < 0 || comma + 1 >= trimmed.length) return null;
+    try {
+      return base64Decode(trimmed.substring(comma + 1).replaceAll(RegExp(r'\s+'), ''));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Widget _buildQrPreview(String rawUrl) {
+    final bytes = _tryDecodeDataUrl(rawUrl);
+    if (bytes != null) {
+      return Image.memory(
+        bytes,
+        width: 176,
+        height: 176,
+        fit: BoxFit.contain,
+      );
+    }
+    return Image.network(
+      rawUrl,
+      width: 176,
+      height: 176,
+      fit: BoxFit.contain,
+      errorBuilder: (_, __, ___) => const SizedBox(
+        width: 176,
+        height: 120,
+        child: Center(
+          child: Text(
+            'تعذّر عرض صورة الباركود',
+            style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTransferProofUploader(Color accentColor) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: accentColor.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_paymentProofBytes != null) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.memory(
+                _paymentProofBytes!,
+                height: 150,
+                width: double.infinity,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _showReceiptSourceSheet,
+                    icon: const Icon(Icons.photo_camera_rounded, size: 17),
+                    label: const Text('تغيير صورة التحويل', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: accentColor,
+                      side: BorderSide(color: accentColor),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: () => setState(() {
+                    _paymentProofBytes = null;
+                    _paymentProofDataUrl = null;
+                  }),
+                  icon: const Icon(Icons.delete_outline_rounded, color: Colors.red),
+                  tooltip: 'حذف الصورة',
+                ),
+              ],
+            ),
+          ] else
+            ElevatedButton.icon(
+              onPressed: _showReceiptSourceSheet,
+              icon: const Icon(Icons.add_photo_alternate_rounded, size: 20),
+              label: const Text(
+                'إضافة صورة التحويل',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: accentColor,
+                foregroundColor: Colors.white,
+                minimumSize: const Size.fromHeight(44),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActivePaymentDetails() {
+    if (_paymentMethod == 'vodafone_cash') {
+      final vfNumber = (_paymentSettings['vodafone_cash_number'] ?? '').toString().trim();
+      final vfNote = (_paymentSettings['vodafone_cash_instructions_ar'] ?? '').toString().trim();
+      return Container(
+        margin: const EdgeInsets.only(top: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFEF2F2),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFFECACA)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.phone_android_rounded, size: 18, color: Color(0xFFDC2626)),
+                SizedBox(width: 6),
+                Text(
+                  'بيانات التحويل — فودافون كاش',
+                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Color(0xFF991B1B)),
+                ),
+              ],
+            ),
+            if (vfNote.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                vfNote,
+                style: const TextStyle(fontSize: 11.5, color: Color(0xFF7F1D1D)),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFFCA5A5)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'رقم التحويل (فودافون كاش):',
+                          style: TextStyle(fontSize: 11, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 2),
+                        SelectableText(
+                          vfNumber.isNotEmpty ? vfNumber : 'لم يتم إضافة الرقم بعد من لوحة التحكم',
+                          textDirection: TextDirection.ltr,
+                          style: TextStyle(
+                            fontSize: vfNumber.isNotEmpty ? 17 : 12,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: vfNumber.isNotEmpty ? 1.1 : 0,
+                            color: vfNumber.isNotEmpty ? const Color(0xFF0F172A) : const Color(0xFF94A3B8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (vfNumber.isNotEmpty)
+                    ElevatedButton.icon(
+                      onPressed: () => _copyText(vfNumber, 'رقم فودافون كاش'),
+                      icon: const Icon(Icons.copy_rounded, size: 16),
+                      label: const Text('نسخ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFDC2626),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            _buildTransferProofUploader(const Color(0xFFDC2626)),
+          ],
+        ),
+      );
+    }
+
+    if (_paymentMethod == 'instapay') {
+      final ipQr = (_paymentSettings['instapay_qr_image_url'] ?? '').toString().trim();
+      final ipLink = (_paymentSettings['instapay_link'] ?? '').toString().trim();
+      final ipNote = (_paymentSettings['instapay_instructions_ar'] ?? '').toString().trim();
+      return Container(
+        margin: const EdgeInsets.only(top: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF5F3FF),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFDDD6FE)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.qr_code_2_rounded, size: 19, color: Color(0xFF7C3AED)),
+                SizedBox(width: 6),
+                Text(
+                  'بيانات التحويل — إنستا باي (InstaPay)',
+                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Color(0xFF5B21B6)),
+                ),
+              ],
+            ),
+            if (ipNote.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                ipNote,
+                style: const TextStyle(fontSize: 11.5, color: Color(0xFF4C1D95)),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFC4B5FD)),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x127C3AED),
+                      blurRadius: 8,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: ipQr.isNotEmpty
+                    ? _buildQrPreview(ipQr)
+                    : const SizedBox(
+                        width: 170,
+                        height: 120,
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.qr_code_2_rounded, size: 44, color: Color(0xFFA78BFA)),
+                            SizedBox(height: 6),
+                            Text(
+                              'باركود إنستا باي غير مضاف بعد',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+                            ),
+                          ],
+                        ),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFC4B5FD)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'رابط / عنوان إنستا باي:',
+                          style: TextStyle(fontSize: 11, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 2),
+                        SelectableText(
+                          ipLink.isNotEmpty ? ipLink : 'لم يتم إضافة الرابط بعد من لوحة التحكم',
+                          textDirection: TextDirection.ltr,
+                          style: TextStyle(
+                            fontSize: ipLink.isNotEmpty ? 13 : 11.5,
+                            fontWeight: FontWeight.w800,
+                            color: ipLink.isNotEmpty ? const Color(0xFF4C1D95) : const Color(0xFF94A3B8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (ipLink.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      onPressed: () => _copyText(ipLink, 'رابط إنستا باي'),
+                      icon: const Icon(Icons.copy_rounded, size: 16),
+                      label: const Text('نسخ الرابط', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF7C3AED),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            _buildTransferProofUploader(const Color(0xFF7C3AED)),
+          ],
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+
   @override
   void didUpdateWidget(covariant CartScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.couponCode != widget.couponCode && _couponCtrl.text != widget.couponCode) {
       _couponCtrl.text = widget.couponCode;
+    }
+    if (oldWidget.bootstrap['payment_settings'] != widget.bootstrap['payment_settings'] &&
+        widget.bootstrap['payment_settings'] is Map) {
+      _paymentSettings = Map<String, dynamic>.from(widget.bootstrap['payment_settings'] as Map);
     }
   }
 
@@ -411,10 +854,13 @@ class _CartScreenState extends State<CartScreen> {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    for (final opt in const [
-                      ('cash', 'كاش', Icons.payments_rounded),
-                      ('instapay', 'إنستا باي', Icons.account_balance_rounded),
-                      ('vodafone_cash', 'فودافون كاش', Icons.phone_android_rounded),
+                    for (final opt in [
+                      if (_paymentSettings['cod_enabled'] != false)
+                        ('cash', 'كاش', Icons.payments_rounded),
+                      if (_paymentSettings['instapay_enabled'] != false)
+                        ('instapay', 'إنستا باي', Icons.qr_code_2_rounded),
+                      if (_paymentSettings['vodafone_cash_enabled'] != false)
+                        ('vodafone_cash', 'فودافون كاش', Icons.phone_android_rounded),
                     ]) ...[
                       Expanded(
                         child: Padding(
@@ -469,6 +915,7 @@ class _CartScreenState extends State<CartScreen> {
                     ],
                   ],
                 ),
+                _buildActivePaymentDetails(),
               ],
             ),
           ),
@@ -612,6 +1059,10 @@ class _CartScreenState extends State<CartScreen> {
                             if (widget.couponCode.trim().isNotEmpty) 'coupon_code': widget.couponCode.trim(),
                             if (extraNote.isNotEmpty) 'customer_notes': extraNote,
                             'payment_method': _paymentMethod,
+                            if ((_paymentMethod == 'vodafone_cash' || _paymentMethod == 'instapay') &&
+                                _paymentProofDataUrl != null &&
+                                _paymentProofDataUrl!.isNotEmpty)
+                              'payment_proof_image_url': _paymentProofDataUrl,
                             'stores': storesPayload,
                           });
                           createdOrderNumber = '${res['order_number'] ?? res['id']}';
@@ -630,11 +1081,19 @@ class _CartScreenState extends State<CartScreen> {
                             if (widget.couponCode.trim().isNotEmpty) 'coupon_code': widget.couponCode.trim(),
                             'discount_amount': widget.appliedDiscount,
                             'payment_method': _paymentMethod,
+                            if ((_paymentMethod == 'vodafone_cash' || _paymentMethod == 'instapay') &&
+                                _paymentProofDataUrl != null &&
+                                _paymentProofDataUrl!.isNotEmpty)
+                              'payment_proof_image_url': _paymentProofDataUrl,
                           });
                           createdOrderNumber = '${res['order_number'] ?? res['id']}';
                         }
                         _freeTextCtrl.clear();
                         _orderNotesCtrl.clear();
+                        setState(() {
+                          _paymentProofBytes = null;
+                          _paymentProofDataUrl = null;
+                        });
                         widget.onClearCart();
                         widget.onApplyCouponState('', 0);
                         await widget.onOrderPlaced();

@@ -2,22 +2,24 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 export const OTLOBHA_ASSISTANT_MODEL = 'gemini-4-hydrogen';
 export const OTLOBHA_ASSISTANT_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
-const PER_MODEL_TIMEOUT_MS = 12_000;
-const MODEL_OVERLOAD_COOLDOWN_MS = 90_000;
+export const OTLOBHA_ASSISTANT_TERTIARY_MODEL = 'gemini-3.8-flash';
+
+const PER_ATTEMPT_TIMEOUT_MS = 20_000;
+const TOTAL_REQUEST_BUDGET_MS = 38_000;
+const MODEL_OVERLOAD_COOLDOWN_MS = 15_000;
 
 interface ModelCandidate {
   model: string;
   thinkingLevel?: ThinkingLevel;
-  timeoutMs: number;
 }
 
 const ASSISTANT_MODEL_CANDIDATES: ModelCandidate[] = [
-  { model: OTLOBHA_ASSISTANT_MODEL, thinkingLevel: ThinkingLevel.LOW, timeoutMs: 10_000 },
-  { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL, timeoutMs: 10_000 },
-  { model: 'gemini-2.5-flash', timeoutMs: PER_MODEL_TIMEOUT_MS },
+  { model: OTLOBHA_ASSISTANT_FALLBACK_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
+  { model: OTLOBHA_ASSISTANT_MODEL, thinkingLevel: ThinkingLevel.LOW },
+  { model: OTLOBHA_ASSISTANT_TERTIARY_MODEL, thinkingLevel: ThinkingLevel.LOW },
 ];
 
-// Circuit breaker: skip models that just returned 503 high-demand for 90s so users get fast replies
+// Short circuit breaker: deprioritize models that just returned 503 for 15s (10m for 404)
 const modelCooldownUntil = new Map<string, number>();
 
 export interface AssistantHistoryTurn {
@@ -56,15 +58,29 @@ export interface AssistantRunOutput {
   model: string;
 }
 
+export interface AssistantAttemptDiagnostic {
+  model: string;
+  status: number;
+  ms: number;
+  reason: string;
+}
+
 export class GeminiAssistantError extends Error {
   readonly statusCode: number;
   readonly code: string;
+  readonly attempts?: AssistantAttemptDiagnostic[];
 
-  constructor(message: string, statusCode = 502, code = 'GEMINI_UPSTREAM_ERROR') {
+  constructor(
+    message: string,
+    statusCode = 502,
+    code = 'GEMINI_UPSTREAM_ERROR',
+    attempts?: AssistantAttemptDiagnostic[]
+  ) {
     super(message);
     this.name = 'GeminiAssistantError';
     this.statusCode = statusCode;
     this.code = code;
+    this.attempts = attempts;
   }
 }
 
@@ -94,8 +110,15 @@ function getGeminiClient(): GoogleGenAI {
   return cachedClient;
 }
 
-function classifyGeminiError(err: unknown): GeminiAssistantError {
-  if (err instanceof GeminiAssistantError) return err;
+function classifyGeminiError(
+  err: unknown,
+  attempts?: AssistantAttemptDiagnostic[]
+): GeminiAssistantError {
+  if (err instanceof GeminiAssistantError) {
+    return attempts && !err.attempts
+      ? new GeminiAssistantError(err.message, err.statusCode, err.code, attempts)
+      : err;
+  }
 
   const rawMsg =
     err instanceof Error
@@ -116,7 +139,8 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
     return new GeminiAssistantError(
       'تعذر المصادقة مع خدمة الذكاء الاصطناعي. يرجى مراجعة مفتاح GEMINI_API_KEY في إعدادات الخادم (Settings > Secrets).',
       503,
-      'API_KEY_INVALID'
+      'API_KEY_INVALID',
+      attempts
     );
   }
 
@@ -124,7 +148,8 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
     return new GeminiAssistantError(
       'تم تجاوز الحد المسموح لطلبات المساعد الذكي حاليًا. يرجى المحاولة بعد لحظات.',
       429,
-      'RESOURCE_EXHAUSTED'
+      'RESOURCE_EXHAUSTED',
+      attempts
     );
   }
 
@@ -132,7 +157,8 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
     return new GeminiAssistantError(
       'نموذج الذكاء الاصطناعي المطلوب غير متاح حاليًا على الخادم.',
       502,
-      'MODEL_NOT_FOUND'
+      'MODEL_NOT_FOUND',
+      attempts
     );
   }
 
@@ -140,7 +166,8 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
     return new GeminiAssistantError(
       'استغرق الاتصال بخدمة الذكاء الاصطناعي وقتًا أطول من المعتاد. يرجى المحاولة مرة أخرى.',
       504,
-      'UPSTREAM_TIMEOUT'
+      'UPSTREAM_TIMEOUT',
+      attempts
     );
   }
 
@@ -148,56 +175,30 @@ function classifyGeminiError(err: unknown): GeminiAssistantError {
     return new GeminiAssistantError(
       'تعذر معالجة صيغة الطلب. جرّب إعادة صياغة سؤالك بشكل مختصر.',
       400,
-      'INVALID_ARGUMENT'
+      'INVALID_ARGUMENT',
+      attempts
     );
   }
 
-  if (status === 503 || upper.includes('HIGH DEMAND') || upper.includes('OVERLOADED') || upper.includes('UNAVAILABLE')) {
+  if (
+    status === 503 ||
+    upper.includes('HIGH DEMAND') ||
+    upper.includes('OVERLOADED') ||
+    upper.includes('UNAVAILABLE')
+  ) {
     return new GeminiAssistantError(
       'تشهد خدمة المساعد الذكي ضغطًا مؤقتًا الآن. يرجى الضغط على إعادة المحاولة خلال ثوانٍ.',
       503,
-      'UPSTREAM_HIGH_DEMAND'
+      'UPSTREAM_HIGH_DEMAND',
+      attempts
     );
   }
 
   return new GeminiAssistantError(
     'تعذر الاتصال بخدمة المساعد الذكي حاليًا. يرجى المحاولة مرة أخرى خلال لحظات.',
     502,
-    'UPSTREAM_UNAVAILABLE'
-  );
-}
-
-function isRetryableError(err: unknown): boolean {
-  const status = Number((err as any)?.status || (err as any)?.statusCode || 0);
-  if (status === 400 || status === 401 || status === 403 || status === 404) {
-    return false;
-  }
-  if (status === 429 || status >= 500) return true;
-  const code = String((err as any)?.code || '').toUpperCase();
-  if (code === 'EMPTY_RESPONSE' || code === 'TIMEOUT' || code === 'UPSTREAM_UNAVAILABLE') {
-    return true;
-  }
-  const msg = String((err as any)?.message || '').toUpperCase();
-  if (
-    msg.includes('API_KEY_INVALID') ||
-    msg.includes('PERMISSION_DENIED') ||
-    msg.includes('NOT_FOUND')
-  ) {
-    return false;
-  }
-  return (
-    msg.includes('ECONNRESET') ||
-    msg.includes('ETIMEDOUT') ||
-    msg.includes('TIMEOUT') ||
-    msg.includes('FETCH FAILED') ||
-    msg.includes('NETWORK') ||
-    msg.includes('ABORTED') ||
-    msg.includes('429') ||
-    msg.includes('503') ||
-    msg.includes('502') ||
-    msg.includes('500') ||
-    msg.includes('UNAVAILABLE') ||
-    msg.includes('OVERLOADED')
+    'UPSTREAM_UNAVAILABLE',
+    attempts
   );
 }
 
@@ -246,6 +247,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function runOtlobhaGeminiAssistant(
   input: AssistantRunInput
 ): Promise<AssistantRunOutput> {
@@ -254,48 +259,47 @@ export async function runOtlobhaGeminiAssistant(
   const catalogBlock =
     input.catalogProducts.length > 0
       ? input.catalogProducts
-          .slice(0, 14)
+          .slice(0, 10)
           .map(
             (p) =>
-              `- id:${p.id} | ${p.name_ar}${p.size_label ? ` (${p.size_label})` : ''}${p.brand ? ` [${p.brand}]` : ''} | ${p.effective_price} ج.م${p.is_offer ? ' (عرض)' : ''} | ${p.merchant_name || 'اطلبها'}`
+              `- id:${p.id} | ${p.name_ar}${p.size_label ? ` (${p.size_label})` : ''} | ${p.effective_price} ج.م${p.is_offer ? ' (عرض)' : ''} | ${p.merchant_name || 'اطلبها'}`
           )
           .join('\n')
       : 'لا توجد منتجات مطابقة بالكتالوج حاليًا (متاح «الطلب النصي الحر» لطلب أي شيء فورًا).';
 
   const categoriesBlock =
     input.categoryNames.length > 0
-      ? input.categoryNames.slice(0, 20).join('، ')
-      : 'المقاضي، المنتجات الطازجة، المشروبات، المنظفات، الصيدلية';
+      ? input.categoryNames.slice(0, 14).join('، ')
+      : 'المقاضي، الطازج، المشروبات، المنظفات، الصيدلية';
 
   const merchantsBlock =
     input.merchantNames.length > 0
-      ? input.merchantNames.slice(0, 12).join('، ')
+      ? input.merchantNames.slice(0, 8).join('، ')
       : 'متاجر وصيدليات المنزلة';
 
   const systemInstruction = [
-    'أنت «مساعد اطلبها الذكي» لتطبيق «اطلبها – Otlobha» في المنزلة – الدقهلية، مصر.',
-    'أجب بسرعة ووضوح على جميع أسئلة المستخدم بدون استثناء: سواء كانت أسئلة عن منتجات أو أسعار أو وصفات طبخ أو خدمات اطلبها أو أي أسئلة عامة ومعلومات وحسابات ونصائح يومية. تحدّث بلغة عربية/مصرية راقية ومختصرة (2 إلى 5 جمل مفيدة).',
-    'خدمات اطلبها المتاحة: المتاجر والمقاضي، الطلب النصي الحر (free_order)، الصيدليات والروشتة (pharmacy)، اطلبها مشوار (rides)، طرود أي حاجة (parcels)، سوق اطلبها (market).',
-    'القواعد:',
-    '- لا ترفض أي سؤال عادي أو عام — جاوب عليه بذكاء ومباشرة دائمًا.',
-    '- لا تخترع أسعار منتجات غير موجودة في الكتالوج أدناه. إن وجد منتج مناسب في الكتالوج اذكره وضع معرّفه في suggested_product_ids.',
-    '- في search_keywords اكتب كلمات مفردة قصيرة لأسماء المنتجات فقط (مثل: "مكرونة"، "لبن"، "شاي") إن كان السؤال يتعلق بشراء منتجات، وإلا اتركها مصفوفة فارغة [].',
-    '- في suggested_service اختر فقط من القيم: "none" أو "pharmacy" أو "rides" أو "parcels" أو "market" أو "free_order".',
-    '- في quick_prompts قدّم 3 اقتراحات متابعة قصيرة ومناسبة للسؤال.',
+    'أنت «مساعد اطلبها الذكي» لتطبيق «اطلبها» في المنزلة – الدقهلية، مصر.',
+    'أجب بسرعة ووضوح على جميع أسئلة المستخدم (منتجات، أسعار، وصفات طبخ، خدمات اطلبها، أو أسئلة عامة) بعربية/مصرية لطيفة ومختصرة (2-4 جمل).',
+    'الخدمات: المتاجر والمقاضي، الطلب النصي الحر، الصيدليات والروشتة، اطلبها مشوار، طرود أي حاجة، سوق اطلبها.',
+    'قواعد مهمة:',
+    '- لا تذكر أبدًا أسماء برمجية إنجليزية مثل free_order أو pharmacy أو market داخل reply_ar أو quick_prompts؛ اكتبها بالعربية فقط.',
+    '- لا تخترع أسعار منتجات غير موجودة في الكتالوج أدناه. إن وجد منتج مناسب اذكره وضع معرّفه الدقيق في suggested_product_ids.',
+    '- في search_keywords اكتب كلمات مفردة قصيرة لأسماء المنتجات فقط إن كان الطلب للشراء، وإلا [].',
+    '- في suggested_service اختر فقط من: "none" أو "pharmacy" أو "rides" أو "parcels" أو "market" أو "free_order".',
+    '- في quick_prompts قدّم 3 اقتراحات عربية قصيرة ومناسبة للمتابعة.',
     `الأقسام: ${categoriesBlock}`,
     `المتاجر: ${merchantsBlock}`,
-    'منتجات الكتالوج ذات الصلة:',
+    'منتجات الكتالوج المتاحة:',
     catalogBlock,
   ].join('\n');
 
-  // Sanitize multi-turn conversation history so Gemini always receives
-  // strictly alternating user/model turns starting with a 'user' turn.
+  // Sanitize multi-turn conversation history so Gemini receives strictly alternating user/model turns starting with 'user'
   const rawTurns: Array<{ role: 'user' | 'model'; text: string }> = (input.history || [])
     .filter((h) => h && typeof h.text === 'string' && h.text.trim().length > 0)
-    .slice(-8)
+    .slice(-6)
     .map((h) => ({
       role: h.role === 'user' ? 'user' : 'model',
-      text: h.text.trim().slice(0, 900),
+      text: h.text.trim().slice(0, 600),
     }));
 
   const normalizedTurns: Array<{ role: 'user' | 'model'; text: string }> = [];
@@ -305,17 +309,17 @@ export async function runOtlobhaGeminiAssistant(
     }
     const prev = normalizedTurns[normalizedTurns.length - 1];
     if (prev && prev.role === turn.role) {
-      prev.text = `${prev.text}\n${turn.text}`.slice(0, 1200);
+      prev.text = `${prev.text}\n${turn.text}`.slice(0, 900);
     } else {
       normalizedTurns.push({ ...turn });
     }
   }
 
-  const currentUserText = input.message.trim().slice(0, 1200);
+  const currentUserText = input.message.trim().slice(0, 1000);
   const lastNorm = normalizedTurns[normalizedTurns.length - 1];
   if (lastNorm && lastNorm.role === 'user') {
     if (lastNorm.text !== currentUserText) {
-      lastNorm.text = `${lastNorm.text}\n${currentUserText}`.slice(0, 1500);
+      lastNorm.text = `${lastNorm.text}\n${currentUserText}`.slice(0, 1200);
     }
   } else {
     normalizedTurns.push({ role: 'user', text: currentUserText });
@@ -326,65 +330,39 @@ export async function runOtlobhaGeminiAssistant(
     parts: [{ text: t.text }],
   }));
 
-  const now = Date.now();
-  const readyCandidates = ASSISTANT_MODEL_CANDIDATES.filter(
-    (c) => (modelCooldownUntil.get(c.model) ?? 0) <= now
-  );
-  const cooledCandidates = ASSISTANT_MODEL_CANDIDATES.filter(
-    (c) => (modelCooldownUntil.get(c.model) ?? 0) > now
-  );
-  const orderedCandidates = [...readyCandidates, ...cooledCandidates];
-
-  // Try all candidates once; if a brief 503 burst hits them all, do one quick recovery retry on flash-lite
-  const executionPlan: Array<{ candidate: ModelCandidate; delayBeforeMs: number }> = [
-    ...orderedCandidates.map((candidate) => ({ candidate, delayBeforeMs: 0 })),
-    {
-      candidate: ASSISTANT_MODEL_CANDIDATES[1], // gemini-3.1-flash-lite fast recovery
-      delayBeforeMs: 600,
+  const responseSchema = {
+    type: Type.OBJECT,
+    properties: {
+      reply_ar: { type: Type.STRING },
+      search_keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+      suggested_product_ids: { type: Type.ARRAY, items: { type: Type.STRING } },
+      suggested_service: {
+        type: Type.STRING,
+        enum: ['none', 'pharmacy', 'rides', 'parcels', 'market', 'free_order'],
+      },
+      quick_prompts: { type: Type.ARRAY, items: { type: Type.STRING } },
     },
-  ];
+    required: ['reply_ar', 'quick_prompts'],
+  };
 
-  let lastErr: unknown = null;
+  const validCatalogIds = new Set(input.catalogProducts.map((p) => p.id));
+  const startedAt = Date.now();
+  const attempts: AssistantAttemptDiagnostic[] = [];
+  const deadModels = new Set<string>();
+  let fatalAuthErr: unknown = null;
   let lastTransientErr: unknown = null;
-  for (const step of executionPlan) {
-    const { candidate, delayBeforeMs } = step;
-    if (delayBeforeMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delayBeforeMs));
-    }
+  let lastErr: unknown = null;
+
+  const invokeCandidate = async (
+    candidate: ModelCandidate,
+    timeoutMs: number
+  ): Promise<AssistantRunOutput> => {
+    const t0 = Date.now();
     try {
       const config: Record<string, unknown> = {
         systemInstruction,
         responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            reply_ar: {
-              type: Type.STRING,
-              description: 'رد واضح ومباشر ومفيد للمستخدم باللغة العربية.',
-            },
-            search_keywords: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: 'أسماء منتجات مفردة قصيرة للبحث بالكتالوج إن كان الطلب للشراء، وإلا فارغة.',
-            },
-            suggested_product_ids: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: 'معرّفات المنتجات الحقيقية من الكتالوج المرفق فقط.',
-            },
-            suggested_service: {
-              type: Type.STRING,
-              enum: ['none', 'pharmacy', 'rides', 'parcels', 'market', 'free_order'],
-              description: 'خدمة مقترحة من اطلبها إن كانت مناسبة، وإلا "none".',
-            },
-            quick_prompts: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: '3 اقتراحات قصيرة لأسئلة متابعة مناسبة.',
-            },
-          },
-          required: ['reply_ar', 'quick_prompts'],
-        },
+        responseSchema,
       };
       if (candidate.thinkingLevel) {
         config.thinkingConfig = { thinkingLevel: candidate.thinkingLevel };
@@ -396,7 +374,7 @@ export async function runOtlobhaGeminiAssistant(
           contents,
           config: config as any,
         }),
-        candidate.timeoutMs
+        timeoutMs
       );
 
       const rawText = (response.text ?? '').trim();
@@ -418,7 +396,6 @@ export async function runOtlobhaGeminiAssistant(
       const rawService = String(parsed?.suggested_service || '').trim().toLowerCase();
       const normalizedService = rawService === 'none' ? '' : rawService;
 
-      const validCatalogIds = new Set(input.catalogProducts.map((p) => p.id));
       const suggestedProductIds = rawProductIds
         .map((id: unknown) => String(id || '').trim())
         .filter((id: string) => id.length > 0 && validCatalogIds.has(id))
@@ -438,7 +415,9 @@ export async function runOtlobhaGeminiAssistant(
         reply_ar: replyAr,
         search_keywords: searchKeywords,
         suggested_product_ids: suggestedProductIds,
-        suggested_service: (ALLOWED_SERVICES.has(normalizedService) ? normalizedService : '') as AssistantRunOutput['suggested_service'],
+        suggested_service: (ALLOWED_SERVICES.has(normalizedService)
+          ? normalizedService
+          : '') as AssistantRunOutput['suggested_service'],
         quick_prompts:
           quickPrompts.length > 0
             ? quickPrompts
@@ -450,16 +429,24 @@ export async function runOtlobhaGeminiAssistant(
       const errStatus = Number((err as any)?.status || (err as any)?.statusCode || 0);
       const errMsg = err instanceof Error ? err.message : String(err ?? '');
       const upper = errMsg.toUpperCase();
+      const elapsed = Date.now() - t0;
+
+      attempts.push({
+        model: candidate.model,
+        status: errStatus,
+        ms: elapsed,
+        reason: errMsg.slice(0, 200),
+      });
       console.error(
-        `[OtlobhaAssistant] model=${candidate.model} failed (status=${errStatus}): ${errMsg.slice(0, 260)}`
+        `[OtlobhaAssistant] model=${candidate.model} failed (status=${errStatus}, ${elapsed}ms): ${errMsg.slice(0, 220)}`
       );
 
-      // Stop immediately on auth/key errors — failing over to another model won't help
-      if (errStatus === 401 || errStatus === 403) {
-        throw classifyGeminiError(err);
-      }
-
-      if (
+      if (errStatus === 401 || errStatus === 403 || upper.includes('API_KEY_INVALID') || upper.includes('PERMISSION_DENIED')) {
+        fatalAuthErr = err;
+      } else if (errStatus === 404 || upper.includes('NOT_FOUND')) {
+        deadModels.add(candidate.model);
+        modelCooldownUntil.set(candidate.model, Date.now() + 10 * 60_000);
+      } else if (
         errStatus === 503 ||
         errStatus === 429 ||
         upper.includes('HIGH DEMAND') ||
@@ -469,13 +456,66 @@ export async function runOtlobhaGeminiAssistant(
       ) {
         lastTransientErr = err;
         modelCooldownUntil.set(candidate.model, Date.now() + MODEL_OVERLOAD_COOLDOWN_MS);
-      } else if (errStatus === 404 || upper.includes('NOT_FOUND')) {
-        // Put unavailable model on longer cooldown (10 min) so it doesn't slow down requests
-        modelCooldownUntil.set(candidate.model, Date.now() + 10 * 60_000);
+      }
+      throw err;
+    }
+  };
+
+  /**
+   * Clean single-in-flight sequential failover with exponential backoff:
+   * - Never fires concurrent requests (protects RPM/quota from self-inflicted 429s).
+   * - Tries each healthy model once (fast failover on 503/429/404).
+   * - If a brief 503 demand spike hits all models, performs polite exponential-backoff
+   *   recovery retries within the 36s total request budget.
+   */
+  const ready = ASSISTANT_MODEL_CANDIDATES.filter(
+    (c) => (modelCooldownUntil.get(c.model) ?? 0) <= startedAt
+  );
+  const cooled = ASSISTANT_MODEL_CANDIDATES.filter(
+    (c) => (modelCooldownUntil.get(c.model) ?? 0) > startedAt
+  );
+  const round1 = [...ready, ...cooled];
+  const rateLimitedInRequest = new Set<string>();
+
+  const steps: Array<{ candidate: ModelCandidate; waitBeforeMs: number }> = [
+    ...round1.map((candidate, idx) => ({
+      candidate,
+      waitBeforeMs: idx === 0 ? 0 : 400,
+    })),
+    { candidate: ASSISTANT_MODEL_CANDIDATES[0], waitBeforeMs: 1_500 },
+    { candidate: ASSISTANT_MODEL_CANDIDATES[2], waitBeforeMs: 2_000 },
+  ];
+
+  for (const step of steps) {
+    const { candidate, waitBeforeMs } = step;
+    if (deadModels.has(candidate.model) || rateLimitedInRequest.has(candidate.model)) {
+      continue;
+    }
+    const remainingBeforeWait = TOTAL_REQUEST_BUDGET_MS - (Date.now() - startedAt);
+    if (remainingBeforeWait < 5_000) {
+      break;
+    }
+    if (waitBeforeMs > 0) {
+      const actualWait = Math.min(waitBeforeMs, Math.max(0, remainingBeforeWait - 5_000));
+      if (actualWait > 0) await delay(actualWait);
+    }
+    const remaining = TOTAL_REQUEST_BUDGET_MS - (Date.now() - startedAt);
+    const effTimeout = Math.min(PER_ATTEMPT_TIMEOUT_MS, Math.max(5_000, remaining));
+    try {
+      return await invokeCandidate(candidate, effTimeout);
+    } catch (err) {
+      if (fatalAuthErr) {
+        throw classifyGeminiError(fatalAuthErr, attempts);
+      }
+      const errStatus = Number((err as any)?.status || (err as any)?.statusCode || 0);
+      const errMsg = String((err as any)?.message || err || '').toUpperCase();
+      if (errStatus === 429 || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('QUOTA')) {
+        rateLimitedInRequest.add(candidate.model);
+        modelCooldownUntil.set(candidate.model, Date.now() + 60_000);
       }
       continue;
     }
   }
 
-  throw classifyGeminiError(lastTransientErr ?? lastErr);
+  throw classifyGeminiError(fatalAuthErr ?? lastTransientErr ?? lastErr, attempts);
 }

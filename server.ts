@@ -2911,6 +2911,9 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
     ? 'wallet'
     : 'cash';
 
+  const rawPaymentProof = req.body.payment_proof_image_url;
+  const resolvedPaymentProofUrl = sanitizePaymentImageValue(rawPaymentProof) || null;
+
   const insertOrderTx = db.transaction(() => {
     if (validatedCouponId) {
       const couponRes = db
@@ -2925,8 +2928,8 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
       INSERT INTO orders (
         id, order_number, customer_id, customer_name, customer_phone, merchant_id, merchant_name, merchant_type,
         zone_name, address_landmark, customer_lat, customer_lng, order_channel, free_order_text, items_json, is_express, status,
-        subtotal, delivery_fee, discount_amount, total_amount, payment_method, prescription_status, prescription_image_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        subtotal, delivery_fee, discount_amount, total_amount, payment_method, payment_proof_image_url, prescription_status, prescription_image_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       orderNum,
@@ -2950,6 +2953,7 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
       discountAmt,
       finalTotal,
       resolvedPaymentMethod,
+      resolvedPaymentProofUrl,
       merchant.merchant_type === 'pharmacy' ? 'pending' : null,
       prescription_image_url || null
     );
@@ -3355,6 +3359,8 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
     ? 'wallet'
     : 'cash';
 
+  const resolvedPaymentProofUrl = sanitizePaymentImageValue(req.body.payment_proof_image_url) || null;
+
   const bundleTx = db.transaction(() => {
     if (validatedCouponId) {
       const couponRes = db
@@ -3369,8 +3375,8 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
       INSERT INTO orders (
         id, order_number, customer_id, customer_name, customer_phone, merchant_id, merchant_name, merchant_type,
         zone_name, address_landmark, customer_lat, customer_lng, order_channel, free_order_text, items_json, is_express, status,
-        subtotal, delivery_fee, discount_amount, total_amount, payment_method, prescription_status, prescription_image_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        subtotal, delivery_fee, discount_amount, total_amount, payment_method, payment_proof_image_url, prescription_status, prescription_image_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       orderId,
       orderNum,
@@ -3394,6 +3400,7 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
       totalDiscount,
       combinedFinalTotal,
       resolvedPaymentMethod,
+      resolvedPaymentProofUrl,
       anyPharmacy ? 'pending' : null,
       anyPrescriptionImg
     );
@@ -6335,19 +6342,46 @@ app.put('/api/financial-model', requireAuth, requireRole('super_admin', 'finance
   res.json({ input, output });
 });
 
+function sanitizePaymentImageValue(raw: unknown, maxLen = 6_000_000): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (trimmed.length > maxLen) return '';
+  if (
+    /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed) ||
+    /^https?:\/\/[^\s<>"']+$/i.test(trimmed) ||
+    /^\/(uploads|assets)\/[^\s<>"']+$/i.test(trimmed)
+  ) {
+    return trimmed;
+  }
+  return '';
+}
+
+function sanitizePaymentLinkValue(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim().slice(0, 500);
+  if (!trimmed) return '';
+  if (/^(javascript|vbscript|data):/i.test(trimmed)) return '';
+  return trimmed;
+}
+
 function getPaymentSettingsRow() {
   let row = db.prepare("SELECT * FROM payment_settings WHERE id = 'default'").get() as Record<string, unknown> | undefined;
   if (!row) {
     db.prepare(`
       INSERT OR IGNORE INTO payment_settings (
         id, cod_enabled, network_pos_enabled, wallet_enabled, online_card_enabled,
-        cod_max_amount, network_min_amount, cod_instructions_ar, network_instructions_ar, wallet_instructions_ar
+        cod_max_amount, network_min_amount, cod_instructions_ar, network_instructions_ar, wallet_instructions_ar,
+        vodafone_cash_enabled, vodafone_cash_number, vodafone_cash_instructions_ar,
+        instapay_enabled, instapay_qr_image_url, instapay_link, instapay_instructions_ar
       ) VALUES (
         'default', 1, 1, 1, 0,
         5000, 10,
         'الدفع نقداً عند استلام الطلب من الكابتن',
         'الدفع ببطاقة مدى / فيزا / ماستركارد عبر ماكينة POS المحمولة مع الكابتن',
-        'التحويل عبر المحافظ الإلكترونية أو فودافون كاش / إنستاباي'
+        'التحويل عبر المحافظ الإلكترونية أو فودافون كاش / إنستاباي',
+        1, '', 'حوّل المبلغ على رقم فودافون كاش ثم أرفق صورة إيصال التحويل',
+        1, '', '', 'امسح باركود إنستا باي أو انسخ الرابط وحوّل المبلغ ثم أرفق صورة التحويل'
       )
     `).run();
     row = db.prepare("SELECT * FROM payment_settings WHERE id = 'default'").get() as Record<string, unknown>;
@@ -6363,6 +6397,17 @@ function getPaymentSettingsRow() {
     cod_instructions_ar: String(row.cod_instructions_ar || 'الدفع نقداً عند استلام الطلب من الكابتن'),
     network_instructions_ar: String(row.network_instructions_ar || 'الدفع ببطاقة مدى / فيزا / ماستركارد عبر ماكينة POS المحمولة مع الكابتن'),
     wallet_instructions_ar: String(row.wallet_instructions_ar || 'التحويل عبر المحافظ الإلكترونية أو فودافون كاش / إنستاباي'),
+    vodafone_cash_enabled: row.vodafone_cash_enabled === undefined ? true : Boolean(row.vodafone_cash_enabled),
+    vodafone_cash_number: String(row.vodafone_cash_number || ''),
+    vodafone_cash_instructions_ar: String(
+      row.vodafone_cash_instructions_ar || 'حوّل المبلغ على رقم فودافون كاش ثم أرفق صورة إيصال التحويل'
+    ),
+    instapay_enabled: row.instapay_enabled === undefined ? true : Boolean(row.instapay_enabled),
+    instapay_qr_image_url: String(row.instapay_qr_image_url || ''),
+    instapay_link: String(row.instapay_link || ''),
+    instapay_instructions_ar: String(
+      row.instapay_instructions_ar || 'امسح باركود إنستا باي أو انسخ الرابط وحوّل المبلغ ثم أرفق صورة التحويل'
+    ),
   };
 }
 
@@ -6381,6 +6426,42 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
   const cod_instructions_ar = req.body.cod_instructions_ar !== undefined ? String(req.body.cod_instructions_ar).trim() : current.cod_instructions_ar;
   const network_instructions_ar = req.body.network_instructions_ar !== undefined ? String(req.body.network_instructions_ar).trim() : current.network_instructions_ar;
   const wallet_instructions_ar = req.body.wallet_instructions_ar !== undefined ? String(req.body.wallet_instructions_ar).trim() : current.wallet_instructions_ar;
+  const vodafone_cash_enabled =
+    req.body.vodafone_cash_enabled !== undefined
+      ? req.body.vodafone_cash_enabled
+        ? 1
+        : 0
+      : current.vodafone_cash_enabled
+      ? 1
+      : 0;
+  const vodafone_cash_number =
+    req.body.vodafone_cash_number !== undefined
+      ? String(req.body.vodafone_cash_number).replace(/[^\d+\s-]/g, '').trim().slice(0, 30)
+      : current.vodafone_cash_number;
+  const vodafone_cash_instructions_ar =
+    req.body.vodafone_cash_instructions_ar !== undefined
+      ? String(req.body.vodafone_cash_instructions_ar).trim().slice(0, 300)
+      : current.vodafone_cash_instructions_ar;
+  const instapay_enabled =
+    req.body.instapay_enabled !== undefined
+      ? req.body.instapay_enabled
+        ? 1
+        : 0
+      : current.instapay_enabled
+      ? 1
+      : 0;
+  const instapay_qr_image_url =
+    req.body.instapay_qr_image_url !== undefined
+      ? sanitizePaymentImageValue(req.body.instapay_qr_image_url)
+      : current.instapay_qr_image_url;
+  const instapay_link =
+    req.body.instapay_link !== undefined
+      ? sanitizePaymentLinkValue(req.body.instapay_link)
+      : current.instapay_link;
+  const instapay_instructions_ar =
+    req.body.instapay_instructions_ar !== undefined
+      ? String(req.body.instapay_instructions_ar).trim().slice(0, 300)
+      : current.instapay_instructions_ar;
 
   db.prepare(`
     UPDATE payment_settings SET
@@ -6393,6 +6474,13 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
       cod_instructions_ar = ?,
       network_instructions_ar = ?,
       wallet_instructions_ar = ?,
+      vodafone_cash_enabled = ?,
+      vodafone_cash_number = ?,
+      vodafone_cash_instructions_ar = ?,
+      instapay_enabled = ?,
+      instapay_qr_image_url = ?,
+      instapay_link = ?,
+      instapay_instructions_ar = ?,
       updated_at = datetime('now')
     WHERE id = 'default'
   `).run(
@@ -6404,7 +6492,14 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
     network_min_amount,
     cod_instructions_ar,
     network_instructions_ar,
-    wallet_instructions_ar
+    wallet_instructions_ar,
+    vodafone_cash_enabled,
+    vodafone_cash_number,
+    vodafone_cash_instructions_ar,
+    instapay_enabled,
+    instapay_qr_image_url,
+    instapay_link,
+    instapay_instructions_ar
   );
 
   const updated = getPaymentSettingsRow();
@@ -6414,7 +6509,7 @@ app.put('/api/payment-settings', requireAuth, requireRole(...ALL_ADMIN_ROLES), (
     action: 'PAYMENT_SETTINGS_UPDATED',
     entity_type: 'payment_settings',
     entity_id: 'default',
-    details: `تحديث إعدادات الدفع (كاش: ${updated.cod_enabled ? 'مفعل' : 'معطل'}، شبكة/POS: ${updated.network_pos_enabled ? 'مفعل' : 'معطل'}، محفظة: ${updated.wallet_enabled ? 'مفعل' : 'معطل'})`,
+    details: `تحديث إعدادات الدفع (كاش: ${updated.cod_enabled ? 'مفعل' : 'معطل'}، فودافون كاش: ${updated.vodafone_cash_enabled ? (updated.vodafone_cash_number || 'مفعل') : 'معطل'}، إنستا باي: ${updated.instapay_enabled ? 'مفعل' : 'معطل'})`,
   });
 
   res.json({ ok: true, settings: updated });

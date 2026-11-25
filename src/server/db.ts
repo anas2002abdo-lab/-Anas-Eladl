@@ -255,6 +255,7 @@ export function initDatabase(): void {
       discount_amount REAL NOT NULL DEFAULT 0,
       total_amount REAL NOT NULL DEFAULT 0,
       payment_method TEXT NOT NULL DEFAULT 'cash',
+      payment_proof_image_url TEXT,
       prescription_status TEXT,
       prescription_image_url TEXT,
       delivery_proof_image_url TEXT,
@@ -566,6 +567,13 @@ export function initDatabase(): void {
       cod_instructions_ar TEXT NOT NULL DEFAULT 'الدفع نقداً عند استلام الطلب من الكابتن',
       network_instructions_ar TEXT NOT NULL DEFAULT 'الدفع ببطاقة مدى / فيزا / ماستركارد عبر ماكينة POS المحمولة مع الكابتن',
       wallet_instructions_ar TEXT NOT NULL DEFAULT 'التحويل عبر المحافظ الإلكترونية أو فودافون كاش / إنستاباي',
+      vodafone_cash_enabled INTEGER NOT NULL DEFAULT 1,
+      vodafone_cash_number TEXT NOT NULL DEFAULT '',
+      vodafone_cash_instructions_ar TEXT NOT NULL DEFAULT 'حوّل المبلغ على رقم فودافون كاش ثم أرفق صورة إيصال التحويل',
+      instapay_enabled INTEGER NOT NULL DEFAULT 1,
+      instapay_qr_image_url TEXT NOT NULL DEFAULT '',
+      instapay_link TEXT NOT NULL DEFAULT '',
+      instapay_instructions_ar TEXT NOT NULL DEFAULT 'امسح باركود إنستا باي أو انسخ الرابط وحوّل المبلغ ثم أرفق صورة التحويل',
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -653,6 +661,33 @@ export function initDatabase(): void {
   }
   if (!orderCols.some((c) => c.name === 'captain_picked_up_at')) {
     db.exec('ALTER TABLE orders ADD COLUMN captain_picked_up_at TEXT');
+  }
+  if (!orderCols.some((c) => c.name === 'payment_proof_image_url')) {
+    db.exec('ALTER TABLE orders ADD COLUMN payment_proof_image_url TEXT');
+  }
+
+  const payCols = db.prepare("PRAGMA table_info('payment_settings')").all() as Array<{ name: string }>;
+  const hasPayCol = (name: string) => payCols.some((c) => c.name === name);
+  if (!hasPayCol('vodafone_cash_enabled')) {
+    db.exec('ALTER TABLE payment_settings ADD COLUMN vodafone_cash_enabled INTEGER NOT NULL DEFAULT 1');
+  }
+  if (!hasPayCol('vodafone_cash_number')) {
+    db.exec("ALTER TABLE payment_settings ADD COLUMN vodafone_cash_number TEXT NOT NULL DEFAULT ''");
+  }
+  if (!hasPayCol('vodafone_cash_instructions_ar')) {
+    db.exec("ALTER TABLE payment_settings ADD COLUMN vodafone_cash_instructions_ar TEXT NOT NULL DEFAULT 'حوّل المبلغ على رقم فودافون كاش ثم أرفق صورة إيصال التحويل'");
+  }
+  if (!hasPayCol('instapay_enabled')) {
+    db.exec('ALTER TABLE payment_settings ADD COLUMN instapay_enabled INTEGER NOT NULL DEFAULT 1');
+  }
+  if (!hasPayCol('instapay_qr_image_url')) {
+    db.exec("ALTER TABLE payment_settings ADD COLUMN instapay_qr_image_url TEXT NOT NULL DEFAULT ''");
+  }
+  if (!hasPayCol('instapay_link')) {
+    db.exec("ALTER TABLE payment_settings ADD COLUMN instapay_link TEXT NOT NULL DEFAULT ''");
+  }
+  if (!hasPayCol('instapay_instructions_ar')) {
+    db.exec("ALTER TABLE payment_settings ADD COLUMN instapay_instructions_ar TEXT NOT NULL DEFAULT 'امسح باركود إنستا باي أو انسخ الرابط وحوّل المبلغ ثم أرفق صورة التحويل'");
   }
 
   // Non-destructive one-time migration: remove restrictive FK on orders.merchant_id so historical orders survive permanent merchant deletion

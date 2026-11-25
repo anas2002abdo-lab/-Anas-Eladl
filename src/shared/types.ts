@@ -88,6 +88,13 @@ export interface PaymentSettings {
   cod_instructions_ar: string;
   network_instructions_ar: string;
   wallet_instructions_ar: string;
+  vodafone_cash_enabled: boolean;
+  vodafone_cash_number: string;
+  vodafone_cash_instructions_ar: string;
+  instapay_enabled: boolean;
+  instapay_qr_image_url: string;
+  instapay_link: string;
+  instapay_instructions_ar: string;
   updated_at?: string;
 }
 
@@ -525,6 +532,7 @@ export interface OrderRecord {
   discount_amount: number;
   total_amount: number;
   payment_method: string;
+  payment_proof_image_url?: string | null;
   prescription_status: string | null;
   prescription_image_url?: string | null;
   delivery_proof_image_url?: string | null;

@@ -2935,18 +2935,13 @@ export function registerMasterCatalogRoutes(app: Express): void {
       }));
 
     const queryProductsByTokens = (tokens: string[], preferCheapest: boolean, limit = 12) => {
-      const cleanTokens = tokens.map((t) => String(t || '').trim()).filter((t) => t.length >= 2).slice(0, 6);
+      const cleanTokens = tokens
+        .map((t) => normalizeText(String(t || '')))
+        .filter((t) => t.length >= 2)
+        .slice(0, 6);
       if (cleanTokens.length === 0) return [] as Array<Record<string, any>>;
-      const likeClauses = cleanTokens.map(
-        () =>
-          "(p.name_ar LIKE ? OR p.name_en LIKE ? OR p.brand LIKE ? OR c.name_ar LIKE ? OR COALESCE(mp.canonical_name_ar, '') LIKE ?)"
-      );
-      const likeParams: string[] = [];
-      for (const t of cleanTokens) {
-        const lk = `%${t}%`;
-        likeParams.push(lk, lk, lk, lk, lk);
-      }
-      return db
+
+      const allAvailable = db
         .prepare(`
           SELECT
             p.*, m.business_name_ar AS merchant_name, m.merchant_type,
@@ -2957,11 +2952,44 @@ export function registerMasterCatalogRoutes(app: Express): void {
           JOIN merchants m ON m.id = p.merchant_id
           LEFT JOIN categories c ON c.id = p.category_id
           LEFT JOIN master_products mp ON mp.id = p.master_product_id
-          WHERE p.is_available = 1 AND (${likeClauses.join(' OR ')})
-          ORDER BY ${preferCheapest ? 'COALESCE(p.sale_price, p.base_price) ASC' : 'p.is_offer DESC, COALESCE(p.sale_price, p.base_price) ASC'}
-          LIMIT ?
+          WHERE p.is_available = 1
         `)
-        .all(...likeParams, limit) as Array<Record<string, any>>;
+        .all() as Array<Record<string, any>>;
+
+      const scored: Array<{ row: Record<string, any>; score: number; price: number }> = [];
+      for (const row of allAvailable) {
+        const haystack = normalizeText(
+          `${row.name_ar || ''} ${row.name_en || ''} ${row.brand || ''} ${row.category_name || ''} ${row.master_name_ar || ''}`
+        );
+        let hits = 0;
+        for (const tok of cleanTokens) {
+          const stripped = tok.startsWith('ال') && tok.length > 3 ? tok.slice(2) : tok;
+          if (haystack.includes(tok) || (stripped !== tok && haystack.includes(stripped))) {
+            hits++;
+          }
+        }
+        if (hits > 0) {
+          const effPrice = Number(row.sale_price ?? row.base_price ?? 0);
+          scored.push({
+            row,
+            score: hits * 10 + (row.is_offer ? 2 : 0),
+            price: Number.isFinite(effPrice) ? effPrice : 999999,
+          });
+        }
+      }
+
+      scored.sort((a, b) => {
+        if (preferCheapest) {
+          if (b.score !== a.score && Math.floor(b.score / 10) !== Math.floor(a.score / 10)) {
+            return b.score - a.score;
+          }
+          return a.price - b.price;
+        }
+        if (b.score !== a.score) return b.score - a.score;
+        return a.price - b.price;
+      });
+
+      return scored.slice(0, limit).map((s) => s.row);
     };
 
     try {
@@ -2970,10 +2998,13 @@ export function registerMasterCatalogRoutes(app: Express): void {
       const stopWords = new Set([
         'عايز', 'اريد', 'ابحث', 'هات', 'محتاج', 'ارخص', 'اقل', 'سعر', 'عروض', 'عرض',
         'اليوم', 'النهاردة', 'النهارده', 'بين', 'المتاجر', 'ايه', 'ازاي', 'ممكن', 'لو', 'سمحت', 'عن', 'في', 'من',
+        'او', 'أو', 'على', 'الي', 'إلى', 'مع', 'كل', 'بكام', 'كم',
       ]);
-      const tokens = tokenizeCanonical(message).filter((t) => !stopWords.has(t));
+      const rawNormWords = norm.split(' ').filter((w) => w.length >= 2 && !stopWords.has(w));
+      const canonicalTokens = tokenizeCanonical(message).filter((t) => !stopWords.has(t));
+      const tokens = Array.from(new Set([...rawNormWords, ...canonicalTokens]));
 
-      let candidateRows = queryProductsByTokens(tokens, wantsCheapest, 14);
+      let candidateRows = queryProductsByTokens(tokens, wantsCheapest, 12);
       if (candidateRows.length < 6) {
         const fallbackRows = db
           .prepare(`

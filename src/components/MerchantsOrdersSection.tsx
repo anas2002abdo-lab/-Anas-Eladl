@@ -118,6 +118,7 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
   const [deleteOrderTarget, setDeleteOrderTarget] = useState<OrderRecord | null>(null);
   const [deletingOrder, setDeletingOrder] = useState(false);
   const [selectedMerchant, setSelectedMerchant] = useState<MerchantRecord | null>(null);
+  const [previewProofImage, setPreviewProofImage] = useState<{ title: string; url: string } | null>(null);
   const [merchantDetail, setMerchantDetail] = useState<AdminMerchantDetail | null>(null);
   const [loadingMerchantDetail, setLoadingMerchantDetail] = useState(false);
   const [licenseLightboxUrl, setLicenseLightboxUrl] = useState<string | null>(null);
@@ -612,7 +613,15 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
                       <span className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg font-bold text-slate-900">
                         {isAr ? 'الإجمالي:' : 'Total:'} {o.total_amount} ج.م
                       </span>
-                      {o.payment_method === 'network' ? (
+                      {o.payment_method === 'vodafone_cash' ? (
+                        <span className="px-2.5 py-1 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg font-bold">
+                          {isAr ? '📱 فودافون كاش' : 'Vodafone Cash'}
+                        </span>
+                      ) : o.payment_method === 'instapay' ? (
+                        <span className="px-2.5 py-1 bg-purple-50 border border-purple-200 text-purple-800 rounded-lg font-bold">
+                          {isAr ? '⚡ إنستا باي' : 'InstaPay'}
+                        </span>
+                      ) : o.payment_method === 'network' ? (
                         <span className="px-2.5 py-1 bg-blue-50 border border-blue-200 text-blue-800 rounded-lg font-bold">
                           {isAr ? '💳 شبكة / POS' : 'POS'}
                         </span>
@@ -747,6 +756,29 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
                     </div>
                   )}
 
+                  {o.payment_proof_image_url && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPreviewProofImage({
+                          title: isAr ? `صورة إيصال التحويل — الطلب #${o.order_number}` : `Transfer Receipt #${o.order_number}`,
+                          url: o.payment_proof_image_url!,
+                        })
+                      }
+                      className="inline-flex items-center gap-2 border border-purple-300 rounded-lg p-1.5 bg-purple-50 hover:bg-purple-100 transition-colors"
+                    >
+                      <img
+                        src={o.payment_proof_image_url}
+                        alt={`${o.order_number} payment proof`}
+                        className="w-12 h-12 rounded object-cover border border-purple-200 bg-white"
+                      />
+                      <div className="text-start text-[11px] text-purple-900 font-bold pe-1">
+                        <div>{isAr ? 'صورة إيصال التحويل مرفقة ✓' : 'Transfer receipt attached ✓'}</div>
+                        <span className="text-[10px] font-semibold text-purple-700">{isAr ? 'اضغط للتكبير والمراجعة' : 'Click to inspect'}</span>
+                      </div>
+                    </button>
+                  )}
+
                   {o.delivery_proof_image_url && (
                     <div className="flex items-center gap-2 text-[11px] text-teal-800 font-semibold px-1">
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-600" />
@@ -871,7 +903,15 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
                 <div className="flex flex-wrap items-center gap-2.5 text-xs font-semibold text-slate-700 tabular-nums">
                   <span className="inline-flex items-center gap-1.5 flex-wrap">
                     <span>{o.status} · {isAr ? 'الإجمالي:' : 'Total:'} {o.total_amount} ج.م</span>
-                    {o.payment_method === 'network' ? (
+                    {o.payment_method === 'vodafone_cash' ? (
+                      <span className="px-1.5 py-0.5 rounded bg-rose-50 border border-rose-200 text-rose-800 text-[10px] font-bold">
+                        {isAr ? '📱 فودافون كاش' : 'Vodafone Cash'}
+                      </span>
+                    ) : o.payment_method === 'instapay' ? (
+                      <span className="px-1.5 py-0.5 rounded bg-purple-50 border border-purple-200 text-purple-800 text-[10px] font-bold">
+                        {isAr ? '⚡ إنستا باي' : 'InstaPay'}
+                      </span>
+                    ) : o.payment_method === 'network' ? (
                       <span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-800 text-[10px] font-bold">
                         {isAr ? '💳 شبكة / POS' : 'POS'}
                       </span>
@@ -912,8 +952,34 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
                 </div>
               </div>
 
-              {(o.free_order_text || o.prescription_image_url || o.delivery_proof_image_url || o.captain_id) && (
+              {(o.free_order_text || o.prescription_image_url || o.payment_proof_image_url || o.delivery_proof_image_url || o.captain_id) && (
                 <div className="bg-slate-50 border border-slate-200 rounded p-2.5 flex flex-wrap items-start gap-3">
+                  {o.payment_proof_image_url && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPreviewProofImage({
+                          title: isAr ? `صورة إيصال التحويل — الطلب #${o.order_number}` : `Transfer Receipt #${o.order_number}`,
+                          url: o.payment_proof_image_url!,
+                        })
+                      }
+                      className="shrink-0 flex items-center gap-2 border-2 border-purple-500 rounded-lg p-1.5 bg-purple-50 hover:bg-purple-100 transition-colors"
+                      title={isAr ? 'اضغط لعرض صورة إيصال التحويل بحجم كامل' : 'View transfer receipt image'}
+                    >
+                      <img
+                        src={o.payment_proof_image_url}
+                        alt={`${o.order_number} payment proof`}
+                        className="w-16 h-16 rounded object-cover bg-white"
+                      />
+                      <div className="text-start text-[11px] text-purple-900 font-semibold">
+                        <div className="flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-purple-700" />
+                          <span>{isAr ? 'صورة إيصال التحويل ✓' : 'Transfer Proof ✓'}</span>
+                        </div>
+                        <span className="text-[10px] text-purple-700">{isAr ? 'اضغط للتكبير' : 'Click to enlarge'}</span>
+                      </div>
+                    </button>
+                  )}
                   {o.prescription_image_url && (
                     <a
                       href={o.prescription_image_url}
@@ -1920,6 +1986,35 @@ export const MerchantsOrdersSection: React.FC<Props> = ({
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>{deletingOrder ? (isAr ? 'جاري الحذف...' : 'Deleting...') : isAr ? 'نعم، حذف نهائي' : 'Yes, Delete Permanently'}</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {previewProofImage && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setPreviewProofImage(null)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl border border-slate-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between gap-2">
+              <h4 className="text-sm font-bold truncate">{previewProofImage.title}</h4>
+              <button
+                type="button"
+                onClick={() => setPreviewProofImage(null)}
+                className="p-1.5 rounded-lg bg-white/15 hover:bg-white/25"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 bg-slate-50 flex items-center justify-center max-h-[75vh] overflow-auto">
+              <img
+                src={previewProofImage.url}
+                alt={previewProofImage.title}
+                className="max-w-full max-h-[68vh] object-contain rounded-xl border border-slate-200 bg-white shadow-xs"
+              />
             </div>
           </div>
         </div>

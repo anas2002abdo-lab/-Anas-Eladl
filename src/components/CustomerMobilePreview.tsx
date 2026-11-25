@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock,
+  Copy,
   CreditCard,
   Crosshair,
   FileText,
@@ -25,6 +26,7 @@ import {
   Percent,
   Pill,
   Plus,
+  QrCode,
   RefreshCw,
   Search,
   Send,
@@ -38,6 +40,7 @@ import {
   Store,
   Tag,
   Trash2,
+  Upload,
   User,
   Wallet,
   X,
@@ -319,7 +322,8 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   const [mktImageName, setMktImageName] = useState('');
   const [mktCondition, setMktCondition] = useState<'new' | 'used'>('used');
   const [trackedOrderId, setTrackedOrderId] = useState<string | null>(null);
-  const [checkoutPaymentMethod, setCheckoutPaymentMethod] = useState<'cash' | 'network' | 'wallet'>('cash');
+  const [checkoutPaymentMethod, setCheckoutPaymentMethod] = useState<'cash' | 'vodafone_cash' | 'instapay' | 'network'>('cash');
+  const [paymentProofImageUrl, setPaymentProofImageUrl] = useState<string>('');
   const [showCheckoutMap, setShowCheckoutMap] = useState(false);
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings | null>(null);
   const autoOpenedCaptainChatIdsRef = useRef<Set<string>>(new Set());
@@ -505,10 +509,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
     if (boot.payment_settings) {
       setPaymentSettings(boot.payment_settings);
-      if (!boot.payment_settings.cod_enabled && boot.payment_settings.network_pos_enabled) {
-        setCheckoutPaymentMethod('network');
-      } else if (!boot.payment_settings.cod_enabled && !boot.payment_settings.network_pos_enabled && boot.payment_settings.wallet_enabled) {
-        setCheckoutPaymentMethod('wallet');
+      if (!boot.payment_settings.cod_enabled) {
+        if (boot.payment_settings.vodafone_cash_enabled) {
+          setCheckoutPaymentMethod('vodafone_cash');
+        } else if (boot.payment_settings.instapay_enabled) {
+          setCheckoutPaymentMethod('instapay');
+        } else if (boot.payment_settings.network_pos_enabled) {
+          setCheckoutPaymentMethod('network');
+        }
       }
     }
 
@@ -1256,6 +1264,10 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
           customer_lat: pickupLat,
           customer_lng: pickupLng,
           payment_method: checkoutPaymentMethod,
+          payment_proof_image_url:
+            (checkoutPaymentMethod === 'vodafone_cash' || checkoutPaymentMethod === 'instapay') && paymentProofImageUrl
+              ? paymentProofImageUrl
+              : undefined,
           stores: cartGroups.map((grp) => ({
             merchant_id: grp.merchant_id,
             order_channel: 'catalog',
@@ -1289,6 +1301,10 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
           customer_lat: pickupLat,
           customer_lng: pickupLng,
           payment_method: checkoutPaymentMethod,
+          payment_proof_image_url:
+            (checkoutPaymentMethod === 'vodafone_cash' || checkoutPaymentMethod === 'instapay') && paymentProofImageUrl
+              ? paymentProofImageUrl
+              : undefined,
         });
         createdOrderId = res.id || '';
         createdOrderNumber = res.order_number;
@@ -1302,6 +1318,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
     }
     setCart({});
     setFreeTextOrder('');
+    setPaymentProofImageUrl('');
     setCouponCode('');
     setAppliedDiscount(0);
     await Promise.all([loadBootstrap(true), onRefreshCore()]);
@@ -4483,10 +4500,12 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                     <span>{isAr ? 'طريقة الدفع عند الاستلام' : 'Payment Method'}</span>
                   </label>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
-                    {checkoutPaymentMethod === 'network'
+                    {checkoutPaymentMethod === 'vodafone_cash'
+                      ? (isAr ? 'فودافون كاش' : 'Vodafone Cash')
+                      : checkoutPaymentMethod === 'instapay'
+                      ? (isAr ? 'إنستا باي' : 'InstaPay')
+                      : checkoutPaymentMethod === 'network'
                       ? (isAr ? 'شبكة / POS مع الكابتن' : 'Card / POS')
-                      : checkoutPaymentMethod === 'wallet'
-                      ? (isAr ? 'محفظة إلكترونية' : 'Wallet')
                       : (isAr ? 'كاش يدًا بيد' : 'Cash')}
                   </span>
                 </div>
@@ -4527,7 +4546,240 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                     </label>
                   )}
 
-                  {/* Option 2: Network / Card with Captain POS */}
+                  {/* Option 2: Vodafone Cash */}
+                  {paymentSettings?.vodafone_cash_enabled !== false && (
+                    <div
+                      className={`rounded-xl border transition-all ${
+                        checkoutPaymentMethod === 'vodafone_cash'
+                          ? 'bg-rose-50/70 border-red-500 ring-1 ring-red-500 shadow-xs'
+                          : 'bg-white border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <label className="flex items-start gap-3 p-3 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="checkout_payment"
+                          value="vodafone_cash"
+                          checked={checkoutPaymentMethod === 'vodafone_cash'}
+                          onChange={() => setCheckoutPaymentMethod('vodafone_cash')}
+                          className="mt-0.5 text-red-600 focus:ring-red-500"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                              <Smartphone className="w-4 h-4 text-red-600 shrink-0" />
+                              <span>{isAr ? 'فودافون كاش' : 'Vodafone Cash'}</span>
+                            </span>
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 bg-red-100 text-red-800 rounded">
+                              {isAr ? 'تحويل محفظة' : 'Wallet'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 mt-0.5">
+                            {paymentSettings?.vodafone_cash_instructions_ar ||
+                              (isAr ? 'حوّل المبلغ على رقم فودافون كاش ثم أرفق صورة إيصال التحويل' : 'Transfer to Vodafone Cash number and attach receipt')}
+                          </p>
+                        </div>
+                      </label>
+
+                      {checkoutPaymentMethod === 'vodafone_cash' && (
+                        <div className="px-3 pb-3 pt-1 space-y-2.5 border-t border-red-200/70">
+                          <div className="flex items-center justify-between gap-2 bg-white border border-red-200 rounded-xl p-2.5">
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-semibold text-slate-500">{isAr ? 'رقم فودافون كاش للتحويل:' : 'Vodafone Cash Number:'}</div>
+                              <div dir="ltr" className="text-sm font-mono-num font-extrabold text-slate-900 text-left">
+                                {paymentSettings?.vodafone_cash_number || (isAr ? 'لم يتم إضافة الرقم بعد من لوحة التحكم' : 'Not configured yet')}
+                              </div>
+                            </div>
+                            {paymentSettings?.vodafone_cash_number && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(paymentSettings.vodafone_cash_number);
+                                  onNotify(isAr ? `تم نسخ رقم فودافون كاش: ${paymentSettings.vodafone_cash_number}` : 'Copied Vodafone Cash number');
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[11px] font-bold shrink-0"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                                <span>{isAr ? 'نسخ' : 'Copy'}</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="bg-white border border-red-200 rounded-xl p-2.5 space-y-2">
+                            {paymentProofImageUrl ? (
+                              <div className="space-y-2">
+                                <img
+                                  src={paymentProofImageUrl}
+                                  alt="Transfer receipt"
+                                  className="w-full max-h-40 object-cover rounded-lg border border-slate-200"
+                                />
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-bold text-teal-700">{isAr ? 'تم إرفاق صورة التحويل ✓' : 'Receipt attached ✓'}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPaymentProofImageUrl('')}
+                                    className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 hover:text-rose-700"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{isAr ? 'حذف' : 'Remove'}</span>
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <label className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors">
+                                <Upload className="w-4 h-4" />
+                                <span>{isAr ? 'إضافة صورة التحويل' : 'Attach Transfer Photo'}</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    e.target.value = '';
+                                    if (!file) return;
+                                    const reader = new FileReader();
+                                    reader.onload = () => {
+                                      setPaymentProofImageUrl(String(reader.result || ''));
+                                      onNotify(isAr ? 'تم إرفاق صورة التحويل بنجاح' : 'Receipt attached');
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }}
+                                />
+                              </label>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Option 3: InstaPay */}
+                  {paymentSettings?.instapay_enabled !== false && (
+                    <div
+                      className={`rounded-xl border transition-all ${
+                        checkoutPaymentMethod === 'instapay'
+                          ? 'bg-purple-50/70 border-purple-500 ring-1 ring-purple-500 shadow-xs'
+                          : 'bg-white border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <label className="flex items-start gap-3 p-3 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="checkout_payment"
+                          value="instapay"
+                          checked={checkoutPaymentMethod === 'instapay'}
+                          onChange={() => setCheckoutPaymentMethod('instapay')}
+                          className="mt-0.5 text-purple-600 focus:ring-purple-500"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                              <QrCode className="w-4 h-4 text-purple-600 shrink-0" />
+                              <span>{isAr ? 'إنستا باي (InstaPay)' : 'InstaPay'}</span>
+                            </span>
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 bg-purple-100 text-purple-800 rounded">
+                              {isAr ? 'تحويل لحظي' : 'Instant'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 mt-0.5">
+                            {paymentSettings?.instapay_instructions_ar ||
+                              (isAr ? 'امسح باركود إنستا باي أو انسخ الرابط وحوّل المبلغ ثم أرفق صورة التحويل' : 'Scan InstaPay QR or copy link and attach receipt')}
+                          </p>
+                        </div>
+                      </label>
+
+                      {checkoutPaymentMethod === 'instapay' && (
+                        <div className="px-3 pb-3 pt-1 space-y-2.5 border-t border-purple-200/70">
+                          <div className="flex justify-center">
+                            {paymentSettings?.instapay_qr_image_url ? (
+                              <div className="bg-white border border-purple-200 rounded-xl p-2 shadow-xs">
+                                <img
+                                  src={paymentSettings.instapay_qr_image_url}
+                                  alt="InstaPay QR"
+                                  className="w-40 h-40 object-contain"
+                                />
+                              </div>
+                            ) : (
+                              <div className="w-40 h-28 bg-white border border-dashed border-purple-200 rounded-xl flex flex-col items-center justify-center text-purple-400 gap-1">
+                                <QrCode className="w-8 h-8" />
+                                <span className="text-[10px] font-semibold text-center px-2">
+                                  {isAr ? 'باركود إنستا باي غير مضاف بعد' : 'No QR configured yet'}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 bg-white border border-purple-200 rounded-xl p-2.5">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[10px] font-semibold text-slate-500">{isAr ? 'رابط / عنوان إنستا باي:' : 'InstaPay Link:'}</div>
+                              <div dir="ltr" className="text-xs font-mono-num font-bold text-purple-900 break-all text-left">
+                                {paymentSettings?.instapay_link || (isAr ? 'لم يتم إضافة الرابط بعد من لوحة التحكم' : 'Not configured yet')}
+                              </div>
+                            </div>
+                            {paymentSettings?.instapay_link && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard?.writeText(paymentSettings.instapay_link);
+                                  onNotify(isAr ? `تم نسخ رابط إنستا باي: ${paymentSettings.instapay_link}` : 'Copied InstaPay link');
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[11px] font-bold shrink-0"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                                <span>{isAr ? 'نسخ الرابط' : 'Copy'}</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="bg-white border border-purple-200 rounded-xl p-2.5 space-y-2">
+                            {paymentProofImageUrl ? (
+                              <div className="space-y-2">
+                                <img
+                                  src={paymentProofImageUrl}
+                                  alt="Transfer receipt"
+                                  className="w-full max-h-40 object-cover rounded-lg border border-slate-200"
+                                />
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-bold text-teal-700">{isAr ? 'تم إرفاق صورة التحويل ✓' : 'Receipt attached ✓'}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPaymentProofImageUrl('')}
+                                    className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 hover:text-rose-700"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{isAr ? 'حذف' : 'Remove'}</span>
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <label className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors">
+                                <Upload className="w-4 h-4" />
+                                <span>{isAr ? 'إضافة صورة التحويل' : 'Attach Transfer Photo'}</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    e.target.value = '';
+                                    if (!file) return;
+                                    const reader = new FileReader();
+                                    reader.onload = () => {
+                                      setPaymentProofImageUrl(String(reader.result || ''));
+                                      onNotify(isAr ? 'تم إرفاق صورة التحويل بنجاح' : 'Receipt attached');
+                                    };
+                                    reader.readAsDataURL(file);
+                                  }}
+                                />
+                              </label>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Option 4: Network / Card with Captain POS */}
                   {paymentSettings?.network_pos_enabled !== false && (
                     <label
                       className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
@@ -4559,43 +4811,6 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                             (isAr
                               ? 'الكابتن يحضر ماكينة دفع إلكترونية POS لقبول بطاقات مدى، فيزا، وماستركارد'
                               : 'Captain brings a mobile POS machine for card payment')}
-                        </p>
-                      </div>
-                    </label>
-                  )}
-
-                  {/* Option 3: Digital Wallet / InstaPay */}
-                  {paymentSettings?.wallet_enabled && (
-                    <label
-                      className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
-                        checkoutPaymentMethod === 'wallet'
-                          ? 'bg-purple-50/70 border-purple-500 ring-1 ring-purple-500 shadow-xs'
-                          : 'bg-white border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="checkout_payment"
-                        value="wallet"
-                        checked={checkoutPaymentMethod === 'wallet'}
-                        onChange={() => setCheckoutPaymentMethod('wallet')}
-                        className="mt-0.5 text-purple-600 focus:ring-purple-500"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                            <Smartphone className="w-4 h-4 text-purple-600 shrink-0" />
-                            <span>{isAr ? 'محفظة إلكترونية / إنستاباي' : 'Wallet / InstaPay'}</span>
-                          </span>
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 bg-purple-100 text-purple-800 rounded">
-                            {isAr ? 'إلكتروني' : 'Digital'}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-600 mt-0.5">
-                          {paymentSettings?.wallet_instructions_ar ||
-                            (isAr
-                              ? 'التحويل عبر فودافون كاش أو شبكة المدفوعات اللحظية InstaPay'
-                              : 'Instant transfer via Vodafone Cash or InstaPay')}
                         </p>
                       </div>
                     </label>
@@ -4650,10 +4865,12 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                 )}
                 <div className="flex justify-between text-base font-bold text-slate-900 pt-2 border-t border-slate-200">
                   <span>
-                    {checkoutPaymentMethod === 'network'
+                    {checkoutPaymentMethod === 'vodafone_cash'
+                      ? (isAr ? 'الإجمالي المطلوب (فودافون كاش):' : 'Total (Vodafone Cash):')
+                      : checkoutPaymentMethod === 'instapay'
+                      ? (isAr ? 'الإجمالي المطلوب (إنستا باي):' : 'Total (InstaPay):')
+                      : checkoutPaymentMethod === 'network'
                       ? (isAr ? 'الإجمالي المطلوب (دفع بالشبكة / POS):' : 'Total (Network / POS):')
-                      : checkoutPaymentMethod === 'wallet'
-                      ? (isAr ? 'الإجمالي المطلوب (محفظة إلكترونية):' : 'Total (Wallet):')
                       : (isAr ? 'الإجمالي المطلوب (كاش عند الاستلام):' : 'Total (Cash on delivery):')}
                   </span>
                   <span>{finalTotalEstimate} ج.م</span>
