@@ -76,7 +76,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final ScrollController _scrollCtrl = ScrollController();
 
   bool _loading = true;
@@ -84,6 +84,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _hasMore = false;
   int _page = 1;
   String _shuffleSeed = '';
+  DateTime? _pausedAt;
   String? _error;
 
   List<Map<String, dynamic>> _banners = [];
@@ -117,9 +118,25 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scrollCtrl.addListener(_handleScroll);
     _fetchStorefront(reset: true);
     _startHeroTimer();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _pausedAt = DateTime.now();
+      return;
+    }
+    if (state == AppLifecycleState.resumed && _pausedAt != null) {
+      final elapsed = DateTime.now().difference(_pausedAt!);
+      _pausedAt = null;
+      if (elapsed.inSeconds >= 3 && _isAllHomeFeed && !_loading) {
+        _fetchStorefront(reset: true);
+      }
+    }
   }
 
   @override
@@ -135,6 +152,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _heroFadeTimer?.cancel();
     _scrollCtrl.removeListener(_handleScroll);
     _scrollCtrl.dispose();
@@ -234,6 +252,10 @@ class _HomeScreenState extends State<HomeScreen> {
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
+      final serverSeed = (res['shuffle_seed'] ?? '').toString().trim();
+      if (reset && _isAllHomeFeed && serverSeed.isEmpty && parsedProducts.length > 1) {
+        parsedProducts.shuffle(math.Random());
+      }
       final parsedCats = rawCats
           .whereType<Map>()
           .map((e) => Map<String, dynamic>.from(e))
@@ -292,6 +314,12 @@ class _HomeScreenState extends State<HomeScreen> {
       widget.selectedCategoryId.isNotEmpty ||
       widget.selectedBrand.isNotEmpty ||
       widget.selectedMerchantId.isNotEmpty;
+
+  bool get _isAllHomeFeed =>
+      !_hasScopedFilter &&
+      (widget.storefrontFilter.isEmpty ||
+          widget.storefrontFilter == 'for_you' ||
+          widget.storefrontFilter == 'all');
 
   String _activeScopeLabel() {
     final parts = <String>[];
@@ -1303,9 +1331,13 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.only(left: 8),
             child: InkWell(
               onTap: () {
+                final alreadyAll = _isAllHomeFeed;
                 if (_hasScopedFilter) widget.onClearAllFilters();
                 widget.onSelectCategory('', '');
                 widget.onChangeFilter('all');
+                if (alreadyAll) {
+                  _fetchStorefront(reset: true);
+                }
               },
               borderRadius: BorderRadius.circular(15),
               child: Container(

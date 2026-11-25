@@ -2766,14 +2766,48 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                 setShowLiveTracking(false);
               }}
               onChangeFilter={(f) => setStorefrontFilter(f)}
-              onSelectCategory={(catId) => setStorefrontCategoryId(catId)}
+              onSelectCategory={(catId) => {
+                if (
+                  !catId &&
+                  !storefrontCategoryId &&
+                  !storefrontBrand &&
+                  !storefrontMerchantId &&
+                  storefrontFilter === 'for_you'
+                ) {
+                  void loadStorefrontData({
+                    page: 1,
+                    append: false,
+                    filter: 'for_you',
+                    categoryId: '',
+                    brand: '',
+                    merchantId: '',
+                  });
+                } else {
+                  setStorefrontCategoryId(catId);
+                }
+              }}
               onSelectBrand={(brand) => setStorefrontBrand(brand)}
               onSelectMerchant={(mid) => setStorefrontMerchantId(mid)}
               onClearAllFilters={() => {
+                const alreadyAll =
+                  storefrontFilter === 'for_you' &&
+                  !storefrontCategoryId &&
+                  !storefrontBrand &&
+                  !storefrontMerchantId;
                 setStorefrontFilter('for_you');
                 setStorefrontCategoryId('');
                 setStorefrontBrand('');
                 setStorefrontMerchantId('');
+                if (alreadyAll) {
+                  void loadStorefrontData({
+                    page: 1,
+                    append: false,
+                    filter: 'for_you',
+                    categoryId: '',
+                    brand: '',
+                    merchantId: '',
+                  });
+                }
               }}
               onLoadMore={() => {
                 void loadStorefrontData({

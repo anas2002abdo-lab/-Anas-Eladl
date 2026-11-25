@@ -883,7 +883,7 @@ export const api = {
       brands: string[];
       shuffle_seed?: string;
       pagination: { page: number; limit: number; total: number; has_more: boolean };
-    }>(`/api/storefront/home${suffix}`);
+    }>(`/api/storefront/home${suffix}`, { cache: 'no-store' });
   },
   searchStorefront: (params?: {
     q?: string;
