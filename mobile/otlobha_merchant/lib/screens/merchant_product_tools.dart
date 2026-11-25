@@ -1867,7 +1867,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
     final swipeProgress = (_dragDx / 110).clamp(-1.0, 1.0).toDouble();
     final currentImgUrl = current != null ? (current['image_url'] ?? '').toString().trim() : '';
     final currentCategory = current != null
-        ? (current['category_name'] ?? current['category_name_ar'] ?? 'بدون قسم').toString().trim()
+        ? _extractLeafCategoryName((current['category_name'] ?? current['category_name_ar'] ?? 'بدون قسم').toString())
         : '';
     final displayTotal = _totalAvailable > 0 ? _totalAvailable : _deck.length;
     final currentPosition = (_currentAbsoluteIndex + 1).clamp(1, displayTotal > 0 ? displayTotal : 1).toInt();
@@ -2435,11 +2435,14 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
         stockQuantity: stock < 0 ? 0 : stock,
       );
 
-      String nextCategoryName = (widget.product['category_name'] ?? widget.product['category_name_ar'] ?? 'بدون قسم').toString();
+      String nextCategoryName = _extractLeafCategoryName(
+        (widget.product['category_name'] ?? widget.product['category_name_ar'] ?? 'بدون قسم').toString(),
+      );
       if (_selectedCategoryId != null) {
         final match = _categories.where((c) => '${c['id']}' == _selectedCategoryId);
         if (match.isNotEmpty) {
-          nextCategoryName = (match.first['full_path_ar'] ?? match.first['name_ar'] ?? nextCategoryName).toString();
+          final leaf = _leafCategoryLabel(match.first);
+          if (leaf.isNotEmpty) nextCategoryName = leaf;
         }
       }
 
@@ -2620,6 +2623,23 @@ class _SwipeCardEditSheetState extends State<_SwipeCardEditSheet> {
   }
 }
 
+String _extractLeafCategoryName(String raw) {
+  final cleaned = raw.replaceAll(';', '').trim();
+  if (cleaned.isEmpty) return '';
+  final parts = cleaned
+      .split(RegExp(r'\s*(?:>|›|»|←|→|/)\s*'))
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty)
+      .toList();
+  return parts.isNotEmpty ? parts.last : cleaned;
+}
+
+String _leafCategoryLabel(Map<String, dynamic> category) {
+  final fromPath = _extractLeafCategoryName((category['full_path_ar'] ?? '').toString());
+  if (fromPath.isNotEmpty) return fromPath;
+  return _extractLeafCategoryName((category['name_ar'] ?? '').toString());
+}
+
 class _CategorySelectorWithAdd extends StatelessWidget {
   final MerchantApiClient api;
   final List<Map<String, dynamic>> categories;
@@ -2688,7 +2708,7 @@ class _CategorySelectorWithAdd extends StatelessWidget {
                   (c) => DropdownMenuItem<String>(
                     value: '${c['id']}',
                     child: Text(
-                      (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
+                      _leafCategoryLabel(c),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -2881,7 +2901,7 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
                       (c) => DropdownMenuItem<String>(
                         value: '${c['id']}',
                         child: Text(
-                          (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),
+                          _leafCategoryLabel(c),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),

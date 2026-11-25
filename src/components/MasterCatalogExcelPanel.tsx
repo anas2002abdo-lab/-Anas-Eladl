@@ -653,11 +653,16 @@ export const MasterCatalogExcelPanel: React.FC<Props> = ({
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold"
               >
                 <option value="">تلقائي من عمود القسم في الملف</option>
-                {merchantCategories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.full_path_ar ? c.full_path_ar.replace(/;\s*$/, '') : c.name_ar}
-                  </option>
-                ))}
+                {merchantCategories.map((c) => {
+                  const raw = String(c.full_path_ar || c.name_ar || '').replace(/;\s*$/, '').trim();
+                  const segments = raw.split(/\s*(?:>|›|»|←|→|\/)\s*/).map((s) => s.trim()).filter(Boolean);
+                  const leafLabel = segments.length > 0 ? segments[segments.length - 1] : (c.name_ar || raw);
+                  return (
+                    <option key={c.id} value={c.id}>
+                      {leafLabel}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
