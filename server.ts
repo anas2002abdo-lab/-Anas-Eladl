@@ -2903,7 +2903,13 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
   const rawPayment = String(req.body.payment_method || 'cash').trim().toLowerCase();
   const resolvedPaymentMethod = ['network', 'card', 'pos'].includes(rawPayment)
     ? 'network'
-    : (rawPayment === 'wallet' ? 'wallet' : 'cash');
+    : rawPayment === 'instapay'
+    ? 'instapay'
+    : rawPayment === 'vodafone_cash'
+    ? 'vodafone_cash'
+    : rawPayment === 'wallet'
+    ? 'wallet'
+    : 'cash';
 
   const insertOrderTx = db.transaction(() => {
     if (validatedCouponId) {
@@ -3341,7 +3347,13 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
   const rawPayment = String(req.body.payment_method || 'cash').trim().toLowerCase();
   const resolvedPaymentMethod = ['network', 'card', 'pos'].includes(rawPayment)
     ? 'network'
-    : (rawPayment === 'wallet' ? 'wallet' : 'cash');
+    : rawPayment === 'instapay'
+    ? 'instapay'
+    : rawPayment === 'vodafone_cash'
+    ? 'vodafone_cash'
+    : rawPayment === 'wallet'
+    ? 'wallet'
+    : 'cash';
 
   const bundleTx = db.transaction(() => {
     if (validatedCouponId) {

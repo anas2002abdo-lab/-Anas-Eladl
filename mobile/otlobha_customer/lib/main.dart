@@ -1619,6 +1619,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
             .where((t) => t['status'] != 'completed' && t['status'] != 'cancelled')
             .length;
     final cartTotalQty = _quickCart.values.fold<int>(0, (sum, q) => sum + q);
+    final cartTotalAmount = _computeCartTotalAmount();
 
     final screens = [
       HomeScreen(
@@ -1796,7 +1797,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         textDirection: TextDirection.rtl,
         child: Scaffold(
           key: _scaffoldKey,
-          extendBody: true,
+          extendBody: _index == 0,
           drawer: _buildCustomerDrawer(context),
           appBar: _index == 0
               ? null
@@ -1877,62 +1878,98 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                           top: _index == 0,
                           bottom: false,
                           child: InkWell(
-                        onTap: () => _openExternalVerifyEmailPage(),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          decoration: const BoxDecoration(
-                            border: Border(bottom: BorderSide(color: Color(0xFFFED7AA))),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.mark_email_unread_outlined, color: Color(0xFFC2410C), size: 20),
-                              const SizedBox(width: 10),
-                              const Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      'وثّق بريدك الإلكتروني الآن',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w800,
-                                        fontSize: 12.5,
-                                        color: Color(0xFF9A3412),
-                                      ),
-                                    ),
-                                    Text(
-                                      'اضغط هنا لفتح صفحة التوثيق وإدخال الرمز',
-                                      style: TextStyle(fontSize: 11, color: Color(0xFF7C2D12)),
-                                    ),
-                                  ],
-                                ),
+                            onTap: () => _openExternalVerifyEmailPage(),
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              decoration: const BoxDecoration(
+                                border: Border(bottom: BorderSide(color: Color(0xFFFED7AA))),
                               ),
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFA92224),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: const Text(
-                                  'توثيق الآن',
-                                  style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold),
-                                ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.mark_email_unread_outlined, color: Color(0xFFC2410C), size: 20),
+                                  const SizedBox(width: 10),
+                                  const Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          'وثّق بريدك الإلكتروني الآن',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 12.5,
+                                            color: Color(0xFF9A3412),
+                                          ),
+                                        ),
+                                        Text(
+                                          'اضغط هنا لفتح صفحة التوثيق وإدخال الرمز',
+                                          style: TextStyle(fontSize: 11, color: Color(0xFF7C2D12)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFA92224),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: const Text(
+                                      'توثيق الآن',
+                                      style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                ],
                               ),
-                            ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  ),
-                  Expanded(child: IndexedStack(index: _index, children: screens)),
-                ],
-              ),
-        bottomNavigationBar: _buildCustomerBottomBar(cartTotalQty),
-      ),
+                    Expanded(child: IndexedStack(index: _index, children: screens)),
+                  ],
+                ),
+          bottomNavigationBar: _buildCustomerBottomBar(cartTotalQty, cartTotalAmount),
+        ),
       ),
     );
+  }
+
+  double _computeCartTotalAmount() {
+    if (_quickCart.isEmpty) return 0;
+    final allProducts = (_bootstrap['products'] as List?) ?? const [];
+    final bootstrapById = <String, Map<String, dynamic>>{};
+    for (final p in allProducts) {
+      if (p is Map && p['id'] != null) {
+        bootstrapById[p['id'].toString()] = Map<String, dynamic>.from(p);
+      }
+    }
+    double subtotal = 0;
+    for (final entry in _quickCart.entries) {
+      final qty = entry.value;
+      if (qty <= 0) continue;
+      final p = _cartProductsCache[entry.key] ?? bootstrapById[entry.key];
+      if (p == null) continue;
+      final rawUnit = p['effective_price'] ?? p['sale_price'] ?? p['base_price'] ?? p['price'] ?? 0;
+      final unit = rawUnit is num ? rawUnit.toDouble() : (double.tryParse('$rawUnit') ?? 0.0);
+      final isWeighted = p['is_weighted'] == true || p['is_weighted'] == 1;
+      final rawStep = p['weight_step'];
+      final parsedStep = rawStep is num ? rawStep.toDouble() : (double.tryParse('${rawStep ?? ''}') ?? 0.25);
+      final weightStep = isWeighted ? (parsedStep > 0 && parsedStep <= 10 ? parsedStep : 0.25) : 1.0;
+      final effectiveQty = isWeighted ? double.parse((qty * weightStep).toStringAsFixed(3)) : qty.toDouble();
+      subtotal += unit * effectiveQty;
+    }
+    return double.parse(subtotal.toStringAsFixed(2));
+  }
+
+  String _formatCartBadgeAmount(double amount) {
+    if (amount <= 0) return '0';
+    final rounded = double.parse(amount.toStringAsFixed(1));
+    if (rounded == rounded.roundToDouble()) {
+      return '${rounded.toInt()} ج';
+    }
+    return '${rounded.toStringAsFixed(1)} ج';
   }
 
   Widget _buildCustomerDrawer(BuildContext context) {
@@ -2162,9 +2199,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     );
   }
 
-  Widget _buildCustomerBottomBar(int cartTotalQty) {
+  Widget _buildCustomerBottomBar(int cartTotalQty, double cartTotalAmount) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final dockWidth = (screenWidth * 0.89).clamp(280.0, 520.0);
+    final dockWidth = (screenWidth * 0.89).clamp(280.0, 520.0).toDouble();
 
     Widget sideTab({
       required int idx,
@@ -2172,6 +2209,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       required IconData activeIcon,
       required String label,
       int badge = 0,
+      String? activeLabelOverride,
     }) {
       final active = _index == idx;
       return Expanded(
@@ -2179,15 +2217,19 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           onTap: () => _switchTab(idx),
           borderRadius: BorderRadius.circular(24),
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 6),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Badge(
                   backgroundColor: const Color(0xFFA92224),
+                  textColor: Colors.white,
                   isLabelVisible: badge > 0,
-                  label: Text('$badge'),
+                  label: Text(
+                    '$badge',
+                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                  ),
                   child: Icon(
                     active ? activeIcon : icon,
                     size: 24,
@@ -2196,13 +2238,13 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  label,
+                  activeLabelOverride ?? label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 10.5,
-                    fontWeight: active ? FontWeight.w900 : FontWeight.w600,
-                    color: active ? const Color(0xFFA92224) : const Color(0xFF475569),
+                    fontWeight: (active || activeLabelOverride != null) ? FontWeight.w900 : FontWeight.w600,
+                    color: (active || activeLabelOverride != null) ? const Color(0xFFA92224) : const Color(0xFF475569),
                   ),
                 ),
               ],
@@ -2216,12 +2258,62 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       top: false,
       child: Padding(
         padding: const EdgeInsets.only(bottom: 12),
-        child: Center(
-          heightFactor: 1.0,
-          child: SizedBox(
-            width: dockWidth,
-            height: 82,
-            child: Stack(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!_loading && cartTotalQty > 0 && _index != 3)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 14, bottom: 10),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () => _switchTab(3),
+                      borderRadius: BorderRadius.circular(20),
+                      child: Ink(
+                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFA92224),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.white, width: 1.5),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x400F172A),
+                              blurRadius: 12,
+                              offset: Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.shopping_bag_rounded, color: Colors.white, size: 15),
+                            const SizedBox(width: 5),
+                            Text(
+                              cartTotalAmount > 0
+                                  ? _formatCartBadgeAmount(cartTotalAmount)
+                                  : '$cartTotalQty',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w900,
+                                height: 1.0,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            Center(
+              heightFactor: 1.0,
+              child: SizedBox(
+                width: dockWidth,
+                height: 82,
+                child: Stack(
               clipBehavior: Clip.none,
               alignment: Alignment.bottomCenter,
               children: [
@@ -2313,6 +2405,8 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               ],
             ),
           ),
+        ),
+          ],
         ),
       ),
     );

@@ -1315,7 +1315,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
 
   String get _localBookmarkKey => 'otlobha_merchant_swipe_bookmark_${widget.merchantId}';
 
-  int get _currentAbsoluteIndex => (_baseOffset + _index - _hiddenCount).clamp(0, 999999);
+  int get _currentAbsoluteIndex => (_baseOffset + _index - _hiddenCount).clamp(0, 999999).toInt();
 
   @override
   void initState() {
@@ -1516,7 +1516,7 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
             fromId: savedProductId,
           );
           if (res.items.isEmpty && totalAvailable > 0) {
-            final fallbackOffset = resolvedOffset.clamp(0, totalAvailable - 1);
+            final fallbackOffset = resolvedOffset.clamp(0, totalAvailable - 1).toInt();
             res = await widget.api.fetchStoreProductsPage(
               merchantId: widget.merchantId,
               page: (fallbackOffset ~/ _kPageSize) + 1,
@@ -1574,25 +1574,27 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
             if (foundAt >= 0) {
               initialIndex = foundAt;
             } else if (res.items.isNotEmpty) {
-              initialIndex = (resolvedOffset - initialBaseOffset).clamp(0, res.items.length - 1);
+              initialIndex = (resolvedOffset - initialBaseOffset).clamp(0, res.items.length - 1).toInt();
             }
           } else if (resolvedOffset > 0 && res.items.isNotEmpty) {
-            initialIndex = (resolvedOffset - initialBaseOffset).clamp(0, res.items.length - 1);
+            initialIndex = (resolvedOffset - initialBaseOffset).clamp(0, res.items.length - 1).toInt();
           }
         }
       }
 
       if (!mounted) return;
-      final computedTotal = totalAvailable > 0
+      final int computedTotal = totalAvailable > 0
           ? totalAvailable
-          : (res.totalAll > 0 ? (res.totalAll - res.totalUnavailable) : res.total).clamp(res.items.length, 999999);
+          : (res.totalAll > 0 ? (res.totalAll - res.totalUnavailable) : res.total)
+              .clamp(res.items.length, 999999)
+              .toInt();
 
       setState(() {
         _deck
           ..clear()
           ..addAll(res.items);
-        _index = res.items.isNotEmpty ? initialIndex.clamp(0, res.items.length - 1) : 0;
-        _baseOffset = initialBaseOffset.clamp(0, computedTotal);
+        _index = res.items.isNotEmpty ? initialIndex.clamp(0, res.items.length - 1).toInt() : 0;
+        _baseOffset = initialBaseOffset.clamp(0, computedTotal).toInt();
         _nextPage = nextPage;
         _totalAvailable = computedTotal;
         _hasMore = _serverSupportsCursor
@@ -1694,7 +1696,8 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
         _deck.addAll(fresh);
         if (_totalAvailable == 0) {
           _totalAvailable = (res.totalAll > 0 ? (res.totalAll - res.totalUnavailable) : res.total)
-              .clamp(_deck.length, 999999);
+              .clamp(_deck.length, 999999)
+              .toInt();
         }
         _hasMore = stillHasMore;
         if (_index >= _deck.length && !_hasMore) {
@@ -1861,14 +1864,14 @@ class _MerchantProductsSwipeDeckState extends State<_MerchantProductsSwipeDeck> 
   @override
   Widget build(BuildContext context) {
     final current = _index < _deck.length ? _deck[_index] : null;
-    final swipeProgress = (_dragDx / 110).clamp(-1.0, 1.0);
+    final swipeProgress = (_dragDx / 110).clamp(-1.0, 1.0).toDouble();
     final currentImgUrl = current != null ? (current['image_url'] ?? '').toString().trim() : '';
     final currentCategory = current != null
         ? (current['category_name'] ?? current['category_name_ar'] ?? 'بدون قسم').toString().trim()
         : '';
     final displayTotal = _totalAvailable > 0 ? _totalAvailable : _deck.length;
-    final currentPosition = (_currentAbsoluteIndex + 1).clamp(1, displayTotal > 0 ? displayTotal : 1);
-    final remainingCount = (displayTotal - _currentAbsoluteIndex).clamp(0, 999999);
+    final currentPosition = (_currentAbsoluteIndex + 1).clamp(1, displayTotal > 0 ? displayTotal : 1).toInt();
+    final remainingCount = (displayTotal - _currentAbsoluteIndex).clamp(0, 999999).toInt();
     final canRestartFromBeginning = _currentAbsoluteIndex > 0 || _completedAll;
 
     return Directionality(
@@ -2861,7 +2864,7 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
               ),
               const SizedBox(height: 10),
               if (widget.categories.isNotEmpty) ...[
-                DropdownButtonFormField<String?>(
+                DropdownButtonFormField<String>(
                   value: _parentId,
                   isExpanded: true,
                   decoration: const InputDecoration(
@@ -2870,12 +2873,12 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
                     isDense: true,
                   ),
                   items: [
-                    const DropdownMenuItem<String?>(
+                    const DropdownMenuItem<String>(
                       value: null,
                       child: Text('بدون (قسم رئيسي)'),
                     ),
                     ...widget.categories.map(
-                      (c) => DropdownMenuItem<String?>(
+                      (c) => DropdownMenuItem<String>(
                         value: '${c['id']}',
                         child: Text(
                           (c['full_path_ar'] ?? c['name_ar'] ?? '').toString(),

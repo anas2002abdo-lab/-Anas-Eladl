@@ -1012,7 +1012,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                   icon: Icons.style_rounded,
                   label: 'قسم المنتجات',
                   color: const Color(0xFFD97706),
-                  badgeCount: (_totalAllProducts - _totalUnavailableProducts).clamp(0, 999999),
+                  badgeCount: (_totalAllProducts - _totalUnavailableProducts).clamp(0, 999999).toInt(),
                   onTap: () async {
                     if (_categories.isEmpty) {
                       await _loadCategories();

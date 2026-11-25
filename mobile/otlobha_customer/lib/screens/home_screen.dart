@@ -164,7 +164,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   double _computeHeroHeight(BuildContext context) {
     final media = MediaQuery.of(context);
-    final scaled = (media.size.width * 0.98).clamp(400.0, 560.0);
+    final scaled = (media.size.width * 0.86).clamp(355.0, 505.0).toDouble();
     return scaled + media.padding.top;
   }
 
@@ -281,30 +281,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  double _toDouble(dynamic v) {
-    if (v is num) return v.toDouble();
-    return double.tryParse((v ?? '').toString()) ?? 0;
-  }
-
-  String _formatPrice(double value) {
-    if (value == value.roundToDouble()) return value.toInt().toString();
-    return value.toStringAsFixed(2);
-  }
-
   int _getCartTotalQty() => widget.cart.values.fold<int>(0, (sum, q) => sum + q);
-
-  double _getCartSubtotal() {
-    double total = 0;
-    for (final entry in widget.cart.entries) {
-      if (entry.value <= 0) continue;
-      final cached = widget.cartProductsCache[entry.key];
-      if (cached != null) {
-        final eff = cached['effective_price'] ?? cached['sale_price'] ?? cached['base_price'];
-        total += _toDouble(eff) * entry.value;
-      }
-    }
-    return total;
-  }
 
   bool get _hasScopedFilter =>
       widget.selectedCategoryId.isNotEmpty ||
@@ -830,7 +807,7 @@ class _HomeScreenState extends State<HomeScreen> {
             // 2. Floating Overlay Layer directly over Hero Banner (Logo + Location + Actions + Copy + 82% Oval Search)
             Positioned.fill(
               child: Padding(
-                padding: EdgeInsets.fromLTRB(14, topPadding + 10, 14, 22),
+                padding: EdgeInsets.fromLTRB(14, topPadding + 8, 14, 14),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -1043,7 +1020,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ),
                                 ),
                               ],
-                              const SizedBox(height: 12),
+                              const SizedBox(height: 8),
                               Row(
                                 children: [
                                   Container(
@@ -1167,52 +1144,11 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     ];
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-          child: Row(
-            children: [
-              const Text(
-                'خدمات اطلبها',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF0F172A),
-                ),
-              ),
-              const Spacer(),
-              InkWell(
-                onTap: () => widget.onOpenService('hub'),
-                borderRadius: BorderRadius.circular(10),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'عرض الكل',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFFA92224),
-                        ),
-                      ),
-                      SizedBox(width: 3),
-                      Icon(Icons.arrow_back_ios_new_rounded, size: 11, color: Color(0xFFA92224)),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        SizedBox(
-          height: 102,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
+    return SizedBox(
+      height: 98,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
             padding: const EdgeInsets.symmetric(horizontal: 16),
             itemCount: services.length,
             separatorBuilder: (_, __) => const SizedBox(width: 12),
@@ -1279,8 +1215,6 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             },
           ),
-        ),
-      ],
     );
   }
 
@@ -1300,234 +1234,218 @@ class _HomeScreenState extends State<HomeScreen> {
             {'id': 'care', 'name_ar': 'عناية ومنظفات'},
           ];
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
-          child: Text(
-            'الأقسام',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w900,
-              color: Color(0xFF0F172A),
+    return SizedBox(
+      height: 52,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        children: [
+          // 1. Filters Card (compact 52px height)
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: InkWell(
+              onTap: _openFilterModal,
+              borderRadius: BorderRadius.circular(15),
+              child: Container(
+                height: 52,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: _hasScopedFilter ? const Color(0xFF86191B) : Colors.white,
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(
+                    color: _hasScopedFilter ? const Color(0xFF86191B) : const Color(0xFFE2E8F0),
+                  ),
+                  boxShadow: const [
+                    BoxShadow(color: Color(0x080F172A), blurRadius: 8, offset: Offset(0, 2)),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 30,
+                      height: 30,
+                      decoration: BoxDecoration(
+                        color: _hasScopedFilter
+                            ? Colors.white.withOpacity(0.16)
+                            : const Color(0xFFF1F5F9),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(
+                        Icons.tune_rounded,
+                        size: 16,
+                        color: _hasScopedFilter ? const Color(0xFFF5A623) : const Color(0xFF0F172A),
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      'الفلاتر',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: _hasScopedFilter ? Colors.white : const Color(0xFF0F172A),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
-        SizedBox(
-          height: 68,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            children: [
-              // 1. Filters Card (exact 68px height)
-              Padding(
-                padding: const EdgeInsets.only(left: 10),
-                child: InkWell(
-                  onTap: _openFilterModal,
-                  borderRadius: BorderRadius.circular(18),
-                  child: Container(
-                    height: 68,
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    decoration: BoxDecoration(
-                      color: _hasScopedFilter ? const Color(0xFF86191B) : Colors.white,
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: _hasScopedFilter ? const Color(0xFF86191B) : const Color(0xFFE2E8F0),
-                      ),
-                      boxShadow: const [
-                        BoxShadow(color: Color(0x080F172A), blurRadius: 10, offset: Offset(0, 3)),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 38,
-                          height: 38,
-                          decoration: BoxDecoration(
-                            color: _hasScopedFilter
-                                ? Colors.white.withOpacity(0.16)
-                                : const Color(0xFFF1F5F9),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(
-                            Icons.tune_rounded,
-                            size: 19,
-                            color: _hasScopedFilter ? const Color(0xFFF5A623) : const Color(0xFF0F172A),
-                          ),
-                        ),
-                        const SizedBox(width: 9),
-                        Text(
-                          'الفلاتر',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w900,
-                            color: _hasScopedFilter ? Colors.white : const Color(0xFF0F172A),
-                          ),
-                        ),
-                      ],
-                    ),
+
+          // 2. All Categories Card (compact 52px height)
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: InkWell(
+              onTap: () {
+                if (_hasScopedFilter) widget.onClearAllFilters();
+                widget.onSelectCategory('', '');
+                widget.onChangeFilter('all');
+              },
+              borderRadius: BorderRadius.circular(15),
+              child: Container(
+                height: 52,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: hasNoCat ? const Color(0xFFA92224) : Colors.white,
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(
+                    color: hasNoCat ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
                   ),
-                ),
-              ),
-
-              // 2. All Categories Card (exact 68px height)
-              Padding(
-                padding: const EdgeInsets.only(left: 10),
-                child: InkWell(
-                  onTap: () {
-                    if (_hasScopedFilter) widget.onClearAllFilters();
-                    widget.onSelectCategory('', '');
-                    widget.onChangeFilter('all');
-                  },
-                  borderRadius: BorderRadius.circular(18),
-                  child: Container(
-                    height: 68,
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    decoration: BoxDecoration(
-                      color: hasNoCat ? const Color(0xFFA92224) : Colors.white,
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: hasNoCat ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: hasNoCat ? const Color(0x2EA92224) : const Color(0x080F172A),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
+                  boxShadow: [
+                    BoxShadow(
+                      color: hasNoCat ? const Color(0x2EA92224) : const Color(0x080F172A),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 38,
-                          height: 38,
-                          decoration: BoxDecoration(
-                            color: hasNoCat ? Colors.white.withOpacity(0.18) : const Color(0xFFFEF2F2),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(
-                            Icons.grid_view_rounded,
-                            size: 19,
-                            color: hasNoCat ? Colors.white : const Color(0xFFA92224),
-                          ),
-                        ),
-                        const SizedBox(width: 9),
-                        Text(
-                          'الكل',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w900,
-                            color: hasNoCat ? Colors.white : const Color(0xFF1E293B),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  ],
                 ),
-              ),
-
-              // 3. Dynamic Categories Cards (exact 68px height)
-              ...trendingCats.map((cat) {
-                final catId = (cat['id'] ?? '').toString();
-                final catName = (cat['name_ar'] ?? '').toString().trim();
-                final catImg = OtlobhaCustomerApi.resolveMediaUrl(cat['image_url']);
-                final active = widget.selectedCategoryId == catId;
-
-                return Padding(
-                  padding: const EdgeInsets.only(left: 10),
-                  child: InkWell(
-                    onTap: () {
-                      if (active) {
-                        widget.onSelectCategory('', '');
-                      } else {
-                        widget.onSelectCategory(catId, catName);
-                      }
-                    },
-                    borderRadius: BorderRadius.circular(18),
-                    child: Container(
-                      height: 68,
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 30,
+                      height: 30,
                       decoration: BoxDecoration(
-                        color: active ? const Color(0xFFA92224) : Colors.white,
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(
-                          color: active ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: active ? const Color(0x2EA92224) : const Color(0x080F172A),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
+                        color: hasNoCat ? Colors.white.withOpacity(0.18) : const Color(0xFFFEF2F2),
+                        borderRadius: BorderRadius.circular(10),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 42,
-                            height: 42,
-                            decoration: BoxDecoration(
-                              color: active ? Colors.white.withOpacity(0.18) : const Color(0xFFF8FAFC),
-                              borderRadius: BorderRadius.circular(13),
-                            ),
-                            clipBehavior: Clip.antiAlias,
-                            child: catImg.isNotEmpty
-                                ? Image.network(
-                                    catImg,
-                                    fit: BoxFit.cover,
-                                    cacheWidth: 120,
-                                    errorBuilder: (_, __, ___) => Center(
-                                      child: Text(
-                                        catName.isNotEmpty ? catName.characters.first : 'ق',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w900,
-                                          color: active ? Colors.white : const Color(0xFFA92224),
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                : Center(
-                                    child: Text(
-                                      catName.isNotEmpty ? catName.characters.first : 'ق',
-                                      style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w900,
-                                        color: active ? Colors.white : const Color(0xFFA92224),
-                                      ),
+                      child: Icon(
+                        Icons.grid_view_rounded,
+                        size: 16,
+                        color: hasNoCat ? Colors.white : const Color(0xFFA92224),
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    Text(
+                      'الكل',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: hasNoCat ? Colors.white : const Color(0xFF1E293B),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+          // 3. Dynamic Categories Cards (compact 52px height)
+          ...trendingCats.map((cat) {
+            final catId = (cat['id'] ?? '').toString();
+            final catName = (cat['name_ar'] ?? '').toString().trim();
+            final catImg = OtlobhaCustomerApi.resolveMediaUrl(cat['image_url']);
+            final active = widget.selectedCategoryId == catId;
+
+            return Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: InkWell(
+                onTap: () {
+                  if (active) {
+                    widget.onSelectCategory('', '');
+                  } else {
+                    widget.onSelectCategory(catId, catName);
+                  }
+                },
+                borderRadius: BorderRadius.circular(15),
+                child: Container(
+                  height: 52,
+                  padding: const EdgeInsets.symmetric(horizontal: 9),
+                  decoration: BoxDecoration(
+                    color: active ? const Color(0xFFA92224) : Colors.white,
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(
+                      color: active ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: active ? const Color(0x2EA92224) : const Color(0x080F172A),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color: active ? Colors.white.withOpacity(0.18) : const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: catImg.isNotEmpty
+                            ? Image.network(
+                                catImg,
+                                fit: BoxFit.cover,
+                                cacheWidth: 100,
+                                errorBuilder: (_, __, ___) => Center(
+                                  child: Text(
+                                    catName.isNotEmpty ? catName.characters.first : 'ق',
+                                    style: TextStyle(
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w900,
+                                      color: active ? Colors.white : const Color(0xFFA92224),
                                     ),
                                   ),
-                          ),
-                          const SizedBox(width: 9),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 132),
-                            child: Text(
-                              catName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w800,
-                                color: active ? Colors.white : const Color(0xFF1E293B),
+                                ),
+                              )
+                            : Center(
+                                child: Text(
+                                  catName.isNotEmpty ? catName.characters.first : 'ق',
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w900,
+                                    color: active ? Colors.white : const Color(0xFFA92224),
+                                  ),
+                                ),
                               ),
-                            ),
-                          ),
-                        ],
                       ),
-                    ),
+                      const SizedBox(width: 7),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 118),
+                        child: Text(
+                          catName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: active ? Colors.white : const Color(0xFF1E293B),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                );
-              }),
-            ],
-          ),
-        ),
-      ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
     );
   }
 
@@ -1546,8 +1464,6 @@ class _HomeScreenState extends State<HomeScreen> {
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
-    final totalQty = _getCartTotalQty();
-    final subtotal = _getCartSubtotal();
 
     return Container(
       color: const Color(0xFFF7F7F8),
@@ -1619,18 +1535,18 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-                // 3. Services Horizontal Swipeable Cards Directly Below Hero (Ad Strip Banners Permanently Removed)
+                // 3. Services Horizontal Swipeable Cards Directly Below Hero
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.only(top: 18),
+                    padding: const EdgeInsets.only(top: 12),
                     child: _buildServicesStrip(),
                   ),
                 ),
 
-                // 4. Categories Horizontal Scrollable Strip (exact 68px card height)
+                // 4. Categories Horizontal Scrollable Strip (compact 52px height)
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.only(top: 20),
+                    padding: const EdgeInsets.only(top: 12),
                     child: _buildCategoriesStrip68(),
                   ),
                 ),
@@ -1687,7 +1603,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 // 6. Products Section Header
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 22, 16, 12),
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
                     child: Row(
                       children: [
                         const Text(
@@ -1828,7 +1744,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       16,
                       20,
                       16,
-                      bottomSafe + (totalQty > 0 ? 196 : 132),
+                      bottomSafe + 124,
                     ),
                     child: _loadingMore
                         ? const Center(
@@ -1860,7 +1776,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
           // Single Truly Floating 82% Oval Search Bar hovering independently over Hero & gliding smoothly to top-pinned on scroll
           Positioned(
-            top: ((topPadding + 72.0) - _scrollOffset).clamp(topPadding + 10.0, topPadding + 72.0),
+            top: ((topPadding + 72.0) - _scrollOffset).clamp(topPadding + 10.0, topPadding + 72.0).toDouble(),
             left: 0,
             right: 0,
             child: Center(
@@ -1876,82 +1792,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-
-          // Floating Cart Summary Bar positioned cleanly above the Floating Bottom Navigation Bar
-          if (totalQty > 0)
-            Positioned(
-              left: 20,
-              right: 20,
-              bottom: bottomSafe + 106,
-              child: Material(
-                elevation: 10,
-                shadowColor: const Color(0x55A92224),
-                borderRadius: BorderRadius.circular(20),
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: widget.onOpenCart,
-                  borderRadius: BorderRadius.circular(20),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        begin: Alignment.centerRight,
-                        end: Alignment.centerLeft,
-                        colors: [Color(0xFFA92224), Color(0xFF86191B)],
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: const Color(0x66F5A623)),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF5A623),
-                            borderRadius: BorderRadius.circular(11),
-                          ),
-                          child: Text(
-                            '$totalQty',
-                            style: const TextStyle(
-                              color: Color(0xFF3B180E),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 11),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text(
-                                'عرض السلة وإتمام الطلب',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                              if (subtotal > 0)
-                                Text(
-                                  'الإجمالي المبدئي: ${_formatPrice(subtotal)} ج.م',
-                                  style: const TextStyle(
-                                    color: Color(0xFFFDE68A),
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 16),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
         ],
       ),
     );
