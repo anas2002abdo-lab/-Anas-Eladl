@@ -10,7 +10,8 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "docs/**"
+      - "docs/*.html"
+      - "docs/config.js"
       - ".github/workflows/deploy_customer_portal_pages.yml"
 
 permissions:
@@ -35,6 +36,8 @@ jobs:
       - name: Setup GitHub Pages
         id: pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Inject Public API Base URL into Isolated Customer Portal
         env:
