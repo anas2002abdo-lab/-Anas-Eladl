@@ -39,6 +39,7 @@ import { OrderChatPage } from './OrderChatPage.tsx';
 import { TripChatPage } from './TripChatPage.tsx';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
 import { CaptainPosSection } from './CaptainPosSection.tsx';
+import { CaptainRidesPanel } from './rides/CaptainRidesPanel.tsx';
 import type {
   CaptainRecord,
   Language,
@@ -1870,118 +1871,14 @@ export const CaptainMobilePreview: React.FC<Props> = ({ lang, captains, orders, 
               )}
             </div>
 
-            {/* Available & Active Rides (اطلبها مشوار) */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Car className="w-4 h-4 text-orange-600" />
-                  <h3 className="text-base font-bold text-slate-900">
-                    {isAr ? 'طلبات «اطلبها مشوار» المتاحة ومشاويرك النشطة' : 'Available & Active Rides'}
-                  </h3>
-                </div>
-                <span className="text-xs font-bold text-orange-700 tabular-nums">
-                  {trips.filter((t) => t.status === 'searching' || (t.captain_id === activeCaptain.id && t.status !== 'completed')).length}
-                </span>
-              </div>
-
-              {(() => {
-                const searchingRides = trips.filter((t) => {
-                  if (t.status !== 'searching') return false;
-                  if (t.preferred_captain_id) {
-                    return t.preferred_captain_id === activeCaptain.id;
-                  }
-                  return t.vehicle_type === activeCaptain.vehicle_type || activeCaptain.is_eligible_for_rides;
-                });
-                const myActiveRides = trips.filter(
-                  (t) => t.captain_id === activeCaptain.id && t.status !== 'completed' && t.status !== 'cancelled'
-                );
-
-                if (searchingRides.length === 0 && myActiveRides.length === 0) {
-                  return (
-                    <p className="text-xs text-slate-500 py-2">
-                      {isAr
-                        ? 'لا توجد طلبات مشوار متاحة حاليًا — عند طلب أي عميل مشوار جديد سيظهر لك فورًا هنا.'
-                        : 'No available rides right now.'}
-                    </p>
-                  );
-                }
-
-                return (
-                  <div className="space-y-2.5 text-xs">
-                    {myActiveRides.map((t) => (
-                      <div
-                        key={t.id}
-                        className="p-3.5 rounded-xl border border-teal-300 bg-teal-50/60 flex flex-wrap items-center justify-between gap-3"
-                      >
-                        <div className="space-y-1">
-                          <p className="font-bold text-slate-900">
-                            <span className="font-mono-num">{t.trip_number}</span> · {t.customer_name} ({t.status})
-                          </p>
-                          <p className="text-slate-600">
-                            من: {t.pickup_address} ← إلى: {t.dropoff_address}
-                          </p>
-                          <p className="text-teal-800 font-bold tabular-nums">
-                            السعر المتفق/المقترح: {t.final_fare ?? t.customer_proposed_fare ?? t.estimated_fare} ج.م · {t.distance_km} كم
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setActiveChatTripId(t.id)}
-                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold whitespace-nowrap"
-                        >
-                          <MessageSquare className="w-3.5 h-3.5 text-orange-400" />
-                          <span>{isAr ? 'فتح الشات وتتبع GPS' : 'Open Ride Chat & GPS'}</span>
-                        </button>
-                      </div>
-                    ))}
-
-                    {searchingRides.map((t) => (
-                      <div
-                        key={t.id}
-                        className="p-3.5 rounded-xl border border-orange-200 bg-orange-50/50 flex flex-wrap items-center justify-between gap-3"
-                      >
-                        <div className="space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <p className="font-bold text-slate-900">
-                              <span className="font-mono-num">{t.trip_number}</span> · طلب مشوار جديد ({t.vehicle_type})
-                            </p>
-                            {t.preferred_captain_id === activeCaptain.id && (
-                              <span className="px-2 py-0.5 bg-amber-100 border border-amber-300 text-amber-900 rounded text-[10px] font-bold">
-                                اختارك العميل ★
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-slate-700">
-                            العميل: {t.customer_name} · من: {t.pickup_address}
-                          </p>
-                          <p className="text-slate-700">
-                            الوجهة: {t.dropoff_address} · المسافة: {t.distance_km} كم · عرض العميل:{' '}
-                            <strong className="text-orange-700">
-                              {t.customer_proposed_fare ?? t.estimated_fare} ج.م
-                            </strong>
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={acceptingTripId === t.id}
-                          onClick={() => handleAcceptRide(t)}
-                          className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-orange-600 hover:bg-orange-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold whitespace-nowrap"
-                        >
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>
-                            {acceptingTripId === t.id
-                              ? 'جاري القبول...'
-                              : isAr
-                              ? 'قبول المشوار وفتح الشات'
-                              : 'Accept Ride & Open Chat'}
-                          </span>
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </div>
+            {/* Integrated Ride-Hailing Control Panel (اطلبها كابتن - نظام المشاوير) */}
+            <CaptainRidesPanel
+              captain={activeCaptain}
+              lang={lang}
+              onOpenTripChat={(tripId) => setActiveChatTripId(tripId)}
+              onRefreshCore={onRefreshCore}
+              notify={onNotify}
+            />
 
             {/* Open Orders on Home */}
             <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">

@@ -25,9 +25,16 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
   final TextEditingController _passwordCtrl = TextEditingController();
   final TextEditingController _nameCtrl = TextEditingController();
   final TextEditingController _phoneCtrl = TextEditingController();
+  final TextEditingController _emailCtrl = TextEditingController();
   final TextEditingController _nidCtrl = TextEditingController();
+  final TextEditingController _residenceIdCtrl = TextEditingController();
+  final TextEditingController _brandCtrl = TextEditingController();
   final TextEditingController _modelCtrl = TextEditingController();
+  final TextEditingController _colorCtrl = TextEditingController();
   final TextEditingController _plateCtrl = TextEditingController();
+  final TextEditingController _licenseNumCtrl = TextEditingController();
+  final TextEditingController _regNumCtrl = TextEditingController();
+  final TextEditingController _insuranceNumCtrl = TextEditingController();
   String _vehicleType = 'moto';
   String _zoneName = 'وسط مدينة المنزلة';
   bool _submitting = false;
@@ -41,9 +48,10 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
     'vehicle_right': 'الجانب الأيمن للمركبة',
     'vehicle_left': 'الجانب الأيسر للمركبة',
     'vehicle_plate': 'صورة لوحة المركبة',
-    'vehicle_license': 'رخصة المركبة السارية',
+    'vehicle_license': 'استمارة / رخصة المركبة السارية',
     'driving_license': 'رخصة القيادة',
-    'national_id_front': 'الرقم القومي',
+    'insurance_doc': 'وثيقة تأمين المركبة',
+    'national_id_front': 'الهوية الوطنية / الإقامة',
     'selfie': 'الصورة الشخصية المباشرة (Selfie)',
   };
 
@@ -59,9 +67,16 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
     _passwordCtrl.dispose();
     _nameCtrl.dispose();
     _phoneCtrl.dispose();
+    _emailCtrl.dispose();
     _nidCtrl.dispose();
+    _residenceIdCtrl.dispose();
+    _brandCtrl.dispose();
     _modelCtrl.dispose();
+    _colorCtrl.dispose();
     _plateCtrl.dispose();
+    _licenseNumCtrl.dispose();
+    _regNumCtrl.dispose();
+    _insuranceNumCtrl.dispose();
     super.dispose();
   }
 
@@ -213,12 +228,19 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
         'password': password,
         'full_name': _nameCtrl.text.trim(),
         'phone': _phoneCtrl.text.trim(),
+        if (_emailCtrl.text.trim().isNotEmpty) 'email': _emailCtrl.text.trim(),
         'national_id': _nidCtrl.text.trim(),
+        if (_residenceIdCtrl.text.trim().isNotEmpty) 'residence_id': _residenceIdCtrl.text.trim(),
         'zone_name': _zoneName,
         'vehicle_type': _vehicleType,
+        if (_brandCtrl.text.trim().isNotEmpty) 'vehicle_brand': _brandCtrl.text.trim(),
         'vehicle_model': _modelCtrl.text.trim(),
+        if (_colorCtrl.text.trim().isNotEmpty) 'vehicle_color': _colorCtrl.text.trim(),
         'plate_number': _plateCtrl.text.trim(),
-        'allowed_services': ['stores', 'parcels'],
+        if (_licenseNumCtrl.text.trim().isNotEmpty) 'license_number': _licenseNumCtrl.text.trim(),
+        if (_regNumCtrl.text.trim().isNotEmpty) 'registration_number': _regNumCtrl.text.trim(),
+        if (_insuranceNumCtrl.text.trim().isNotEmpty) 'insurance_number': _insuranceNumCtrl.text.trim(),
+        'allowed_services': ['rides', 'stores', 'parcels'],
         'doc_images': {
           for (final entry in _capturedDataUrls.entries)
             if (entry.value != null) entry.key: entry.value,
@@ -311,32 +333,74 @@ class _RegisterKycScreenState extends State<RegisterKycScreen> {
             const SizedBox(height: 12),
             TextField(controller: _nameCtrl, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'الاسم الرباعي')),
             const SizedBox(height: 10),
-            TextField(controller: _phoneCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم الهاتف')),
+            TextField(controller: _phoneCtrl, keyboardType: TextInputType.phone, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم الجوال / الهاتف')),
             const SizedBox(height: 10),
-            TextField(controller: _nidCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'الرقم القومي (14 رقم)')),
+            TextField(controller: _emailCtrl, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'البريد الإلكتروني (اختياري)')),
+            const SizedBox(height: 10),
+            TextField(controller: _nidCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم الهوية / الرقم القومي')),
+            const SizedBox(height: 10),
+            TextField(controller: _residenceIdCtrl, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم الإقامة (إن وجد)')),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               value: _vehicleType,
               decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'اختر نوع المركبة'),
               items: const [
+                DropdownMenuItem(value: 'car', child: Text('سيارة')),
                 DropdownMenuItem(value: 'moto', child: Text('موتوسيكل')),
                 DropdownMenuItem(value: 'tuktuk', child: Text('توك توك')),
-                DropdownMenuItem(value: 'car', child: Text('سيارة')),
                 DropdownMenuItem(value: 'bicycle', child: Text('دراجة')),
               ],
               onChanged: (v) => setState(() => _vehicleType = v ?? 'moto'),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _brandCtrl,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'الماركة (مثال: تويوتا)'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: _colorCtrl,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'لون المركبة'),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 10),
             TextField(
               controller: _modelCtrl,
               decoration: InputDecoration(
                 border: const OutlineInputBorder(),
-                labelText: 'اكتب نوع وموديل المركبة (مثل هوجن 5)',
+                labelText: 'موديل المركبة وسنة الصنع',
                 hintText: _modelHint(),
               ),
             ),
             const SizedBox(height: 10),
             TextField(controller: _plateCtrl, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم اللوحة')),
+            const SizedBox(height: 10),
+            TextField(controller: _licenseNumCtrl, decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم رخصة القيادة')),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _regNumCtrl,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم استمارة المركبة'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: _insuranceNumCtrl,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'رقم وثيقة التأمين'),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
               value: _zoneName,

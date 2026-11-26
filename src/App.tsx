@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
   Bell,
+  Car,
   CheckCircle2,
   Cloud,
   FileSpreadsheet,
@@ -45,6 +46,7 @@ import { GovernanceAuditSection } from './components/GovernanceAuditSection.tsx'
 import { NotificationsSection } from './components/NotificationsSection.tsx';
 import { CustomerMobilePreview } from './components/CustomerMobilePreview.tsx';
 import { CaptainMobilePreview } from './components/CaptainMobilePreview.tsx';
+import { RidesManagementSection } from './components/RidesManagementSection.tsx';
 import { CloudDatabaseSection } from './components/CloudDatabaseSection.tsx';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton.tsx';
 import type { User as FirebaseUser } from 'firebase/auth';
@@ -439,6 +441,7 @@ export default function App() {
             groupLabel: isAr ? 'التشغيل والعملاء' : 'Operations & Users',
             items: [
               { id: 'orders', label: isAr ? 'التجار والصيدليات والطلبات' : 'Merchants & Orders', icon: Store },
+              { id: 'rides_management', label: isAr ? 'إدارة المشاوير' : 'Rides Management', icon: Car },
               { id: 'customers', label: isAr ? 'العملاء والمستخدمون' : 'Customers & Users', icon: Users },
               { id: 'captains', label: isAr ? 'الكباتن وتوثيق المركبات' : 'Captains & KYC', icon: Truck },
               { id: 'market', label: isAr ? 'إدارة السوق (C2C)' : 'Otlobha Market', icon: ShoppingBag },
@@ -957,6 +960,9 @@ export default function App() {
               {activeTab === 'invoice_design' && <InvoiceDesignSection lang={lang} onNotify={notify} />}
               {activeTab === 'captains' && (
                 <CaptainsKycSection lang={lang} captains={captains} onRefresh={refreshCore} onNotify={notify} />
+              )}
+              {activeTab === 'rides_management' && portalMode === 'admin' && (
+                <RidesManagementSection lang={lang} captains={captains} onRefreshCore={refreshCore} notify={notify} />
               )}
               {activeTab === 'merchant_excel' && portalMode === 'merchant' && merchantSession && (
                 <MerchantMasterLinkPanel

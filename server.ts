@@ -41,6 +41,7 @@ import {
   ensureMasterProductForListing,
   reconcileAllExistingProductsToMasterCatalog,
 } from './src/server/masterCatalog.ts';
+import { registerRidesRoutes } from './src/server/ridesSystem.ts';
 import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
@@ -1892,6 +1893,20 @@ app.patch('/api/captains/:id/status', requireAuth, requirePermission('captains.r
 
   const nextStatus = verification_status ?? existing.verification_status;
   const nextAvail = nextStatus !== 'approved' ? 'offline' : availability_status ?? existing.availability_status;
+  const effectiveAllowedJson = allowed_services ? JSON.stringify(allowed_services) : String(existing.allowed_services_json || '[]');
+  let autoRideEligible = Number(existing.is_eligible_for_rides || 0);
+  if (is_eligible_for_rides !== undefined) {
+    autoRideEligible = is_eligible_for_rides ? 1 : 0;
+  } else if (nextStatus === 'approved') {
+    try {
+      const parsedAllowed = JSON.parse(effectiveAllowedJson);
+      if (Array.isArray(parsedAllowed) && parsedAllowed.includes('rides')) {
+        autoRideEligible = 1;
+      }
+    } catch {
+      // keep existing
+    }
+  }
 
   db.prepare(`
     UPDATE captains SET
@@ -1901,8 +1916,8 @@ app.patch('/api/captains/:id/status', requireAuth, requirePermission('captains.r
   `).run(
     nextStatus,
     rejection_reason !== undefined ? rejection_reason : existing.rejection_reason,
-    is_eligible_for_rides !== undefined ? (is_eligible_for_rides ? 1 : 0) : existing.is_eligible_for_rides,
-    allowed_services ? JSON.stringify(allowed_services) : existing.allowed_services_json,
+    autoRideEligible,
+    effectiveAllowedJson,
     nextAvail,
     cash_limit !== undefined ? Number(cash_limit) : existing.cash_limit,
     id
@@ -11650,11 +11665,20 @@ app.post('/api/mobile/captain/register', (req, res) => {
     password,
     full_name,
     phone,
+    email,
+    avatar_url,
     national_id,
+    residence_id,
+    city,
     zone_name,
     vehicle_type,
+    vehicle_brand,
     vehicle_model,
+    vehicle_color,
     plate_number,
+    license_number,
+    registration_number,
+    insurance_number,
     allowed_services,
     doc_images,
   } = req.body;
@@ -11687,13 +11711,19 @@ app.post('/api/mobile/captain/register', (req, res) => {
   const id = uid('cap');
   const userId = uid('usr');
   const pwHash = hashPassword(String(password));
-  const servicesList = Array.isArray(allowed_services) && allowed_services.length > 0 ? allowed_services : ['stores', 'parcels'];
+  const servicesList =
+    Array.isArray(allowed_services) && allowed_services.length > 0
+      ? allowed_services
+      : ['stores', 'parcels', 'rides'];
   db.prepare(`
     INSERT INTO captains (
-      id, user_id, username, password_hash, full_name, phone, national_id, city, zone_name, vehicle_type, vehicle_model,
-      plate_number, is_eligible_for_rides, allowed_services_json, verification_status, availability_status,
+      id, user_id, username, password_hash, full_name, phone, email, avatar_url,
+      national_id, residence_id, city, zone_name,
+      vehicle_type, vehicle_brand, vehicle_model, vehicle_color, plate_number,
+      license_number, registration_number, insurance_number,
+      is_eligible_for_rides, allowed_services_json, verification_status, availability_status,
       lat, lng, cash_on_hand, cash_limit
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'المنزلة', ?, ?, ?, ?, 0, ?, 'under_review', 'offline', 31.1583, 31.9369, 0, 1000)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'under_review', 'offline', 31.1583, 31.9369, 0, 1000)
   `).run(
     id,
     userId,
@@ -11701,11 +11731,20 @@ app.post('/api/mobile/captain/register', (req, res) => {
     pwHash,
     String(full_name).trim(),
     String(phone).trim(),
+    email ? String(email).trim().toLowerCase() : null,
+    avatar_url ? String(avatar_url).trim() : '',
     String(national_id).trim(),
+    residence_id ? String(residence_id).trim() : '',
+    city ? String(city).trim() : 'المنزلة',
     zone_name || 'وسط مدينة المنزلة',
     vehicle_type || 'moto',
+    vehicle_brand ? String(vehicle_brand).trim() : '',
     vehicle_model || 'مركبة مسجلة',
+    vehicle_color ? String(vehicle_color).trim() : '',
     String(plate_number).trim(),
+    license_number ? String(license_number).trim() : '',
+    registration_number ? String(registration_number).trim() : '',
+    insurance_number ? String(insurance_number).trim() : '',
     JSON.stringify(servicesList)
   );
 
@@ -11715,9 +11754,10 @@ app.post('/api/mobile/captain/register', (req, res) => {
     ['vehicle_right', 'الجانب الأيمن للمركبة'],
     ['vehicle_left', 'الجانب الأيسر للمركبة'],
     ['vehicle_plate', 'صورة لوحة المركبة'],
-    ['vehicle_license', 'رخصة المركبة السارية'],
+    ['vehicle_license', 'استمارة / رخصة المركبة السارية'],
     ['driving_license', 'رخصة القيادة'],
-    ['national_id_front', 'الرقم القومي'],
+    ['insurance_doc', 'وثيقة التأمين'],
+    ['national_id_front', 'الهوية الوطنية / الإقامة'],
     ['selfie', 'الصورة الشخصية المباشرة'],
   ];
   const imagesMap = (doc_images && typeof doc_images === 'object' ? doc_images : {}) as Record<string, string>;
@@ -13328,6 +13368,17 @@ app.post('/api/auth/merchant/login', (req, res) => {
       expires_in: tokens.expires_in,
     },
   });
+});
+
+// Register Otlobha Ride-Hailing System (OpenStreetMap/OSRM/Nominatim + Auto-Dispatch + OTP + Financial Ledger + Admin APIs)
+registerRidesRoutes(app, {
+  broadcastToRooms,
+  enqueueSystemPushNotification,
+  postDoubleEntryLedger,
+  recordAuditLog,
+  createPendingCaptainRating,
+  ensureTripChatStarter,
+  canAccessTrip,
 });
 
 async function startServer() {

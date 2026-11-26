@@ -1577,4 +1577,126 @@ class OtlobhaCustomerApi {
     );
     return _decode(res, endpointHint: '/api/storefront/assistant');
   }
+
+  // ==================== RIDES V2 (UBER/CAREEM OSM + OSRM + NOMINATIM) ====================
+
+  Future<Map<String, dynamic>> getRidesMapConfig() async {
+    final res = await _execute(
+      () => http.get(_apiUri('/api/rides/map-config'), headers: _headers(includeAuth: false)),
+    );
+    return _decode(res, endpointHint: '/api/rides/map-config');
+  }
+
+  Future<Map<String, dynamic>> searchRidePlaces(String query, {double? nearLat, double? nearLng}) async {
+    final qp = <String, String>{
+      'q': query.trim(),
+      if (nearLat != null) 'lat': nearLat.toString(),
+      if (nearLng != null) 'lng': nearLng.toString(),
+    };
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/rides/geo/search', queryParameters: qp), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/rides/geo/search');
+  }
+
+  Future<Map<String, dynamic>> reverseGeocodeRide(double lat, double lng) async {
+    final res = await _sendWithAuth(
+      (h) => http.get(
+        _apiUri('/api/rides/geo/reverse', queryParameters: {'lat': lat.toString(), 'lng': lng.toString()}),
+        headers: h,
+      ),
+    );
+    return _decode(res, endpointHint: '/api/rides/geo/reverse');
+  }
+
+  Future<Map<String, dynamic>> estimateRide({
+    required double pickupLat,
+    required double pickupLng,
+    required double dropoffLat,
+    required double dropoffLng,
+    double? waypointLat,
+    double? waypointLng,
+    String? zoneId,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/estimate'),
+        headers: h,
+        body: jsonEncode({
+          'pickup_lat': pickupLat,
+          'pickup_lng': pickupLng,
+          'dropoff_lat': dropoffLat,
+          'dropoff_lng': dropoffLng,
+          if (waypointLat != null) 'waypoint_lat': waypointLat,
+          if (waypointLng != null) 'waypoint_lng': waypointLng,
+          if (zoneId != null && zoneId.isNotEmpty) 'zone_id': zoneId,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/estimate');
+  }
+
+  Future<Map<String, dynamic>> requestRideV2(Map<String, dynamic> payload) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(_apiUri('/api/rides/request'), headers: h, body: jsonEncode(payload)),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/request');
+  }
+
+  Future<Map<String, dynamic>> getMyRides() async {
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/rides/my'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/rides/my');
+  }
+
+  Future<Map<String, dynamic>> getRideDetail(String tripId) async {
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/rides/${Uri.encodeComponent(tripId)}'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId');
+  }
+
+  Future<Map<String, dynamic>> cancelRideV2(String tripId, {String reason = 'cancelled_by_customer'}) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/cancel'),
+        headers: h,
+        body: jsonEncode({'reason': reason}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/cancel');
+  }
+
+  Future<Map<String, dynamic>> rateRideV2(String tripId, {required int stars, String comment = ''}) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/rate'),
+        headers: h,
+        body: jsonEncode({'rating': stars, 'stars': stars, 'comment': comment}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/rate');
+  }
+
+  Future<Map<String, dynamic>> reportRideDispute(
+    String tripId, {
+    required String category,
+    required String description,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/dispute'),
+        headers: h,
+        body: jsonEncode({'category': category, 'description': description}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/dispute');
+  }
 }
+

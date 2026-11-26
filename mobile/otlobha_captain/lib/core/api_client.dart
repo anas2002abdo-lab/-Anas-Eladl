@@ -831,4 +831,152 @@ class OtlobhaCaptainApi {
   void _ensureSuccess(http.Response res, {String? endpointHint, String? fallbackError}) {
     parseJsonResponse(res, endpointHint: endpointHint, fallbackError: fallbackError);
   }
+
+  // ==================== CAPTAIN RIDES V2 (UBER/CAREEM ENGINE) ====================
+
+  Future<Map<String, dynamic>> getRidesMapConfig() async {
+    final res = await _execute(
+      () => http.get(_apiUri('/api/rides/map-config'), headers: _headers(includeAuth: false)),
+    );
+    return _decode(res, endpointHint: '/api/rides/map-config');
+  }
+
+  Future<Map<String, dynamic>> getCaptainRideOffers() async {
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/rides/captain/offers'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/rides/captain/offers');
+  }
+
+  Future<Map<String, dynamic>> acceptRideOffer(String offerId) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(_apiUri('/api/rides/offers/${Uri.encodeComponent(offerId)}/accept'), headers: h),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/offers/$offerId/accept');
+  }
+
+  Future<Map<String, dynamic>> rejectRideOffer(String offerId, {String reason = 'captain_declined'}) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/offers/${Uri.encodeComponent(offerId)}/reject'),
+        headers: h,
+        body: jsonEncode({'reason': reason}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/offers/$offerId/reject');
+  }
+
+  Future<Map<String, dynamic>> markRideArrived(String tripId) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(_apiUri('/api/rides/${Uri.encodeComponent(tripId)}/arrived'), headers: h),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/arrived');
+  }
+
+  Future<Map<String, dynamic>> startRideWithOtp(String tripId, String otp) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/start'),
+        headers: h,
+        body: jsonEncode({'otp': otp.trim()}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/start');
+  }
+
+  Future<Map<String, dynamic>> updateRideLocation(
+    String tripId, {
+    required double lat,
+    required double lng,
+    double? heading,
+    double? speedKmh,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/location'),
+        headers: h,
+        body: jsonEncode({
+          'lat': lat,
+          'lng': lng,
+          if (heading != null) 'heading': heading,
+          if (speedKmh != null) 'speed_kmh': speedKmh,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/location');
+  }
+
+  Future<Map<String, dynamic>> completeRideV2(String tripId, {double waitingMinutes = 0}) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/complete'),
+        headers: h,
+        body: jsonEncode({'waiting_minutes': waitingMinutes}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/complete');
+  }
+
+  Future<Map<String, dynamic>> cancelRideV2(String tripId, {String reason = 'cancelled_by_captain'}) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/cancel'),
+        headers: h,
+        body: jsonEncode({'reason': reason}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/cancel');
+  }
+
+  Future<Map<String, dynamic>> reportRideDispute(
+    String tripId, {
+    required String category,
+    required String description,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/rides/${Uri.encodeComponent(tripId)}/dispute'),
+        headers: h,
+        body: jsonEncode({'category': category, 'description': description}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/$tripId/dispute');
+  }
+
+  Future<Map<String, dynamic>> getCaptainRideEarnings() async {
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/rides/captain/earnings'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/rides/captain/earnings');
+  }
+
+  Future<Map<String, dynamic>> setCaptainRideAvailability({
+    required bool online,
+    double? lat,
+    double? lng,
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.patch(
+        _apiUri('/api/rides/captain/availability'),
+        headers: h,
+        body: jsonEncode({
+          'availability_status': online ? 'available' : 'offline',
+          'online': online,
+          if (lat != null) 'lat': lat,
+          if (lng != null) 'lng': lng,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/rides/captain/availability');
+  }
 }
+

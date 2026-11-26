@@ -1258,5 +1258,153 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  // =========================================================================
+  // Otlobha Rides System APIs (Uber/Careem-grade OpenStreetMap + OSRM + Dispatch)
+  // =========================================================================
+  getRidesMapConfig: () => request<any>('/api/rides/map-config'),
+  searchRidePlaces: (q: string, near?: { lat: number; lng: number }) => {
+    const qs = new URLSearchParams({ q });
+    if (near) {
+      qs.set('lat', String(near.lat));
+      qs.set('lng', String(near.lng));
+    }
+    return request<{ items: any[]; attribution: string }>(`/api/rides/geo/search?${qs.toString()}`);
+  },
+  reverseGeocodeRide: (lat: number, lng: number) =>
+    request<{ display_name: string; short_name: string; city: string; country: string; attribution: string }>(
+      `/api/rides/geo/reverse?lat=${encodeURIComponent(String(lat))}&lng=${encodeURIComponent(String(lng))}`
+    ),
+  estimateRide: (body: {
+    pickup_lat: number;
+    pickup_lng: number;
+    dropoff_lat: number;
+    dropoff_lng: number;
+    waypoint_lat?: number | null;
+    waypoint_lng?: number | null;
+    zone_id?: string;
+  }) =>
+    request<any>('/api/rides/estimate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  requestRideV2: (body: {
+    vehicle_type: string;
+    pickup_address: string;
+    dropoff_address: string;
+    pickup_lat: number;
+    pickup_lng: number;
+    dropoff_lat: number;
+    dropoff_lng: number;
+    waypoint_address?: string | null;
+    waypoint_lat?: number | null;
+    waypoint_lng?: number | null;
+    payment_method?: 'cash' | 'online';
+    customer_name?: string;
+    customer_phone?: string;
+  }) =>
+    request<any>('/api/rides/request', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  getMyRides: () => request<{ active_trip: any | null; trips: any[] }>('/api/rides/my', { cache: 'no-store' }),
+  getRideDetails: (tripId: string) =>
+    request<{ trip: any }>(`/api/rides/${encodeURIComponent(tripId)}`, { cache: 'no-store' }),
+  getCaptainRideOffers: (captainId?: string) =>
+    request<{ offers: any[]; active_trip?: any | null }>(
+      `/api/rides/captain/offers${captainId ? `?captain_id=${encodeURIComponent(captainId)}` : ''}`,
+      { cache: 'no-store' }
+    ),
+  acceptRideOffer: (offerId: string) =>
+    request<any>(`/api/rides/offers/${encodeURIComponent(offerId)}/accept`, { method: 'POST', body: JSON.stringify({}) }),
+  rejectRideOffer: (offerId: string) =>
+    request<any>(`/api/rides/offers/${encodeURIComponent(offerId)}/reject`, { method: 'POST', body: JSON.stringify({}) }),
+  markRideArrived: (tripId: string, coords?: { lat: number; lng: number }) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/arrived`, {
+      method: 'POST',
+      body: JSON.stringify(coords || {}),
+    }),
+  startRideWithOtp: (tripId: string, otp: string) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ otp }),
+    }),
+  updateRideLocation: (tripId: string, body: { lat: number; lng: number; heading?: number; speed_kmh?: number }) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/location`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  completeRideV2: (tripId: string, body?: { waiting_minutes?: number }) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/complete`, { method: 'POST', body: JSON.stringify(body || {}) }),
+  cancelRideV2: (tripId: string, reason?: string) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  rateRideV2: (tripId: string, rating: number, comment: string) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/rate`, {
+      method: 'POST',
+      body: JSON.stringify({ rating, comment }),
+    }),
+  reportRideDispute: (tripId: string, category: string, description: string) =>
+    request<any>(`/api/rides/${encodeURIComponent(tripId)}/dispute`, {
+      method: 'POST',
+      body: JSON.stringify({ category, description }),
+    }),
+  getCaptainRideEarnings: (captainId?: string) =>
+    request<any>(
+      `/api/rides/captain/earnings${captainId ? `?captain_id=${encodeURIComponent(captainId)}` : ''}`,
+      { cache: 'no-store' }
+    ),
+  setCaptainRideAvailability: (body: { availability_status: 'available' | 'offline'; captain_id?: string; lat?: number; lng?: number }) =>
+    request<any>('/api/rides/captain/availability', {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  // Admin Rides Management APIs
+  getAdminRidesDashboard: () => request<any>('/api/admin/rides/dashboard', { cache: 'no-store' }),
+  getAdminRidesLiveMap: () => request<any>('/api/admin/rides/live-map', { cache: 'no-store' }),
+  getAdminRidesTrips: (params?: { q?: string; status?: string; vehicle_type?: string; date_from?: string; date_to?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.vehicle_type) qs.set('vehicle_type', params.vehicle_type);
+    if (params?.date_from) qs.set('date_from', params.date_from);
+    if (params?.date_to) qs.set('date_to', params.date_to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ trips: any[]; total: number }>(`/api/admin/rides/trips${suffix}`, { cache: 'no-store' });
+  },
+  getAdminRideVehicleTypes: () => request<{ vehicle_types: any[] }>('/api/admin/rides/vehicle-types'),
+  createAdminRideVehicleType: (body: Record<string, unknown>) =>
+    request<any>('/api/admin/rides/vehicle-types', { method: 'POST', body: JSON.stringify(body) }),
+  updateAdminRideVehicleType: (code: string, body: Record<string, unknown>) =>
+    request<any>(`/api/admin/rides/vehicle-types/${encodeURIComponent(code)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  getAdminRideFareSettings: () => request<{ settings: any[]; history: any[] }>('/api/admin/rides/fare-settings'),
+  updateAdminRideFareSetting: (vehicleType: string, body: Record<string, unknown>) =>
+    request<any>(`/api/admin/rides/fare-settings/${encodeURIComponent(vehicleType)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  getAdminRideDispatchConfig: () => request<{ config: any }>('/api/admin/rides/dispatch-config'),
+  updateAdminRideDispatchConfig: (body: Record<string, unknown>) =>
+    request<any>('/api/admin/rides/dispatch-config', { method: 'PUT', body: JSON.stringify(body) }),
+  getAdminRideDisputes: () => request<{ disputes: any[] }>('/api/admin/rides/disputes'),
+  updateAdminRideDispute: (id: string, body: { status: string; admin_decision: string }) =>
+    request<any>(`/api/admin/rides/disputes/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  getAdminRideFinancialReport: (params?: { date_from?: string; date_to?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.date_from) qs.set('date_from', params.date_from);
+    if (params?.date_to) qs.set('date_to', params.date_to);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<any>(`/api/admin/rides/reports/financial${suffix}`, { cache: 'no-store' });
+  },
 };
+
 

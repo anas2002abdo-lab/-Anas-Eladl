@@ -25,6 +25,20 @@ class _CaptainSettlementScreenState extends State<CaptainSettlementScreen> {
   final TextEditingController _settleCtrl = TextEditingController(text: '300');
   String _payoutMethod = 'vodafone_cash';
   bool _submitting = false;
+  Map<String, dynamic>? _rideEarnings;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRideEarnings();
+  }
+
+  Future<void> _loadRideEarnings() async {
+    try {
+      final res = await widget.api.getCaptainRideEarnings();
+      if (mounted) setState(() => _rideEarnings = res);
+    } catch (_) {}
+  }
 
   @override
   void dispose() {
@@ -54,9 +68,127 @@ class _CaptainSettlementScreenState extends State<CaptainSettlementScreen> {
         .where((s) => s['beneficiary_type'] == 'captain' && s['beneficiary_name'] == capName)
         .toList();
 
+    final periods = (_rideEarnings?['periods'] as Map?) ?? {};
+    final todayE = (periods['today'] as Map?) ?? {};
+    final weekE = (periods['week'] as Map?) ?? {};
+    final monthE = (periods['month'] as Map?) ?? {};
+    final allE = (periods['all_time'] as Map?) ?? {};
+    final recentRides = (_rideEarnings?['recent_trips'] as List?) ?? [];
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        Card(
+          color: const Color(0xFFFEF2F2),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('أرباح المشاوير (محسوبة من الخادم)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14.5, color: Color(0xFFA92224))),
+                    IconButton(onPressed: _loadRideEarnings, icon: const Icon(Icons.refresh, size: 18, color: Color(0xFFA92224))),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('صافي اليوم', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                            Text('${todayE['net_earnings'] ?? 0} ج.م', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF059669))),
+                            Text('${todayE['rides_count'] ?? 0} رحلة', style: const TextStyle(fontSize: 10, color: Colors.black54)),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('صافي الأسبوع', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                            Text('${weekE['net_earnings'] ?? 0} ج.م', style: const TextStyle(fontWeight: FontWeight.bold)),
+                            Text('${weekE['rides_count'] ?? 0} رحلة', style: const TextStyle(fontSize: 10, color: Colors.black54)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('صافي الشهر', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                            Text('${monthE['net_earnings'] ?? 0} ج.م', style: const TextStyle(fontWeight: FontWeight.bold)),
+                            Text('عمولة: ${monthE['commission'] ?? 0} ج.م', style: const TextStyle(fontSize: 10, color: Colors.red)),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('الإجمالي الكلي', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                            Text('${allE['net_earnings'] ?? 0} ج.م', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFA92224))),
+                            Text('${allE['rides_count'] ?? 0} رحلة مكتملة', style: const TextStyle(fontSize: 10, color: Colors.black54)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (recentRides.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  const Text('آخر المشاوير المكتملة:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  ...recentRides.take(5).map((r) => Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${r['trip_number']} · ${r['dropoff_address'] ?? ''}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 11.5),
+                              ),
+                            ),
+                            Text(
+                              '+${r['driver_net_earnings'] ?? 0} ج.م',
+                              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold, color: Color(0xFF059669)),
+                            ),
+                          ],
+                        ),
+                      )),
+                ],
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
