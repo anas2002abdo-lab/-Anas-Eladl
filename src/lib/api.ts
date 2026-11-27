@@ -1278,8 +1278,9 @@ export const api = {
   estimateRide: (body: {
     pickup_lat: number;
     pickup_lng: number;
-    dropoff_lat: number;
-    dropoff_lng: number;
+    dropoff_lat?: number | null;
+    dropoff_lng?: number | null;
+    dropoff_address?: string;
     waypoint_lat?: number | null;
     waypoint_lng?: number | null;
     zone_id?: string;
@@ -1294,8 +1295,8 @@ export const api = {
     dropoff_address: string;
     pickup_lat: number;
     pickup_lng: number;
-    dropoff_lat: number;
-    dropoff_lng: number;
+    dropoff_lat?: number | null;
+    dropoff_lng?: number | null;
     waypoint_address?: string | null;
     waypoint_lat?: number | null;
     waypoint_lng?: number | null;
@@ -1405,6 +1406,172 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return request<any>(`/api/admin/rides/reports/financial${suffix}`, { cache: 'no-store' });
   },
+
+  // =========================================================================
+  // Independent Store Pages, Store & Product Reviews, Follows & Admin Moderation
+  // =========================================================================
+  getStorePage: (merchantId: string) =>
+    request<any>(`/api/stores/${encodeURIComponent(merchantId)}`, { cache: 'no-store' }),
+  getStoreProducts: (
+    merchantId: string,
+    params?: {
+      category_id?: string;
+      offers_only?: boolean;
+      q?: string;
+      sort?: string;
+      page?: number;
+      limit?: number;
+    }
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.category_id) qs.set('category_id', params.category_id);
+    if (params?.offers_only) qs.set('offers_only', '1');
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ products: any[]; pagination: { page: number; limit: number; total: number; total_pages: number; has_more: boolean } }>(
+      `/api/stores/${encodeURIComponent(merchantId)}/products${suffix}`,
+      { cache: 'no-store' }
+    );
+  },
+  getStoreReviews: (merchantId: string, params?: { sort?: 'newest' | 'highest' | 'lowest'; page?: number; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ summary: any; reviews: any[]; pagination: any }>(
+      `/api/stores/${encodeURIComponent(merchantId)}/reviews${suffix}`,
+      { cache: 'no-store' }
+    );
+  },
+  submitStoreReview: (merchantId: string, body: { order_id: string; rating: number; comment?: string }) =>
+    request<any>(`/api/stores/${encodeURIComponent(merchantId)}/reviews`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateStoreReview: (merchantId: string, reviewId: string, body: { rating: number; comment?: string }) =>
+    request<any>(`/api/stores/${encodeURIComponent(merchantId)}/reviews/${encodeURIComponent(reviewId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  getProductReviews: (productId: string, params?: { sort?: 'newest' | 'highest'; page?: number; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ summary: any; reviews: any[]; can_review: boolean; eligible_orders: any[]; pagination: any }>(
+      `/api/products/${encodeURIComponent(productId)}/reviews${suffix}`,
+      { cache: 'no-store' }
+    );
+  },
+  submitProductReview: (
+    productId: string,
+    body: { order_id: string; rating: number; comment?: string; image_urls?: string[] }
+  ) =>
+    request<any>(`/api/products/${encodeURIComponent(productId)}/reviews`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  reportReview: (body: { review_type: 'store' | 'product'; review_id: string; reason: string; details?: string }) =>
+    request<any>('/api/reviews/report', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  followStore: (
+    merchantId: string,
+    prefs?: {
+      notify_new_offers?: boolean;
+      notify_discounts?: boolean;
+      notify_new_products?: boolean;
+      notify_back_in_stock?: boolean;
+    }
+  ) =>
+    request<any>(`/api/stores/${encodeURIComponent(merchantId)}/follow`, {
+      method: 'POST',
+      body: JSON.stringify(prefs || {}),
+    }),
+  unfollowStore: (merchantId: string) =>
+    request<any>(`/api/stores/${encodeURIComponent(merchantId)}/follow`, {
+      method: 'DELETE',
+    }),
+  updateStoreFollowPreferences: (
+    merchantId: string,
+    prefs: {
+      notify_new_offers: boolean;
+      notify_discounts: boolean;
+      notify_new_products: boolean;
+      notify_back_in_stock: boolean;
+    }
+  ) =>
+    request<any>(`/api/stores/${encodeURIComponent(merchantId)}/follow/preferences`, {
+      method: 'PATCH',
+      body: JSON.stringify(prefs),
+    }),
+  getFollowedStores: () => request<{ stores: any[]; products_and_offers: any[] }>('/api/customer/followed-stores', { cache: 'no-store' }),
+
+  // Admin Store Reviews & Moderation APIs
+  getAdminStoreReviewsOverview: () =>
+    request<{
+      kpis: {
+        visible_store_reviews: number;
+        hidden_store_reviews: number;
+        overall_store_avg: number;
+        visible_product_reviews: number;
+        hidden_product_reviews: number;
+        open_reports_count: number;
+        total_store_follows: number;
+      };
+      settings: {
+        edit_window_hours: number;
+        notification_cooldown_minutes: number;
+        max_daily_store_notifications: number;
+      };
+      stores: any[];
+      top_rated_stores: any[];
+      lowest_rated_stores: any[];
+    }>('/api/admin/store-reviews/overview', { cache: 'no-store' }),
+  getAdminStoreReviews: (params?: {
+    type?: 'all' | 'store' | 'product';
+    merchant_id?: string;
+    status?: 'all' | 'visible' | 'hidden';
+    reported_only?: boolean;
+    q?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.type) qs.set('type', params.type);
+    if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.reported_only) qs.set('reported_only', '1');
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ reviews: any[] }>(`/api/admin/store-reviews${suffix}`, { cache: 'no-store' });
+  },
+  moderateAdminReview: (type: 'store' | 'product', id: string, body: { status: 'visible' | 'hidden'; reason?: string }) =>
+    request<any>(`/api/admin/store-reviews/${encodeURIComponent(type)}/${encodeURIComponent(id)}/moderate`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  getAdminReviewReports: (status: 'open' | 'resolved' | 'dismissed' | 'all' = 'open') =>
+    request<{ reports: any[] }>(`/api/admin/review-reports?status=${encodeURIComponent(status)}`, { cache: 'no-store' }),
+  updateAdminReviewReport: (id: string, body: { status: 'resolved' | 'dismissed'; hide_review?: boolean; hide_reason?: string }) =>
+    request<any>(`/api/admin/review-reports/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  updateAdminStoreReviewsSettings: (body: {
+    edit_window_hours?: number;
+    notification_cooldown_minutes?: number;
+    max_daily_store_notifications?: number;
+  }) =>
+    request<{ ok: boolean; settings: any }>('/api/admin/store-reviews/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
 };
+
 
 

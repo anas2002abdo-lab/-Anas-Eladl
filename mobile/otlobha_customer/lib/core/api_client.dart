@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,12 +30,21 @@ class OtlobhaCustomerApi {
     defaultValue: '',
   );
 
-  static const Duration _defaultTimeout = Duration(seconds: 30);
-  static const Duration _uploadTimeout = Duration(seconds: 60);
+  static const Duration _defaultTimeout = Duration(seconds: 15);
+  static const Duration _uploadTimeout = Duration(seconds: 45);
 
   String? _accessToken;
   String? _refreshToken;
   Future<bool>? _refreshFuture;
+  DateTime? _refreshStartedAt;
+
+  void resetConnectionPool() {
+    if (_refreshFuture != null &&
+        (_refreshStartedAt == null || DateTime.now().difference(_refreshStartedAt!).inSeconds >= 8)) {
+      _refreshFuture = null;
+      _refreshStartedAt = null;
+    }
+  }
 
   bool get hasTokens => (_accessToken ?? '').isNotEmpty || (_refreshToken ?? '').isNotEmpty;
 
@@ -181,9 +191,9 @@ class OtlobhaCustomerApi {
 
   Future<void> reloadTokensFromStorage() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload();
+        await prefs.reload().timeout(const Duration(seconds: 3));
       } catch (_) {}
       final savedAccess = prefs.getString(_prefAccessToken)?.trim();
       final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
@@ -198,9 +208,9 @@ class OtlobhaCustomerApi {
 
   Future<Map<String, dynamic>?> restorePersistedSession() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload();
+        await prefs.reload().timeout(const Duration(seconds: 3));
       } catch (_) {}
       final savedAccess = prefs.getString(_prefAccessToken)?.trim();
       final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
@@ -238,20 +248,43 @@ class OtlobhaCustomerApi {
   Future<http.Response> _execute(
     Future<http.Response> Function() requestFn, {
     Duration timeout = _defaultTimeout,
+    bool retryOnNetworkError = true,
   }) async {
-    try {
-      return await requestFn().timeout(timeout);
-    } on TimeoutException {
-      throw const ApiException('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
-    } on ApiException {
-      rethrow;
-    } on http.ClientException catch (e) {
-      debugPrint('[OtlobhaCustomerApi] ClientException: ${e.message}');
-      throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
-    } catch (e) {
-      debugPrint('[OtlobhaCustomerApi] Network error: ${e.runtimeType}');
-      throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await requestFn().timeout(timeout);
+      } on TimeoutException {
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 350));
+          continue;
+        }
+        throw const ApiException('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+      } on ApiException {
+        rethrow;
+      } on SocketException catch (e) {
+        debugPrint('[OtlobhaCustomerApi] SocketException (attempt ${attempt + 1}): ${e.message}');
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
+      } on http.ClientException catch (e) {
+        debugPrint('[OtlobhaCustomerApi] ClientException (attempt ${attempt + 1}): ${e.message}');
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
+      } catch (e) {
+        debugPrint('[OtlobhaCustomerApi] Network error: ${e.runtimeType}');
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
+      }
     }
+    throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
   }
 
   bool _isExplicitAuthInvalidation(http.Response res) {
@@ -278,8 +311,18 @@ class OtlobhaCustomerApi {
     await reloadTokensFromStorage();
     final activeRefresh = (_refreshToken ?? '').trim();
     if (activeRefresh.isEmpty) return false;
-    if (_refreshFuture != null) return _refreshFuture!;
+    if (_refreshFuture != null) {
+      final elapsed = _refreshStartedAt == null
+          ? const Duration(seconds: 99)
+          : DateTime.now().difference(_refreshStartedAt!);
+      if (elapsed.inSeconds < 12) {
+        return _refreshFuture!;
+      }
+      _refreshFuture = null;
+      _refreshStartedAt = null;
+    }
 
+    _refreshStartedAt = DateTime.now();
     _refreshFuture = () async {
       try {
         final res = await _execute(
@@ -288,6 +331,7 @@ class OtlobhaCustomerApi {
             headers: _headers(json: true, includeAuth: false),
             body: jsonEncode({'refresh_token': activeRefresh}),
           ),
+          timeout: const Duration(seconds: 12),
         );
         if (res.statusCode >= 200 && res.statusCode < 300) {
           final decoded = parseJsonResponse(res, endpointHint: '/api/auth/refresh');
@@ -316,6 +360,7 @@ class OtlobhaCustomerApi {
         return false;
       } finally {
         _refreshFuture = null;
+        _refreshStartedAt = null;
       }
     }();
 
@@ -1612,8 +1657,9 @@ class OtlobhaCustomerApi {
   Future<Map<String, dynamic>> estimateRide({
     required double pickupLat,
     required double pickupLng,
-    required double dropoffLat,
-    required double dropoffLng,
+    double? dropoffLat,
+    double? dropoffLng,
+    String? dropoffAddress,
     double? waypointLat,
     double? waypointLng,
     String? zoneId,
@@ -1625,8 +1671,9 @@ class OtlobhaCustomerApi {
         body: jsonEncode({
           'pickup_lat': pickupLat,
           'pickup_lng': pickupLng,
-          'dropoff_lat': dropoffLat,
-          'dropoff_lng': dropoffLng,
+          if (dropoffLat != null) 'dropoff_lat': dropoffLat,
+          if (dropoffLng != null) 'dropoff_lng': dropoffLng,
+          if (dropoffAddress != null && dropoffAddress.trim().isNotEmpty) 'dropoff_address': dropoffAddress.trim(),
           if (waypointLat != null) 'waypoint_lat': waypointLat,
           if (waypointLng != null) 'waypoint_lng': waypointLng,
           if (zoneId != null && zoneId.isNotEmpty) 'zone_id': zoneId,
@@ -1698,5 +1745,211 @@ class OtlobhaCustomerApi {
     );
     return _decode(res, endpointHint: '/api/rides/$tripId/dispute');
   }
+
+  // ==================== INDEPENDENT STORE PAGES, REVIEWS & FOLLOWS ====================
+
+  Future<Map<String, dynamic>> getStorePage(String merchantId) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final res = hasTokens
+        ? await _sendWithAuth((h) => http.get(_apiUri('/api/stores/$enc'), headers: h))
+        : await _execute(() => http.get(_apiUri('/api/stores/$enc'), headers: _headers(includeAuth: false)));
+    return _decode(res, endpointHint: '/api/stores/$merchantId');
+  }
+
+  Future<Map<String, dynamic>> getStoreProducts(
+    String merchantId, {
+    String? categoryId,
+    bool offersOnly = false,
+    String? query,
+    String sort = 'default',
+    int page = 1,
+    int limit = 20,
+  }) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final qp = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+      'sort': sort,
+      if (categoryId != null && categoryId.isNotEmpty) 'category_id': categoryId,
+      if (offersOnly) 'offers_only': '1',
+      if (query != null && query.trim().isNotEmpty) 'q': query.trim(),
+    };
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/stores/$enc/products', queryParameters: qp),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/products');
+  }
+
+  Future<Map<String, dynamic>> getStoreReviews(
+    String merchantId, {
+    String sort = 'newest',
+    int page = 1,
+    int limit = 15,
+  }) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final qp = <String, String>{'sort': sort, 'page': '$page', 'limit': '$limit'};
+    final res = hasTokens
+        ? await _sendWithAuth((h) => http.get(_apiUri('/api/stores/$enc/reviews', queryParameters: qp), headers: h))
+        : await _execute(
+            () => http.get(_apiUri('/api/stores/$enc/reviews', queryParameters: qp), headers: _headers(includeAuth: false)),
+          );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/reviews');
+  }
+
+  Future<Map<String, dynamic>> submitStoreReview(
+    String merchantId, {
+    required String orderId,
+    required int rating,
+    required String comment,
+  }) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/stores/$enc/reviews'),
+        headers: h,
+        body: jsonEncode({'order_id': orderId, 'rating': rating, 'comment': comment}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/reviews');
+  }
+
+  Future<Map<String, dynamic>> updateStoreReview(
+    String merchantId,
+    String reviewId, {
+    required int rating,
+    required String comment,
+  }) async {
+    final encM = Uri.encodeComponent(merchantId);
+    final encR = Uri.encodeComponent(reviewId);
+    final res = await _sendWithAuth(
+      (h) => http.patch(
+        _apiUri('/api/stores/$encM/reviews/$encR'),
+        headers: h,
+        body: jsonEncode({'rating': rating, 'comment': comment}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/reviews/$reviewId');
+  }
+
+  Future<Map<String, dynamic>> getProductReviews(
+    String productId, {
+    String sort = 'newest',
+    int page = 1,
+    int limit = 15,
+  }) async {
+    final enc = Uri.encodeComponent(productId);
+    final qp = <String, String>{'sort': sort, 'page': '$page', 'limit': '$limit'};
+    final res = hasTokens
+        ? await _sendWithAuth((h) => http.get(_apiUri('/api/products/$enc/reviews', queryParameters: qp), headers: h))
+        : await _execute(
+            () => http.get(_apiUri('/api/products/$enc/reviews', queryParameters: qp), headers: _headers(includeAuth: false)),
+          );
+    return _decode(res, endpointHint: '/api/products/$productId/reviews');
+  }
+
+  Future<Map<String, dynamic>> submitProductReview(
+    String productId, {
+    required String orderId,
+    required int rating,
+    required String comment,
+    List<String> imageUrls = const [],
+  }) async {
+    final enc = Uri.encodeComponent(productId);
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/products/$enc/reviews'),
+        headers: h,
+        body: jsonEncode({
+          'order_id': orderId,
+          'rating': rating,
+          'comment': comment,
+          if (imageUrls.isNotEmpty) 'image_urls': imageUrls,
+        }),
+      ),
+      json: true,
+      timeout: _uploadTimeout,
+    );
+    return _decode(res, endpointHint: '/api/products/$productId/reviews');
+  }
+
+  Future<Map<String, dynamic>> reportReview({
+    required String reviewType,
+    required String reviewId,
+    required String reason,
+    String details = '',
+  }) async {
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/reviews/report'),
+        headers: h,
+        body: jsonEncode({
+          'review_type': reviewType,
+          'review_id': reviewId,
+          'reason': reason,
+          'details': details,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/reviews/report');
+  }
+
+  Future<Map<String, dynamic>> followStore(String merchantId, {Map<String, bool>? prefs}) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final res = await _sendWithAuth(
+      (h) => http.post(
+        _apiUri('/api/stores/$enc/follow'),
+        headers: h,
+        body: jsonEncode(prefs ?? const <String, bool>{}),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/follow');
+  }
+
+  Future<Map<String, dynamic>> unfollowStore(String merchantId) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final res = await _sendWithAuth(
+      (h) => http.delete(_apiUri('/api/stores/$enc/follow'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/follow');
+  }
+
+  Future<Map<String, dynamic>> updateStoreFollowPreferences(
+    String merchantId, {
+    required bool notifyNewOffers,
+    required bool notifyDiscounts,
+    required bool notifyNewProducts,
+    required bool notifyBackInStock,
+  }) async {
+    final enc = Uri.encodeComponent(merchantId);
+    final res = await _sendWithAuth(
+      (h) => http.patch(
+        _apiUri('/api/stores/$enc/follow/preferences'),
+        headers: h,
+        body: jsonEncode({
+          'notify_new_offers': notifyNewOffers,
+          'notify_discounts': notifyDiscounts,
+          'notify_new_products': notifyNewProducts,
+          'notify_back_in_stock': notifyBackInStock,
+        }),
+      ),
+      json: true,
+    );
+    return _decode(res, endpointHint: '/api/stores/$merchantId/follow/preferences');
+  }
+
+  Future<Map<String, dynamic>> getFollowedStores() async {
+    final res = await _sendWithAuth(
+      (h) => http.get(_apiUri('/api/customer/followed-stores'), headers: h),
+    );
+    return _decode(res, endpointHint: '/api/customer/followed-stores');
+  }
 }
+
 

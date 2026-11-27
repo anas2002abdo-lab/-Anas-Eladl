@@ -13,6 +13,7 @@ class ProfileScreen extends StatefulWidget {
   final void Function(String tripId) onOpenTripChat;
   final Future<void> Function(Map<String, dynamic> target) onRateCaptain;
   final VoidCallback onLogout;
+  final VoidCallback? onOpenFollowedStores;
   final bool isGuest;
   final VoidCallback? onRequireAuth;
 
@@ -30,6 +31,7 @@ class ProfileScreen extends StatefulWidget {
     required this.onOpenTripChat,
     required this.onRateCaptain,
     required this.onLogout,
+    this.onOpenFollowedStores,
     this.isGuest = false,
     this.onRequireAuth,
   });
@@ -354,6 +356,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ],
         ),
+        if (widget.onOpenFollowedStores != null) ...[
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFFA92224),
+                side: const BorderSide(color: Color(0xFFFECACA)),
+                backgroundColor: const Color(0xFFFEF2F2),
+                padding: const EdgeInsets.symmetric(vertical: 11),
+              ),
+              onPressed: widget.onOpenFollowedStores,
+              icon: const Icon(Icons.favorite_rounded, size: 18),
+              label: const Text(
+                'المتاجر المفضلة والمتابعة وأحدث عروضها',
+                style: TextStyle(fontWeight: FontWeight.w800),
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 14),
         const Text('طلباتي والروشتات', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
         const SizedBox(height: 6),

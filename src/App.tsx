@@ -20,6 +20,7 @@ import {
   ShoppingBag,
   Sliders,
   Smartphone,
+  Star,
   Store,
   Truck,
   Users,
@@ -48,6 +49,8 @@ import { CustomerMobilePreview } from './components/CustomerMobilePreview.tsx';
 import { CaptainMobilePreview } from './components/CaptainMobilePreview.tsx';
 import { RidesManagementSection } from './components/RidesManagementSection.tsx';
 import { CloudDatabaseSection } from './components/CloudDatabaseSection.tsx';
+import { PublicStoreWebPage } from './components/PublicStoreWebPage.tsx';
+import { StoreReviewsAdminSection } from './components/StoreReviewsAdminSection.tsx';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton.tsx';
 import type { User as FirebaseUser } from 'firebase/auth';
 import {
@@ -78,7 +81,14 @@ type PortalMode = 'admin' | 'merchant' | 'customer' | 'captain';
 const MERCHANT_SESSION_KEY = 'otlobha_merchant_email_session';
 
 export default function App() {
+  const initialStoreMatch =
+    typeof window !== 'undefined' ? window.location.pathname.match(/^\/store\/([^/?#]+)/) : null;
   const initialParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const [publicStoreSlug, setPublicStoreSlug] = useState<string | null>(() => {
+    if (initialStoreMatch?.[1]) return decodeURIComponent(initialStoreMatch[1]);
+    const qStore = initialParams?.get('store');
+    return qStore ? qStore.trim() : null;
+  });
   const urlPortal = initialParams?.get('portal') as PortalMode | null;
   const initialPortal: PortalMode =
     urlPortal && ['admin', 'merchant', 'customer', 'captain'].includes(urlPortal) ? urlPortal : 'admin';
@@ -441,6 +451,7 @@ export default function App() {
             groupLabel: isAr ? 'التشغيل والعملاء' : 'Operations & Users',
             items: [
               { id: 'orders', label: isAr ? 'التجار والصيدليات والطلبات' : 'Merchants & Orders', icon: Store },
+              { id: 'store_reviews', label: isAr ? 'تقييمات المتاجر والرقابة' : 'Store Reviews & Moderation', icon: Star },
               { id: 'rides_management', label: isAr ? 'إدارة المشاوير' : 'Rides Management', icon: Car },
               { id: 'customers', label: isAr ? 'العملاء والمستخدمون' : 'Customers & Users', icon: Users },
               { id: 'captains', label: isAr ? 'الكباتن وتوثيق المركبات' : 'Captains & KYC', icon: Truck },
@@ -495,6 +506,21 @@ export default function App() {
       : isAr
       ? 'تطبيق الطيارين'
       : 'Captain App';
+
+  if (publicStoreSlug) {
+    return (
+      <PublicStoreWebPage
+        merchantId={publicStoreSlug}
+        onOpenPlatform={() => {
+          setPublicStoreSlug(null);
+          setPortalMode('customer');
+          if (typeof window !== 'undefined') {
+            window.history.replaceState({}, '', '/?portal=customer');
+          }
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
@@ -963,6 +989,9 @@ export default function App() {
               )}
               {activeTab === 'rides_management' && portalMode === 'admin' && (
                 <RidesManagementSection lang={lang} captains={captains} onRefreshCore={refreshCore} notify={notify} />
+              )}
+              {activeTab === 'store_reviews' && portalMode === 'admin' && (
+                <StoreReviewsAdminSection lang={lang} onNotify={notify} />
               )}
               {activeTab === 'merchant_excel' && portalMode === 'merchant' && merchantSession && (
                 <MerchantMasterLinkPanel

@@ -330,22 +330,28 @@ class MerchantPushNotificationService {
   Future<void> _initFirebaseMessaging() async {
     try {
       if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp();
+        await Firebase.initializeApp().timeout(const Duration(seconds: 3));
       }
-      _firebaseAvailable = true;
+      _firebaseAvailable = Firebase.apps.isNotEmpty;
     } catch (e) {
-      _firebaseAvailable = false;
-      debugPrint('[MerchantPush] Firebase not configured; native Android background engine active: $e');
-      return;
+      if (Firebase.apps.isNotEmpty) {
+        _firebaseAvailable = true;
+      } else {
+        _firebaseAvailable = false;
+        debugPrint('[MerchantPush] Firebase not configured; native Android background engine active: $e');
+        return;
+      }
     }
 
     try {
       final messaging = FirebaseMessaging.instance;
-      await messaging.setForegroundNotificationPresentationOptions(
-        alert: true,
-        badge: true,
-        sound: true,
-      );
+      await messaging
+          .setForegroundNotificationPresentationOptions(
+            alert: true,
+            badge: true,
+            sound: true,
+          )
+          .timeout(const Duration(seconds: 3));
 
       FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
         final title = (message.notification?.title ?? message.data['title_ar'] ?? '').toString().trim();
@@ -375,19 +381,25 @@ class MerchantPushNotificationService {
         onNotificationTap?.call(Map<String, dynamic>.from(message.data));
       });
 
-      final initialMsg = await messaging.getInitialMessage();
+      final initialMsg = await messaging
+          .getInitialMessage()
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
       if (initialMsg != null) {
         onNotificationTap?.call(Map<String, dynamic>.from(initialMsg.data));
       }
 
-      try {
-        await messaging.subscribeToTopic('otlobha_merchant_all');
-        await messaging.subscribeToTopic('otlobha_all');
-      } catch (e) {
-        debugPrint('[MerchantPush] Topic subscribe warning: $e');
-      }
+      unawaited(() async {
+        try {
+          await messaging.subscribeToTopic('otlobha_merchant_all').timeout(const Duration(seconds: 5));
+          await messaging.subscribeToTopic('otlobha_all').timeout(const Duration(seconds: 5));
+        } catch (e) {
+          debugPrint('[MerchantPush] Topic subscribe warning: $e');
+        }
+      }());
 
-      _currentToken = await messaging.getToken();
+      _currentToken = await messaging
+          .getToken()
+          .timeout(const Duration(seconds: 5), onTimeout: () => null);
       messaging.onTokenRefresh.listen((newToken) {
         _currentToken = newToken;
         _lastSyncedToken = null;

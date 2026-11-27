@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/api_client.dart';
 
@@ -446,6 +447,7 @@ class _StorefrontProductPagerOverlayState extends State<_StorefrontProductPagerO
                         },
                         child: _ProductDetailPageCard(
                           key: ValueKey('pager_card_$pid'),
+                          api: widget.api,
                           productId: pid,
                           preview: preview,
                           details: details,
@@ -499,6 +501,7 @@ class _StorefrontProductPagerOverlayState extends State<_StorefrontProductPagerO
 }
 
 class _ProductDetailPageCard extends StatefulWidget {
+  final OtlobhaCustomerApi api;
   final String productId;
   final Map<String, dynamic> preview;
   final Map<String, dynamic>? details;
@@ -520,6 +523,7 @@ class _ProductDetailPageCard extends StatefulWidget {
 
   const _ProductDetailPageCard({
     super.key,
+    required this.api,
     required this.productId,
     required this.preview,
     required this.details,
@@ -1663,6 +1667,16 @@ class _ProductDetailPageCardState extends State<_ProductDetailPageCard> {
                               ),
                             ],
 
+                            // 5B. INDEPENDENT PRODUCT REVIEWS (verified purchasers only)
+                            const SizedBox(height: 10),
+                            _ProductReviewsSection(
+                              key: ValueKey('prod_reviews_$activeListingId'),
+                              api: widget.api,
+                              productId: activeListingId,
+                              productName: displayName,
+                              onZoomImage: widget.onZoomImage,
+                            ),
+
                             // 6. BRAND & STORE NAVIGATION CARDS
                             const SizedBox(height: 10),
                             Row(
@@ -2126,6 +2140,539 @@ class _ProductDetailPageCardState extends State<_ProductDetailPageCard> {
               },
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProductReviewsSection extends StatefulWidget {
+  final OtlobhaCustomerApi api;
+  final String productId;
+  final String productName;
+  final void Function(String imageUrl, String title) onZoomImage;
+
+  const _ProductReviewsSection({
+    super.key,
+    required this.api,
+    required this.productId,
+    required this.productName,
+    required this.onZoomImage,
+  });
+
+  @override
+  State<_ProductReviewsSection> createState() => _ProductReviewsSectionState();
+}
+
+class _ProductReviewsSectionState extends State<_ProductReviewsSection> {
+  bool _loading = true;
+  double _ratingAvg = 0;
+  int _ratingCount = 0;
+  List<Map<String, dynamic>> _reviews = [];
+  List<Map<String, dynamic>> _eligibleOrders = [];
+  String _sort = 'newest';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (widget.productId.isEmpty) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    try {
+      final res = await widget.api.getProductReviews(
+        widget.productId,
+        sort: _sort,
+        limit: 10,
+      );
+      if (!mounted) return;
+      final summary = res['summary'] is Map
+          ? Map<String, dynamic>.from(res['summary'] as Map)
+          : <String, dynamic>{};
+      final rawItems = (res['reviews'] as List?) ?? (res['items'] as List?) ?? [];
+      final rawEligible = (res['eligible_orders'] as List?) ?? [];
+      setState(() {
+        _ratingAvg = (summary['rating_avg'] as num?)?.toDouble() ??
+            (res['rating_avg'] as num?)?.toDouble() ??
+            0;
+        _ratingCount = (summary['rating_count'] as num?)?.toInt() ??
+            (res['rating_count'] as num?)?.toInt() ??
+            0;
+        _reviews = rawItems.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        _eligibleOrders = rawEligible.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _openWriteDialog() async {
+    if (!widget.api.hasTokens) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يرجى تسجيل الدخول لتقييم المنتج')),
+      );
+      return;
+    }
+    if (_eligibleOrders.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('يمكن تقييم المنتج فقط بعد إتمام طلب مكتمل يحتوي على هذا المنتج'),
+        ),
+      );
+      return;
+    }
+
+    int stars = 5;
+    String selectedOrderId = (_eligibleOrders.first['order_id'] ?? '').toString();
+    final commentCtrl = TextEditingController();
+    final List<String> imagesBase64 = [];
+    final picker = ImagePicker();
+    bool submitting = false;
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            title: Text(
+              'تقييم المنتج: ${widget.productName}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w900),
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_eligibleOrders.length > 1) ...[
+                    DropdownButtonFormField<String>(
+                      value: selectedOrderId,
+                      decoration: const InputDecoration(
+                        labelText: 'الطلب المكتمل',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      items: _eligibleOrders
+                          .map((o) => DropdownMenuItem<String>(
+                                value: (o['order_id'] ?? '').toString(),
+                                child: Text('طلب #${o['order_number'] ?? o['order_id']}'),
+                              ))
+                          .toList(),
+                      onChanged: (v) {
+                        if (v != null) setModalState(() => selectedOrderId = v);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List.generate(5, (i) {
+                      final s = i + 1;
+                      return IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                        onPressed: () => setModalState(() => stars = s),
+                        icon: Icon(
+                          s <= stars ? Icons.star_rounded : Icons.star_border_rounded,
+                          color: const Color(0xFFF5A623),
+                          size: 32,
+                        ),
+                      );
+                    }),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: commentCtrl,
+                    maxLines: 3,
+                    maxLength: 500,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'رأيك في جودة المنتج (اختياري)',
+                      hintText: 'هل المنتج طازج ومطابق للوصف؟',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'صور المنتج (اختياري - حتى 4)',
+                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: Color(0xFF475569)),
+                      ),
+                      if (imagesBase64.length < 4)
+                        TextButton.icon(
+                          onPressed: () async {
+                            try {
+                              final picked = await picker.pickImage(
+                                source: ImageSource.gallery,
+                                maxWidth: 960,
+                                imageQuality: 72,
+                              );
+                              if (picked == null) return;
+                              final bytes = await picked.readAsBytes();
+                              final ext = picked.path.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
+                              setModalState(() {
+                                imagesBase64.add('data:image/$ext;base64,${base64Encode(bytes)}');
+                              });
+                            } catch (_) {}
+                          },
+                          icon: const Icon(Icons.add_a_photo_outlined, size: 16),
+                          label: const Text('إضافة صورة', style: TextStyle(fontSize: 12)),
+                        ),
+                    ],
+                  ),
+                  if (imagesBase64.isNotEmpty)
+                    SizedBox(
+                      height: 60,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: imagesBase64.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (_, idx) {
+                          final raw = imagesBase64[idx];
+                          final b64 = raw.split(',').last;
+                          return Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: Image.memory(
+                                  base64Decode(b64),
+                                  width: 56,
+                                  height: 56,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                              Positioned(
+                                top: -6,
+                                left: -6,
+                                child: GestureDetector(
+                                  onTap: () => setModalState(() => imagesBase64.removeAt(idx)),
+                                  child: Container(
+                                    width: 20,
+                                    height: 20,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFFA92224),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(Icons.close, size: 13, color: Colors.white),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: submitting ? null : () => Navigator.pop(ctx, false),
+                child: const Text('إلغاء'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFA92224),
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: submitting
+                    ? null
+                    : () async {
+                        setModalState(() => submitting = true);
+                        try {
+                          await widget.api.submitProductReview(
+                            widget.productId,
+                            orderId: selectedOrderId,
+                            rating: stars,
+                            comment: commentCtrl.text.trim(),
+                            imageUrls: imagesBase64,
+                          );
+                          if (ctx.mounted) Navigator.pop(ctx, true);
+                        } catch (e) {
+                          setModalState(() => submitting = false);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+                            );
+                          }
+                        }
+                      },
+                child: Text(submitting ? 'جاري الإرسال...' : 'نشر تقييم المنتج'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    commentCtrl.dispose();
+    if (saved == true) {
+      await _load();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم حفظ تقييم المنتج بنجاح ✓')),
+        );
+      }
+    }
+  }
+
+  Future<void> _reportReview(String reviewId) async {
+    if (!widget.api.hasTokens) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يرجى تسجيل الدخول للإبلاغ عن تعليق')),
+      );
+      return;
+    }
+    String reason = 'تعليق مسيء أو غير لائق';
+    final detailsCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text('الإبلاغ عن تعليق', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: reason,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'سبب البلاغ'),
+                  items: const [
+                    DropdownMenuItem(value: 'تعليق مسيء أو غير لائق', child: Text('تعليق مسيء أو غير لائق')),
+                    DropdownMenuItem(value: 'تقييم وهمي أو مضلل', child: Text('تقييم وهمي أو مضلل')),
+                    DropdownMenuItem(value: 'محتوى غير متعلق بالمنتج', child: Text('محتوى غير متعلق بالمنتج')),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setModalState(() => reason = v);
+                  },
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: detailsCtrl,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true, labelText: 'تفاصيل إضافية (اختياري)'),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFA92224), foregroundColor: Colors.white),
+                onPressed: () async {
+                  try {
+                    await widget.api.reportReview(
+                      reviewType: 'product',
+                      reviewId: reviewId,
+                      reason: reason,
+                      details: detailsCtrl.text.trim(),
+                    );
+                    if (ctx.mounted) Navigator.pop(ctx, true);
+                  } catch (e) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+                      );
+                    }
+                  }
+                },
+                child: const Text('إرسال البلاغ'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    detailsCtrl.dispose();
+    if (ok == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تم استلام البلاغ وسيتم مراجعته من الإدارة ✓')),
+      );
+    }
+  }
+
+  Widget _buildReviewPhotoThumb(String rawUrl) {
+    final resolved = OtlobhaCustomerApi.resolveMediaUrl(rawUrl);
+    if (resolved.startsWith('data:image')) {
+      try {
+        final b64 = resolved.split(',').last;
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.memory(base64Decode(b64), width: 54, height: 54, fit: BoxFit.cover),
+        );
+      } catch (_) {
+        return const SizedBox.shrink();
+      }
+    }
+    if (resolved.isEmpty) return const SizedBox.shrink();
+    return GestureDetector(
+      onTap: () => widget.onZoomImage(resolved, widget.productName),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.network(
+          resolved,
+          width: 54,
+          height: 54,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.star_rounded, size: 19, color: Color(0xFFF5A623)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  _ratingCount > 0
+                      ? 'تقييمات المنتج (${_ratingAvg.toStringAsFixed(1)} · $_ratingCount)'
+                      : 'تقييمات المنتج',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+              ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFA92224),
+                  side: const BorderSide(color: Color(0xFFFECACA)),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: _openWriteDialog,
+                icon: const Icon(Icons.rate_review_outlined, size: 14),
+                label: const Text('قيّم المنتج', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800)),
+              ),
+            ],
+          ),
+          if (_reviews.length > 1) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                ChoiceChip(
+                  label: const Text('الأحدث', style: TextStyle(fontSize: 11)),
+                  selected: _sort == 'newest',
+                  onSelected: (_) {
+                    setState(() => _sort = 'newest');
+                    _load();
+                  },
+                ),
+                const SizedBox(width: 6),
+                ChoiceChip(
+                  label: const Text('الأعلى تقييمًا', style: TextStyle(fontSize: 11)),
+                  selected: _sort == 'highest',
+                  onSelected: (_) {
+                    setState(() => _sort = 'highest');
+                    _load();
+                  },
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 8),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+            )
+          else if (_reviews.isEmpty)
+            const Text(
+              'لا توجد تقييمات لهذا المنتج بعد. كن أول من يقيّمه بعد شرائه واستلامه.',
+              style: TextStyle(fontSize: 11.5, color: Color(0xFF64748B)),
+            )
+          else
+            Column(
+              children: _reviews.take(5).map((r) {
+                final rating = (r['rating'] as num?)?.toInt() ?? 5;
+                final comment = (r['comment'] ?? '').toString().trim();
+                final photos = ((r['image_urls'] as List?) ?? (r['images'] as List?) ?? [])
+                    .map((e) => e.toString())
+                    .toList();
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              (r['customer_name_display'] ?? 'عميل اطلبها').toString(),
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+                            ),
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: List.generate(
+                              5,
+                              (i) => Icon(
+                                i < rating ? Icons.star_rounded : Icons.star_border_rounded,
+                                size: 13,
+                                color: const Color(0xFFF5A623),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          InkWell(
+                            onTap: () => _reportReview((r['id'] ?? '').toString()),
+                            child: const Padding(
+                              padding: EdgeInsets.all(2),
+                              child: Icon(Icons.flag_outlined, size: 14, color: Color(0xFF94A3B8)),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (comment.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          comment,
+                          style: const TextStyle(fontSize: 11.5, color: Color(0xFF334155), height: 1.4),
+                        ),
+                      ],
+                      if (photos.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: photos.map(_buildReviewPhotoThumb).toList(),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
         ],
       ),
     );

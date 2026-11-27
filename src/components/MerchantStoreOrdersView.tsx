@@ -7,12 +7,16 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock,
+  CreditCard,
+  Eye,
   FileSpreadsheet,
   FileWarning,
   MapPin,
   Package,
   PackageCheck,
   Phone,
+  ShieldAlert,
+  ShieldCheck,
   Store,
   X,
 } from 'lucide-react';
@@ -65,6 +69,13 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
   const [rejectInvoiceOrder, setRejectInvoiceOrder] = useState<OrderRecord | null>(null);
   const [invoiceRejectReason, setInvoiceRejectReason] = useState('');
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+  const [previewProofModal, setPreviewProofModal] = useState<{
+    url: string;
+    orderNumber: string;
+    methodLabel: string;
+    totalAmount: number;
+    storeSubtotal: number;
+  } | null>(null);
 
   // Live in-app + OS/Browser notification state for incoming merchant orders
   const [incomingAlert, setIncomingAlert] = useState<{ title: string; body: string } | null>(null);
@@ -837,12 +848,20 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                           عاجل Express
                         </span>
                       )}
-                      {order.payment_method === 'network' ? (
+                      {order.payment_method === 'vodafone_cash' ? (
+                        <span className="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-red-100 text-red-800 border border-red-200">
+                          📱 فودافون كاش
+                        </span>
+                      ) : order.payment_method === 'instapay' ? (
+                        <span className="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-purple-100 text-purple-800 border border-purple-200">
+                          ⚡ إنستا باي (InstaPay)
+                        </span>
+                      ) : order.payment_method === 'network' ? (
                         <span className="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-blue-100 text-blue-800">
                           💳 دفع شبكة / POS
                         </span>
                       ) : order.payment_method === 'wallet' ? (
-                        <span className="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-purple-100 text-purple-800">
+                        <span className="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-indigo-100 text-indigo-800">
                           📱 محفظة إلكترونية
                         </span>
                       ) : (
@@ -873,6 +892,115 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
                     <p className="text-base font-bold text-slate-900">{view.mySubtotal} ج.م</p>
                   </div>
                 </div>
+
+                {/* Payment Info & Transfer Proof Verification Box (so merchant verifies payment before preparing) */}
+                {(() => {
+                  const pm = String(order.payment_method || 'cash').toLowerCase();
+                  const isTransfer = pm === 'vodafone_cash' || pm === 'instapay';
+                  const proofUrl = String(order.payment_proof_image_url || '').trim();
+                  const pmLabel =
+                    pm === 'vodafone_cash'
+                      ? 'فودافون كاش'
+                      : pm === 'instapay'
+                      ? 'إنستا باي (InstaPay)'
+                      : pm === 'network'
+                      ? 'دفع بالشبكة / POS مع الطيار'
+                      : pm === 'wallet'
+                      ? 'محفظة إلكترونية'
+                      : 'كاش عند الاستلام';
+
+                  if (isTransfer) {
+                    if (proofUrl) {
+                      return (
+                        <div className="p-3 rounded-xl bg-teal-50/75 border border-teal-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-start gap-2.5 min-w-0">
+                            <ShieldCheck className="w-5 h-5 text-teal-700 shrink-0 mt-0.5" />
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-extrabold text-teal-950">
+                                  بيانات الدفع: {pmLabel} — مرفق صورة إيصال التحويل ✓
+                                </span>
+                                <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-white border border-teal-200 text-teal-900 font-mono-num">
+                                  إجمالي الفاتورة: {order.total_amount} ج.م
+                                </span>
+                              </div>
+                              <p className="text-[11px] font-semibold text-teal-800 leading-relaxed">
+                                يرجى فتح صورة التحويل والتأكد من وصول المبلغ قبل البدء في تجهيز الطلب.
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewProofModal({
+                                  url: proofUrl,
+                                  orderNumber: order.order_number,
+                                  methodLabel: pmLabel,
+                                  totalAmount: Number(order.total_amount || 0),
+                                  storeSubtotal: Number(view.mySubtotal || 0),
+                                })
+                              }
+                              className="group relative rounded-xl overflow-hidden border-2 border-teal-300 hover:border-teal-600 transition-colors shrink-0"
+                              title="اضغط لعرض صورة التحويل بالحجم الكامل"
+                            >
+                              <img
+                                src={proofUrl}
+                                alt="إيصال التحويل"
+                                className="w-16 h-16 object-cover"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewProofModal({
+                                  url: proofUrl,
+                                  orderNumber: order.order_number,
+                                  methodLabel: pmLabel,
+                                  totalAmount: Number(order.total_amount || 0),
+                                  storeSubtotal: Number(view.mySubtotal || 0),
+                                })
+                              }
+                              className="inline-flex items-center gap-1.5 px-3 py-2 bg-teal-700 hover:bg-teal-800 text-white rounded-xl text-xs font-bold whitespace-nowrap"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>عرض إيصال التحويل</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="p-3 rounded-xl bg-rose-50 border border-rose-300 flex items-start gap-2.5 text-rose-900">
+                        <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                        <div className="text-xs space-y-0.5">
+                          <p className="font-extrabold">
+                            تنبيه هام: الدفع ({pmLabel}) — لم يتم إرفاق صورة تحويل!
+                          </p>
+                          <p className="text-[11px] font-semibold text-rose-800">
+                            لا تبدأ بتجهيز الطلب قبل التحقق من إتمام التحويل والتواصل مع الإدارة أو العميل.
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-700">
+                      <span className="inline-flex items-center gap-1.5 font-bold text-slate-800">
+                        <CreditCard className="w-4 h-4 text-slate-500" />
+                        <span>طريقة الدفع: {pmLabel}</span>
+                      </span>
+                      <span className="text-[11px] font-semibold text-slate-600">
+                        {pm === 'cash'
+                          ? 'التحصيل نقدًا مع الطيار عند التسليم'
+                          : pm === 'network'
+                          ? 'التحصيل عبر ماكينة POS مع الطيار'
+                          : 'دفع عبر المحفظة الإلكترونية'}
+                      </span>
+                    </div>
+                  );
+                })()}
 
                 {/* Items List with Partial Rejection */}
                 {renderOrderItems(order)}
@@ -1034,6 +1162,55 @@ export const MerchantStoreOrdersView: React.FC<Props> = ({
               </button>
             </div>
           </form>
+        </div>
+      )}
+      {/* Transfer Proof Full-Size Lightbox Modal */}
+      {previewProofModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80"
+          onClick={() => setPreviewProofModal(null)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold truncate">
+                  إيصال التحويل — طلب #{previewProofModal.orderNumber}
+                </h3>
+                <p className="text-[11px] text-slate-300">
+                  {previewProofModal.methodLabel} · قيمة متجرك {previewProofModal.storeSubtotal} ج.م (الإجمالي {previewProofModal.totalAmount} ج.م)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewProofModal(null)}
+                className="p-1.5 rounded-lg bg-white/15 hover:bg-white/25 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 bg-slate-100 flex items-center justify-center max-h-[70vh] overflow-auto">
+              <img
+                src={previewProofModal.url}
+                alt={`إيصال التحويل للطلب ${previewProofModal.orderNumber}`}
+                className="max-w-full max-h-[64vh] object-contain rounded-xl border border-slate-200 bg-white shadow-sm"
+              />
+            </div>
+            <div className="p-3.5 bg-white border-t border-slate-100 flex items-center justify-between gap-3">
+              <span className="text-[11px] font-bold text-teal-800">
+                تأكد من مطابقة المبلغ وبيانات التحويل قبل تجهيز الطلب
+              </span>
+              <button
+                type="button"
+                onClick={() => setPreviewProofModal(null)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shrink-0"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
         </div>
       )}
         </>

@@ -270,10 +270,10 @@ export function CaptainRidesPanel({ captain, lang, onOpenTripChat, onRefreshCore
       .addTo(layer);
 
     if (activeTrip) {
-      const pLat = Number(activeTrip.pickup_lat);
-      const pLng = Number(activeTrip.pickup_lng);
-      const dLat = Number(activeTrip.dropoff_lat);
-      const dLng = Number(activeTrip.dropoff_lng);
+      const pLat = activeTrip.pickup_lat != null ? Number(activeTrip.pickup_lat) : NaN;
+      const pLng = activeTrip.pickup_lng != null ? Number(activeTrip.pickup_lng) : NaN;
+      const dLat = activeTrip.dropoff_lat != null ? Number(activeTrip.dropoff_lat) : NaN;
+      const dLng = activeTrip.dropoff_lng != null ? Number(activeTrip.dropoff_lng) : NaN;
       if (Number.isFinite(pLat) && Number.isFinite(pLng)) {
         bounds.push([pLat, pLng]);
         L.circleMarker([pLat, pLng], {
@@ -508,8 +508,13 @@ export function CaptainRidesPanel({ captain, lang, onOpenTripChat, onRefreshCore
 
   const openExternalNav = () => {
     if (!activeTrip) return;
-    const targetLat = activeTrip.status === 'in_progress' ? activeTrip.dropoff_lat : activeTrip.pickup_lat;
-    const targetLng = activeTrip.status === 'in_progress' ? activeTrip.dropoff_lng : activeTrip.pickup_lng;
+    const isGoingToDropoff = activeTrip.status === 'in_progress';
+    const targetLat = isGoingToDropoff ? activeTrip.dropoff_lat : activeTrip.pickup_lat;
+    const targetLng = isGoingToDropoff ? activeTrip.dropoff_lng : activeTrip.pickup_lng;
+    if (targetLat == null || targetLng == null || !Number.isFinite(Number(targetLat)) || !Number.isFinite(Number(targetLng))) {
+      notify('وجهة العميل مكتوبة يدوياً بدون إحداثيات على الخريطة — يرجى التواصل مع العميل لتحديد الموقع بدقة');
+      return;
+    }
     const url = `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${driverLat}%2C${driverLng}%3B${targetLat}%2C${targetLng}`;
     const a = document.createElement('a');
     a.href = url;

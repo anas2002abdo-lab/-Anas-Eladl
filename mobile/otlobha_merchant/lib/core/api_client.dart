@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'config.dart';
@@ -20,6 +22,15 @@ class MerchantApiClient {
   String? accessToken;
   String? refreshToken;
   Future<bool>? _refreshFuture;
+  DateTime? _refreshStartedAt;
+
+  void resetConnectionPool() {
+    if (_refreshFuture != null &&
+        (_refreshStartedAt == null || DateTime.now().difference(_refreshStartedAt!).inSeconds >= 8)) {
+      _refreshFuture = null;
+      _refreshStartedAt = null;
+    }
+  }
 
   MerchantApiClient({this.accessToken, this.refreshToken});
 
@@ -36,9 +47,9 @@ class MerchantApiClient {
 
   Future<void> reloadTokensFromStorage() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload();
+        await prefs.reload().timeout(const Duration(seconds: 3));
       } catch (_) {}
       final savedAccess = prefs.getString(_prefAccessToken)?.trim();
       final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
@@ -55,8 +66,18 @@ class MerchantApiClient {
     await reloadTokensFromStorage();
     final currentRefresh = refreshToken?.trim() ?? '';
     if (currentRefresh.isEmpty) return false;
-    if (_refreshFuture != null) return _refreshFuture!;
+    if (_refreshFuture != null) {
+      final elapsed = _refreshStartedAt == null
+          ? const Duration(seconds: 99)
+          : DateTime.now().difference(_refreshStartedAt!);
+      if (elapsed.inSeconds < 12) {
+        return _refreshFuture!;
+      }
+      _refreshFuture = null;
+      _refreshStartedAt = null;
+    }
 
+    _refreshStartedAt = DateTime.now();
     final future = () async {
       try {
         final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/auth/refresh');
@@ -69,7 +90,7 @@ class MerchantApiClient {
               },
               body: jsonEncode({'refresh_token': currentRefresh}),
             )
-            .timeout(const Duration(seconds: 20));
+            .timeout(const Duration(seconds: 12));
         if (res.statusCode < 200 || res.statusCode >= 300) return false;
         final decoded = jsonDecode(utf8.decode(res.bodyBytes));
         if (decoded is! Map) return false;
@@ -81,7 +102,7 @@ class MerchantApiClient {
         accessToken = nextAccess;
         if (nextRefresh.isNotEmpty) refreshToken = nextRefresh;
         try {
-          final prefs = await SharedPreferences.getInstance();
+          final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
           await prefs.setString(_prefAccessToken, nextAccess);
           if (nextRefresh.isNotEmpty) {
             await prefs.setString(_prefRefreshToken, nextRefresh);
@@ -92,10 +113,38 @@ class MerchantApiClient {
         return false;
       } finally {
         _refreshFuture = null;
+        _refreshStartedAt = null;
       }
     }();
     _refreshFuture = future;
     return future;
+  }
+
+  Future<http.Response> _sendWithRetry(Future<http.Response> Function() send) async {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await send().timeout(const Duration(seconds: 15));
+      } on TimeoutException {
+        if (attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 350));
+          continue;
+        }
+        throw MerchantApiException('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+      } on SocketException {
+        if (attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw MerchantApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت');
+      } on http.ClientException {
+        if (attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw MerchantApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت');
+      }
+    }
+    throw MerchantApiException('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى');
   }
 
   Future<http.Response> _authedRequest(Future<http.Response> Function() send) async {
@@ -103,17 +152,17 @@ class MerchantApiClient {
       await _tryRefreshSession();
     }
     final sentAccess = accessToken;
-    var res = await send();
+    var res = await _sendWithRetry(send);
     if (res.statusCode == 401) {
       await reloadTokensFromStorage();
       if ((accessToken?.trim().isNotEmpty ?? false) && accessToken != sentAccess) {
-        res = await send();
+        res = await _sendWithRetry(send);
         if (res.statusCode != 401) return res;
       }
       if (refreshToken?.trim().isNotEmpty ?? false) {
         final refreshed = await _tryRefreshSession();
         if (refreshed) {
-          res = await send();
+          res = await _sendWithRetry(send);
         }
       }
     }

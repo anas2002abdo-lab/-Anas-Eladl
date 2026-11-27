@@ -289,12 +289,23 @@ class _CartScreenState extends State<CartScreen> {
                 ),
               ],
             ),
-          ] else
+          ] else ...[
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                'إرفاق صورة التحويل إلزامي قبل إرسال الطلب حتى يتحقق التاجر من الدفع قبل التجهيز',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFFBE123C),
+                ),
+              ),
+            ),
             ElevatedButton.icon(
               onPressed: _showReceiptSourceSheet,
               icon: const Icon(Icons.add_photo_alternate_rounded, size: 20),
               label: const Text(
-                'إضافة صورة التحويل',
+                'إضافة صورة التحويل (إلزامي)',
                 style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
               ),
               style: ElevatedButton.styleFrom(
@@ -304,6 +315,7 @@ class _CartScreenState extends State<CartScreen> {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
               ),
             ),
+          ],
         ],
       ),
     );
@@ -977,46 +989,97 @@ class _CartScreenState extends State<CartScreen> {
     ),
         ),
         if (showCheckoutBar)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
-              boxShadow: [
-                BoxShadow(
-                  color: Color(0x140F172A),
-                  blurRadius: 10,
-                  offset: Offset(0, -3),
+          Builder(
+            builder: (context) {
+              final requiresTransferProof =
+                  _paymentMethod == 'vodafone_cash' || _paymentMethod == 'instapay';
+              final missingTransferProof = requiresTransferProof &&
+                  (_paymentProofDataUrl == null || _paymentProofDataUrl!.trim().isEmpty);
+              return Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Color(0x140F172A),
+                      blurRadius: 10,
+                      offset: Offset(0, -3),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFEA580C),
-                foregroundColor: Colors.white,
-                minimumSize: const Size.fromHeight(48),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-              ),
-              onPressed: _submitting
-                  ? null
-                  : () async {
-                      if (widget.orderChannel == 'catalog' && cartItems.isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أضف منتجًا واحدًا على الأقل للسلة')));
-                        return;
-                      }
-                      if (widget.isGuest) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('يرجى تسجيل الدخول أو إنشاء حساب لإتمام الطلب (سلتك محفوظة)')),
-                        );
-                        widget.onRequireAuth?.call();
-                        return;
-                      }
-                      if (widget.orderChannel != 'catalog' && _freeTextCtrl.text.trim().isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اكتب تفاصيل الطلب الحر')));
-                        return;
-                      }
-                      setState(() => _submitting = true);
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (missingTransferProof && !widget.isGuest)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF1F2),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFFECDD3)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.warning_amber_rounded, size: 18, color: Color(0xFFBE123C)),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'يجب إضافة صورة إيصال تحويل ${_paymentMethod == 'vodafone_cash' ? 'فودافون كاش' : 'إنستا باي'} أولاً قبل إرسال الطلب للتاجر',
+                                style: const TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF9F1239),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFEA580C),
+                        disabledBackgroundColor: const Color(0xFFCBD5E1),
+                        foregroundColor: Colors.white,
+                        disabledForegroundColor: const Color(0xFF475569),
+                        minimumSize: const Size.fromHeight(48),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      ),
+                      onPressed: (_submitting || (!widget.isGuest && missingTransferProof))
+                          ? null
+                          : () async {
+                              if (widget.orderChannel == 'catalog' && cartItems.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('أضف منتجًا واحدًا على الأقل للسلة')));
+                                return;
+                              }
+                              if (widget.isGuest) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('يرجى تسجيل الدخول أو إنشاء حساب لإتمام الطلب (سلتك محفوظة)')),
+                                );
+                                widget.onRequireAuth?.call();
+                                return;
+                              }
+                              if (widget.orderChannel != 'catalog' && _freeTextCtrl.text.trim().isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('اكتب تفاصيل الطلب الحر')));
+                                return;
+                              }
+                              if (missingTransferProof) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    backgroundColor: const Color(0xFFBE123C),
+                                    content: Text(
+                                      _paymentMethod == 'vodafone_cash'
+                                          ? 'يجب إضافة صورة إيصال تحويل فودافون كاش أولاً قبل إرسال الطلب'
+                                          : 'يجب إضافة صورة إيصال تحويل إنستا باي أولاً قبل إرسال الطلب',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+                              setState(() => _submitting = true);
                       try {
                         String createdOrderNumber = '';
                         int storeCount = 1;
@@ -1118,15 +1181,21 @@ class _CartScreenState extends State<CartScreen> {
                         if (mounted) setState(() => _submitting = false);
                       }
                     },
-              child: Text(
-                _submitting
-                    ? 'جاري الإرسال...'
-                    : (widget.isGuest
-                        ? 'سجّل الدخول لإتمام الطلب'
-                        : 'تأكيد وإرسال الطلب الآن · ${totalEstimate.toStringAsFixed(0)} ج.م'),
-                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14.5),
-              ),
-            ),
+                      child: Text(
+                        _submitting
+                            ? 'جاري الإرسال...'
+                            : (widget.isGuest
+                                ? 'سجّل الدخول لإتمام الطلب'
+                                : (missingTransferProof
+                                    ? 'أرفق صورة التحويل أولاً لتأكيد الطلب'
+                                    : 'تأكيد وإرسال الطلب الآن · ${totalEstimate.toStringAsFixed(0)} ج.م')),
+                        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14.5),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
       ],
     );

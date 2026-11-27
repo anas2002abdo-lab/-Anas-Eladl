@@ -21,6 +21,7 @@ class ServicesHubScreen extends StatelessWidget {
   final String selectedZoneId;
   final String addressLandmark;
   final void Function(String tripId) onOpenTripChat;
+  final void Function(String merchantId, String merchantName)? onOpenStore;
 
   const ServicesHubScreen({
     super.key,
@@ -39,6 +40,7 @@ class ServicesHubScreen extends StatelessWidget {
     this.selectedZoneId = 'zn_city_center',
     this.addressLandmark = '',
     required this.onOpenTripChat,
+    this.onOpenStore,
   });
 
   @override
@@ -60,6 +62,7 @@ class ServicesHubScreen extends StatelessWidget {
             onAddProduct: onAddProduct,
             onOpenCart: onOpenCart,
             onRefresh: onRefresh,
+            onOpenStore: onOpenStore,
           );
           break;
         case 'pharmacy':

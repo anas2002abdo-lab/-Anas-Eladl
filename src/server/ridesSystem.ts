@@ -13,10 +13,12 @@ import {
 import { haversineKm } from './engines.ts';
 import {
   calculateRoadRoute,
+  findBestLocalPlaceMatch,
   getMapPublicConfig,
   getVehicleRoutingProfile,
   reverseGeocode,
   searchPlaces,
+  type GeoPlaceSuggestion,
   type GeoPoint,
 } from './geoService.ts';
 
@@ -1090,23 +1092,84 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
     });
   });
 
+  const loadOtlobhaLocalPlaces = (): GeoPlaceSuggestion[] => {
+    const places: GeoPlaceSuggestion[] = [];
+    try {
+      const zones = db
+        .prepare('SELECT id, name_ar, name_en, center_lat, center_lng FROM service_zones WHERE is_active = 1')
+        .all() as Array<Record<string, any>>;
+      const zoneCenterMap = new Map<string, { lat: number; lng: number }>();
+      for (const z of zones) {
+        const lat = Number(z.center_lat);
+        const lng = Number(z.center_lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        zoneCenterMap.set(String(z.name_ar || '').trim(), { lat, lng });
+        places.push({
+          place_id: `zone_${String(z.id)}`,
+          display_name: `${String(z.name_ar)}، المنزلة، الدقهلية`,
+          short_name: String(z.name_ar),
+          address_line: `منطقة خدمة اطلبها — ${String(z.name_ar)}`,
+          city: 'المنزلة',
+          country: 'مصر',
+          lat,
+          lng,
+          category: 'zone',
+          source: 'otlobha_place',
+        });
+      }
+
+      const merchants = db
+        .prepare(
+          `SELECT id, business_name_ar, branch_name, zone_name, address_detail, merchant_type
+           FROM merchants
+           WHERE verification_status = 'approved'
+           LIMIT 200`
+        )
+        .all() as Array<Record<string, any>>;
+      for (const m of merchants) {
+        const zName = String(m.zone_name || '').trim();
+        const center = zoneCenterMap.get(zName) || { lat: 31.1583, lng: 31.9369 };
+        const name = String(m.business_name_ar || '').trim();
+        if (!name) continue;
+        const addrLine = [m.address_detail, m.branch_name, zName].filter((v) => String(v || '').trim().length > 0).join('، ') || 'المنزلة، الدقهلية';
+        places.push({
+          place_id: `mer_${String(m.id)}`,
+          display_name: `${name} — ${addrLine}`,
+          short_name: name,
+          address_line: addrLine,
+          city: zName || 'المنزلة',
+          country: 'مصر',
+          lat: center.lat,
+          lng: center.lng,
+          category: String(m.merchant_type || 'shop'),
+          source: 'otlobha_place',
+        });
+      }
+    } catch {
+      // ignore optional local places lookup errors
+    }
+    return places;
+  };
+
   app.get('/api/rides/geo/search', requireAuth, async (req: Request, res: Response) => {
     const q = String(req.query.q || '').trim();
     if (q.length < 2) {
-      return res.json({ items: [], attribution: '© OpenStreetMap contributors' });
+      return res.json({ items: [], allow_manual_destination: true, attribution: '© OpenStreetMap contributors' });
     }
     const lat = req.query.lat !== undefined ? Number(req.query.lat) : undefined;
     const lng = req.query.lng !== undefined ? Number(req.query.lng) : undefined;
     const countryCodes = typeof req.query.countrycodes === 'string' ? req.query.countrycodes.trim() : undefined;
-    const limit = req.query.limit !== undefined ? Number(req.query.limit) : 6;
+    const limit = req.query.limit !== undefined ? Number(req.query.limit) : 10;
+    const extraLocalPlaces = loadOtlobhaLocalPlaces();
     const items = await searchPlaces({
       query: q,
       nearLat: Number.isFinite(lat) ? lat : undefined,
       nearLng: Number.isFinite(lng) ? lng : undefined,
       countryCodes,
       limit,
+      extraLocalPlaces,
     });
-    res.json({ items, attribution: '© OpenStreetMap contributors' });
+    res.json({ items, allow_manual_destination: true, attribution: '© OpenStreetMap contributors' });
   });
 
   app.get('/api/rides/geo/reverse', requireAuth, async (req: Request, res: Response) => {
@@ -1120,21 +1183,43 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
   });
 
   // =========================================================================
-  // 2. CUSTOMER RIDE ESTIMATE (Real OSRM road route per vehicle + Fare + Nearby ETA)
+  // 2. CUSTOMER RIDE ESTIMATE (Real OSRM road route per vehicle OR manual typed address)
   // =========================================================================
   app.post('/api/rides/estimate', requireAuth, async (req: Request, res: Response) => {
     try {
-      const { pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, waypoint_lat, waypoint_lng, zone_id } = req.body || {};
+      const { pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, dropoff_address, waypoint_lat, waypoint_lng, zone_id } = req.body || {};
       const pLat = Number(pickup_lat);
       const pLng = Number(pickup_lng);
-      const dLat = Number(dropoff_lat);
-      const dLng = Number(dropoff_lng);
-      if (
-        !Number.isFinite(pLat) || !Number.isFinite(pLng) ||
-        !Number.isFinite(dLat) || !Number.isFinite(dLng) ||
-        pLat < -90 || pLat > 90 || dLat < -90 || dLat > 90
-      ) {
-        return res.status(400).json({ error: 'يرجى تحديد إحداثيات نقطة الانطلاق والوجهة بشكل صحيح' });
+      const hasRawDropoffCoords =
+        dropoff_lat !== undefined && dropoff_lat !== null && dropoff_lat !== '' &&
+        dropoff_lng !== undefined && dropoff_lng !== null && dropoff_lng !== '';
+      let dLat: number | null = hasRawDropoffCoords ? Number(dropoff_lat) : null;
+      let dLng: number | null = hasRawDropoffCoords ? Number(dropoff_lng) : null;
+      const typedDropoffAddress = String(dropoff_address || '').trim();
+
+      if (!Number.isFinite(pLat) || !Number.isFinite(pLng) || pLat < -90 || pLat > 90) {
+        return res.status(400).json({ error: 'يرجى تحديد موقع الانطلاق بشكل صحيح' });
+      }
+
+      if (dLat !== null && dLng !== null) {
+        if (!Number.isFinite(dLat) || !Number.isFinite(dLng) || dLat < -90 || dLat > 90 || dLng < -180 || dLng > 180) {
+          dLat = null;
+          dLng = null;
+        }
+      }
+
+      let resolvedDropoff: GeoPlaceSuggestion | null = null;
+      if ((dLat === null || dLng === null) && typedDropoffAddress.length >= 2) {
+        resolvedDropoff = findBestLocalPlaceMatch(typedDropoffAddress, loadOtlobhaLocalPlaces(), pLat, pLng);
+        if (resolvedDropoff) {
+          dLat = resolvedDropoff.lat;
+          dLng = resolvedDropoff.lng;
+        }
+      }
+
+      const isUnmappedDestination = dLat === null || dLng === null;
+      if (isUnmappedDestination && typedDropoffAddress.length < 2) {
+        return res.status(400).json({ error: 'يرجى كتابة اسم الوجهة أو تحديدها على الخريطة' });
       }
 
       const waypoints: GeoPoint[] = [];
@@ -1188,12 +1273,25 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
           continue;
         }
 
-        const route = await calculateRoadRoute({
-          pickup: { lat: pLat, lng: pLng },
-          dropoff: { lat: dLat, lng: dLng },
-          waypoints,
-          vehicleType: String(vt.code),
-        });
+        const route = isUnmappedDestination
+          ? {
+              vehicle_type: String(vt.code),
+              routing_profile: String(vt.code),
+              routing_source: 'unmapped_address' as const,
+              distance_km: 0,
+              duration_min: 0,
+              route_points: [] as Array<[number, number]>,
+              steps: [] as Array<Record<string, unknown>>,
+              warnings: [
+                'وجهة مكتوبة يدوياً بدون نقطة على الخريطة — يظهر الحد الأدنى المبدئي للتعريفة ويتم التواصل مع الكابتن للوصول بدقة',
+              ],
+            }
+          : await calculateRoadRoute({
+              pickup: { lat: pLat, lng: pLng },
+              dropoff: { lat: dLat!, lng: dLng! },
+              waypoints,
+              vehicleType: String(vt.code),
+            });
 
         const fare = computeRideFare({
           vehicle_type: String(vt.code),
@@ -1227,6 +1325,7 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
           max_passengers: Number(vt.max_passengers || 1),
           routing_profile: route.routing_profile,
           routing_source: route.routing_source,
+          unmapped_destination: isUnmappedDestination,
           distance_km: route.distance_km,
           duration_min: route.duration_min,
           route_points: route.route_points,
@@ -1244,7 +1343,9 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
 
       res.json({
         pickup: { lat: pLat, lng: pLng },
-        dropoff: { lat: dLat, lng: dLng },
+        dropoff: isUnmappedDestination ? null : { lat: dLat, lng: dLng },
+        resolved_dropoff: resolvedDropoff,
+        unmapped_destination: isUnmappedDestination,
         waypoints,
         online_payment_enabled: isPaymentGatewayConfigured(),
         attribution: '© OpenStreetMap contributors',
@@ -1287,10 +1388,32 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
 
       const pLat = Number(pickup_lat);
       const pLng = Number(pickup_lng);
-      const dLat = Number(dropoff_lat);
-      const dLng = Number(dropoff_lng);
-      if (!Number.isFinite(pLat) || !Number.isFinite(pLng) || !Number.isFinite(dLat) || !Number.isFinite(dLng)) {
-        return res.status(400).json({ error: 'يرجى تحديد موقع الانطلاق والوجهة على الخريطة قبل تأكيد الرحلة' });
+      const hasRawDropoffCoords =
+        dropoff_lat !== undefined && dropoff_lat !== null && dropoff_lat !== '' &&
+        dropoff_lng !== undefined && dropoff_lng !== null && dropoff_lng !== '';
+      let dLat: number | null = hasRawDropoffCoords ? Number(dropoff_lat) : null;
+      let dLng: number | null = hasRawDropoffCoords ? Number(dropoff_lng) : null;
+      const cleanedDropoffAddress = String(dropoff_address || '').trim();
+
+      if (!Number.isFinite(pLat) || !Number.isFinite(pLng) || pLat < -90 || pLat > 90) {
+        return res.status(400).json({ error: 'يرجى تحديد موقع الانطلاق قبل تأكيد الرحلة' });
+      }
+      if (dLat !== null && dLng !== null) {
+        if (!Number.isFinite(dLat) || !Number.isFinite(dLng) || dLat < -90 || dLat > 90 || dLng < -180 || dLng > 180) {
+          dLat = null;
+          dLng = null;
+        }
+      }
+      if ((dLat === null || dLng === null) && cleanedDropoffAddress.length >= 2) {
+        const localMatch = findBestLocalPlaceMatch(cleanedDropoffAddress, loadOtlobhaLocalPlaces(), pLat, pLng);
+        if (localMatch) {
+          dLat = localMatch.lat;
+          dLng = localMatch.lng;
+        }
+      }
+      const isUnmappedDestination = dLat === null || dLng === null;
+      if (isUnmappedDestination && cleanedDropoffAddress.length < 2) {
+        return res.status(400).json({ error: 'يرجى كتابة اسم الوجهة أو تحديدها على الخريطة قبل تأكيد الرحلة' });
       }
 
       const payMethod = String(payment_method || 'cash').trim().toLowerCase();
@@ -1333,12 +1456,22 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
       }
 
       // Rule #4: Server ALWAYS calculates road route & fare (never trusts client price!)
-      const route = await calculateRoadRoute({
-        pickup: { lat: pLat, lng: pLng },
-        dropoff: { lat: dLat, lng: dLng },
-        waypoints,
-        vehicleType: vehCode,
-      });
+      const route = isUnmappedDestination
+        ? {
+            distance_km: 0,
+            duration_min: 0,
+            route_points: [] as Array<[number, number]>,
+            routing_source: 'unmapped_address' as const,
+            warnings: [
+              'وجهة مكتوبة يدوياً بدون نقطة على الخريطة — يتم التواصل مع الكابتن لتحديد الموقع بدقة',
+            ],
+          }
+        : await calculateRoadRoute({
+            pickup: { lat: pLat, lng: pLng },
+            dropoff: { lat: dLat!, lng: dLng! },
+            waypoints,
+            vehicleType: vehCode,
+          });
 
       const fare = computeRideFare({
         vehicle_type: vehCode,
@@ -2112,13 +2245,20 @@ export function registerRidesRoutes(app: Express, deps: RidesSystemDeps) {
       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+30 days'))
     `).run(uid('rloc'), tripId, capId, lat, lng, heading, speedKmh);
 
-    // Remaining distance & ETA to pickup (if accepted) or dropoff (if in_progress)
+    // Remaining distance & ETA to pickup (if accepted) or dropoff (if in_progress and dropoff coords exist)
     const norm = normalizeRideStatus(String(trip.status));
-    const targetLat = norm === 'in_progress' ? Number(trip.dropoff_lat || lat) : Number(trip.pickup_lat || lat);
-    const targetLng = norm === 'in_progress' ? Number(trip.dropoff_lng || lng) : Number(trip.pickup_lng || lng);
-    const remainingKm = Number((haversineKm(lat, lng, targetLat, targetLng) * 1.25).toFixed(2));
-    const profileSpeed = getVehicleRoutingProfile(String(trip.vehicle_type || 'car')).avgUrbanSpeedKmhFallback;
-    const remainingMin = Math.max(1, Math.round((remainingKm / profileSpeed) * 60));
+    const hasDropoffCoords = trip.dropoff_lat !== null && trip.dropoff_lat !== undefined && trip.dropoff_lng !== null && trip.dropoff_lng !== undefined;
+    let remainingKm: number | null = null;
+    let remainingMin: number | null = null;
+    if (norm === 'in_progress' && hasDropoffCoords) {
+      remainingKm = Number((haversineKm(lat, lng, Number(trip.dropoff_lat), Number(trip.dropoff_lng)) * 1.25).toFixed(2));
+    } else if (norm !== 'in_progress' && trip.pickup_lat !== null && trip.pickup_lat !== undefined) {
+      remainingKm = Number((haversineKm(lat, lng, Number(trip.pickup_lat), Number(trip.pickup_lng)) * 1.25).toFixed(2));
+    }
+    if (remainingKm !== null) {
+      const profileSpeed = getVehicleRoutingProfile(String(trip.vehicle_type || 'car')).avgUrbanSpeedKmhFallback;
+      remainingMin = Math.max(1, Math.round((remainingKm / profileSpeed) * 60));
+    }
 
     const updatedAt = new Date().toISOString();
     const rooms = [`trip:${tripId}`, 'admin:all', `captain:${capId}`, ...(trip.customer_id ? [`customer:${String(trip.customer_id)}`] : [])];

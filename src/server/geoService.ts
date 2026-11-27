@@ -18,7 +18,7 @@ export interface GeoPlaceSuggestion {
   lat: number;
   lng: number;
   category: string;
-  source: 'nominatim';
+  source: 'local_landmark' | 'otlobha_place' | 'photon' | 'nominatim';
 }
 
 export interface RouteStepSummary {
@@ -54,8 +54,80 @@ export interface VehicleRoutingProfileConfig {
 
 const DEFAULT_OSRM_BASE = 'https://router.project-osrm.org';
 const DEFAULT_NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
+const DEFAULT_PHOTON_BASE = 'https://photon.komoot.io';
 const DEFAULT_OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const OSM_ATTRIBUTION = '© OpenStreetMap contributors';
+
+export function normalizeArabicText(input: string): string {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+interface LocalLandmarkEntry {
+  id: string;
+  name: string;
+  address: string;
+  city: string;
+  lat: number;
+  lng: number;
+  category: string;
+  aliases: string[];
+}
+
+// Curated Al-Manzala & Dakahlia landmarks + surrounding villages/cities to guarantee instant Arabic search coverage
+const AL_MANZALA_LANDMARKS: LocalLandmarkEntry[] = [
+  { id: 'lm_manzala_center', name: 'وسط مدينة المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1583, lng: 31.9369, category: 'city', aliases: ['المنزلة', 'مدينة المنزلة', 'البلد', 'وسط البلد'] },
+  { id: 'lm_manzala_hospital', name: 'مستشفى المنزلة العام', address: 'شارع المستشفى، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1614, lng: 31.9332, category: 'hospital', aliases: ['المستشفى العام', 'مستشفي المنزله', 'مستشفى', 'طوارئ المنزلة'] },
+  { id: 'lm_manzala_fever_hosp', name: 'مستشفى حميات المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1631, lng: 31.9308, category: 'hospital', aliases: ['الحميات', 'مستشفى الحميات'] },
+  { id: 'lm_manzala_bus_station', name: 'موقف المنزلة الرئيسي', address: 'طريق المنزلة - دكرنس، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1546, lng: 31.9398, category: 'station', aliases: ['الموقف', 'موقف السيارات', 'موقف المنصورة', 'موقف دمياط', 'موقف بورسعيد'] },
+  { id: 'lm_manzala_train', name: 'محطة قطار المنزلة', address: 'شارع المحطة، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1562, lng: 31.9415, category: 'station', aliases: ['المحطة', 'محطة القطر', 'السكه الحديد', 'ميدان المحطة'] },
+  { id: 'lm_manzala_saah', name: 'ميدان الساعة - المنزلة', address: 'وسط المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1589, lng: 31.9364, category: 'square', aliases: ['الساعة', 'ميدان الساعه', 'الميدان'] },
+  { id: 'lm_manzala_gomhouria', name: 'شارع الجمهورية - المنزلة', address: 'شارع الجمهورية، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1594, lng: 31.9355, category: 'road', aliases: ['الجمهورية', 'شارع الجمهوريه'] },
+  { id: 'lm_manzala_portsaid_st', name: 'شارع بورسعيد - المنزلة', address: 'شارع بورسعيد، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1602, lng: 31.9384, category: 'road', aliases: ['شارع بورسعيد', 'طريق بورسعيد'] },
+  { id: 'lm_manzala_tahrir', name: 'شارع التحرير - المنزلة', address: 'شارع التحرير، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1574, lng: 31.9349, category: 'road', aliases: ['التحرير', 'شارع التحرير'] },
+  { id: 'lm_manzala_bahr', name: 'شارع البحر - المنزلة', address: 'شارع البحر، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1568, lng: 31.9389, category: 'road', aliases: ['البحر', 'الكورنيش', 'شارع البحر'] },
+  { id: 'lm_manzala_court', name: 'محكمة المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1598, lng: 31.9341, category: 'government', aliases: ['المحكمة', 'محكمه المنزله', 'النيابة'] },
+  { id: 'lm_manzala_police', name: 'مركز شرطة المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1591, lng: 31.9348, category: 'government', aliases: ['المركز', 'الشرطة', 'قسم الشرطة', 'مركز المنزلة'] },
+  { id: 'lm_manzala_council', name: 'مجلس مدينة المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1585, lng: 31.9358, category: 'government', aliases: ['مجلس المدينة', 'رئاسة المركز', 'السجل المدني'] },
+  { id: 'lm_manzala_club', name: 'نادي المنزلة الرياضي', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1621, lng: 31.9375, category: 'landmark', aliases: ['النادي', 'نادي المنزله', 'مركز الشباب', 'الاستاد'] },
+  { id: 'lm_manzala_market', name: 'سوق المنزلة العمومي', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1577, lng: 31.9373, category: 'market', aliases: ['السوق', 'سوق الخضار', 'سوق السمك', 'السوق الكبير'] },
+  { id: 'lm_manzala_bridge', name: 'كوبري المنزلة', address: 'مدخل المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1553, lng: 31.9379, category: 'landmark', aliases: ['الكوبري', 'كوبري البحر', 'الكوبري الجديد'] },
+  { id: 'lm_manzala_highschool', name: 'مدرسة المنزلة الثانوية', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1608, lng: 31.9352, category: 'school', aliases: ['الثانوية', 'الثانويه بنين', 'الثانويه بنات', 'المدارس', 'الصنايع', 'التجارة'] },
+  { id: 'lm_manzala_azhar', name: 'المعهد الديني الأزهري - المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1605, lng: 31.9367, category: 'school', aliases: ['المعهد الديني', 'المعهد الازهري', 'الازهر'] },
+  { id: 'lm_manzala_mosque', name: 'المسجد الكبير - المنزلة', address: 'وسط المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1581, lng: 31.9366, category: 'mosque', aliases: ['الجامع الكبير', 'المسجد الكبير', 'مسجد المحطة'] },
+  { id: 'lm_manzala_health_ins', name: 'التأمين الصحي - المنزلة', address: 'المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1610, lng: 31.9339, category: 'hospital', aliases: ['التأمين الصحي', 'التامين', 'عيادة التأمين'] },
+  // القرى التابعة لمركز المنزلة
+  { id: 'lm_aziza', name: 'العزيزة - مركز المنزلة', address: 'قرية العزيزة، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1778, lng: 31.9762, category: 'village', aliases: ['العزيزة', 'العزيزه', 'قريه العزيزه'] },
+  { id: 'lm_frousat', name: 'الفروسات - مركز المنزلة', address: 'قرية الفروسات، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1489, lng: 31.9614, category: 'village', aliases: ['الفروسات', 'قريه الفروسات'] },
+  { id: 'lm_shoboul', name: 'الشبول - مركز المنزلة', address: 'قرية الشبول، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1864, lng: 31.9185, category: 'village', aliases: ['الشبول', 'قريه الشبول'] },
+  { id: 'lm_basrat', name: 'البصراط - مركز المنزلة', address: 'قرية البصراط، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1965, lng: 31.9571, category: 'village', aliases: ['البصراط', 'قريه البصراط'] },
+  { id: 'lm_nasayma', name: 'النسايمة - مركز المنزلة', address: 'قرية النسايمة، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1682, lng: 31.9998, category: 'village', aliases: ['النسايمة', 'النسايمه', 'قريه النسايمه'] },
+  { id: 'lm_houta', name: 'الحوتة - مركز المنزلة', address: 'قرية الحوتة، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1326, lng: 31.9189, category: 'village', aliases: ['الحوتة', 'الحوته', 'قريه الحوته'] },
+  { id: 'lm_amra', name: 'العامرة - مركز المنزلة', address: 'قرية العامرة، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1441, lng: 31.9082, category: 'village', aliases: ['العامرة', 'العامره'] },
+  { id: 'lm_awlad_sabour', name: 'أولاد صبور - مركز المنزلة', address: 'أولاد صبور، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1462, lng: 31.9812, category: 'village', aliases: ['اولاد صبور', 'ولاد صبور'] },
+  { id: 'lm_mawagid', name: 'المواجد - مركز المنزلة', address: 'قرية المواجد، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1388, lng: 31.9467, category: 'village', aliases: ['المواجد', 'قريه المواجد'] },
+  { id: 'lm_khalayfa', name: 'الخلايفة - مركز المنزلة', address: 'قرية الخلايفة، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1745, lng: 31.9261, category: 'village', aliases: ['الخلايفة', 'الخلايفه'] },
+  { id: 'lm_awlad_nasser', name: 'أولاد ناصر - مركز المنزلة', address: 'أولاد ناصر، المنزلة، الدقهلية', city: 'المنزلة', lat: 31.1652, lng: 31.9541, category: 'village', aliases: ['اولاد ناصر', 'ولاد ناصر'] },
+  { id: 'lm_qibab', name: 'القباب الكبرى - المنزلة', address: 'القباب الكبرى، الدقهلية', city: 'المنزلة', lat: 31.1196, lng: 31.8948, category: 'village', aliases: ['القباب', 'القباب الكبري', 'القباب الصغري'] },
+  // المدن المجاورة
+  { id: 'lm_gamalia', name: 'الجمالية - الدقهلية', address: 'مدينة الجمالية، الدقهلية', city: 'الجمالية', lat: 31.1806, lng: 31.8647, category: 'city', aliases: ['الجمالية', 'الجماليه'] },
+  { id: 'lm_mataria', name: 'المطرية - الدقهلية', address: 'مدينة المطرية، الدقهلية', city: 'المطرية', lat: 31.1829, lng: 32.0311, category: 'city', aliases: ['المطرية', 'المطريه', 'المطرية دقهلية'] },
+  { id: 'lm_mit_salsil', name: 'ميت سلسيل - الدقهلية', address: 'مدينة ميت سلسيل، الدقهلية', city: 'ميت سلسيل', lat: 31.1819, lng: 31.8056, category: 'city', aliases: ['ميت سلسيل', 'ميت سلسل'] },
+  { id: 'lm_kurdi', name: 'الكردي - الدقهلية', address: 'مدينة الكردي، الدقهلية', city: 'الكردي', lat: 31.1695, lng: 31.7782, category: 'city', aliases: ['الكردي', 'مدينة الكردي'] },
+  { id: 'lm_menyat_nasr', name: 'منية النصر - الدقهلية', address: 'مدينة منية النصر، الدقهلية', city: 'منية النصر', lat: 31.1258, lng: 31.6442, category: 'city', aliases: ['منية النصر', 'منيه النصر'] },
+  { id: 'lm_dekernes', name: 'دكرنس - الدقهلية', address: 'مدينة دكرنس، الدقهلية', city: 'دكرنس', lat: 31.0889, lng: 31.5947, category: 'city', aliases: ['دكرنس'] },
+  { id: 'lm_mansoura', name: 'المنصورة - الدقهلية', address: 'مدينة المنصورة، الدقهلية', city: 'المنصورة', lat: 31.0409, lng: 31.3785, category: 'city', aliases: ['المنصورة', 'المنصوره', 'جامعة المنصورة'] },
+  { id: 'lm_damietta', name: 'دمياط', address: 'مدينة دمياط، محافظة دمياط', city: 'دمياط', lat: 31.4175, lng: 31.8144, category: 'city', aliases: ['دمياط', 'دمياط الجديدة', 'راس البر'] },
+  { id: 'lm_portsaid', name: 'بورسعيد', address: 'مدينة بورسعيد', city: 'بورسعيد', lat: 31.2653, lng: 32.3019, category: 'city', aliases: ['بورسعيد', 'بور سعيد'] },
+];
 
 const PRIVATE_HOST_PATTERNS = [
   /^127\./,
@@ -221,24 +293,88 @@ async function fetchJsonWithTimeout<T>(url: string, headers: Record<string, stri
   }
 }
 
-export async function searchPlaces(params: {
-  query: string;
-  nearLat?: number;
-  nearLng?: number;
-  countryCodes?: string;
-  limit?: number;
-}): Promise<GeoPlaceSuggestion[]> {
-  const q = String(params.query || '').trim();
-  if (q.length < 2) return [];
-  const limit = Math.min(10, Math.max(1, params.limit ?? 6));
-  const nearKey =
-    Number.isFinite(params.nearLat) && Number.isFinite(params.nearLng)
-      ? `${Number(params.nearLat).toFixed(2)},${Number(params.nearLng).toFixed(2)}`
-      : 'global';
-  const cacheKey = `${q.toLowerCase()}|${nearKey}|${params.countryCodes || ''}|${limit}`;
-  const cached = getCached(geocodeCache, cacheKey);
-  if (cached) return cached;
+function matchLocalLandmarks(
+  query: string,
+  extraLocalPlaces: GeoPlaceSuggestion[] = [],
+  nearLat?: number,
+  nearLng?: number
+): Array<{ item: GeoPlaceSuggestion; score: number }> {
+  const normQ = normalizeArabicText(query);
+  if (normQ.length < 2) return [];
+  const tokens = normQ.split(' ').filter((t) => t.length >= 2);
+  const scored: Array<{ item: GeoPlaceSuggestion; score: number }> = [];
 
+  const scoreCandidate = (haystackParts: string[], lat: number, lng: number): number => {
+    const joined = normalizeArabicText(haystackParts.join(' '));
+    if (!joined) return 0;
+    let score = 0;
+    if (joined === normQ) score = 100;
+    else if (joined.startsWith(normQ)) score = 90;
+    else if (joined.includes(normQ)) score = 78;
+    else if (tokens.length > 0) {
+      const matched = tokens.filter((t) => joined.includes(t)).length;
+      if (matched === tokens.length) score = 70;
+      else if (matched > 0 && matched >= Math.ceil(tokens.length * 0.6)) score = 52;
+    }
+    if (score > 0 && Number.isFinite(nearLat) && Number.isFinite(nearLng)) {
+      const d = haversineKm(Number(nearLat), Number(nearLng), lat, lng);
+      if (d <= 25) score += 8;
+      else if (d <= 80) score += 3;
+    }
+    return score;
+  };
+
+  for (const lm of AL_MANZALA_LANDMARKS) {
+    const s = scoreCandidate([lm.name, lm.address, lm.city, ...lm.aliases], lm.lat, lm.lng);
+    if (s > 0) {
+      scored.push({
+        score: s,
+        item: {
+          place_id: lm.id,
+          display_name: `${lm.name}، ${lm.address}`,
+          short_name: lm.name,
+          address_line: lm.address,
+          city: lm.city,
+          country: 'مصر',
+          lat: lm.lat,
+          lng: lm.lng,
+          category: lm.category,
+          source: 'local_landmark',
+        },
+      });
+    }
+  }
+
+  for (const extra of extraLocalPlaces) {
+    const s = scoreCandidate([extra.short_name, extra.display_name, extra.address_line, extra.city], extra.lat, extra.lng);
+    if (s > 0) {
+      scored.push({ score: s + 4, item: extra });
+    }
+  }
+
+  return scored.sort((a, b) => b.score - a.score);
+}
+
+export function findBestLocalPlaceMatch(
+  query: string,
+  extraLocalPlaces: GeoPlaceSuggestion[] = [],
+  nearLat?: number,
+  nearLng?: number
+): GeoPlaceSuggestion | null {
+  const matches = matchLocalLandmarks(query, extraLocalPlaces, nearLat, nearLng);
+  if (matches.length > 0 && matches[0].score >= 82) {
+    return matches[0].item;
+  }
+  return null;
+}
+
+async function fetchNominatimBatch(
+  q: string,
+  limit: number,
+  nearLat?: number,
+  nearLng?: number,
+  countryCodes?: string
+): Promise<GeoPlaceSuggestion[]> {
   const base = getNominatimBaseUrl();
   const qs = new URLSearchParams({
     q,
@@ -247,14 +383,13 @@ export async function searchPlaces(params: {
     limit: String(limit),
     'accept-language': 'ar,en',
   });
-  if (params.countryCodes) {
-    qs.set('countrycodes', params.countryCodes);
+  if (countryCodes) {
+    qs.set('countrycodes', countryCodes);
   }
-  if (Number.isFinite(params.nearLat) && Number.isFinite(params.nearLng)) {
-    const lat = Number(params.nearLat);
-    const lng = Number(params.nearLng);
-    // Soft bias viewbox (~45km radius around user without strictly excluding other cities like Riyadh)
-    const delta = 0.45;
+  if (Number.isFinite(nearLat) && Number.isFinite(nearLng)) {
+    const lat = Number(nearLat);
+    const lng = Number(nearLng);
+    const delta = 0.55;
     qs.set('viewbox', `${(lng - delta).toFixed(4)},${(lat + delta).toFixed(4)},${(lng + delta).toFixed(4)},${(lat - delta).toFixed(4)}`);
   }
 
@@ -265,11 +400,11 @@ export async function searchPlaces(params: {
         Accept: 'application/json',
         'User-Agent': getNominatimUserAgent(),
       },
-      6500
+      5500
     );
 
-    const mapped: GeoPlaceSuggestion[] = (Array.isArray(rows) ? rows : [])
-      .map((item) => {
+    return (Array.isArray(rows) ? rows : [])
+      .map((item): GeoPlaceSuggestion | null => {
         const lat = Number(item.lat);
         const lng = Number(item.lon);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
@@ -285,7 +420,7 @@ export async function searchPlaces(params: {
         const country = addr.country || '';
         const addressParts = [addr.road, addr.suburb || addr.neighbourhood, city].filter(Boolean);
         return {
-          place_id: String(item.place_id || `${lat.toFixed(5)}_${lng.toFixed(5)}`),
+          place_id: `nom_${String(item.place_id || `${lat.toFixed(5)}_${lng.toFixed(5)}`)}`,
           display_name: String(item.display_name || shortName),
           short_name: shortName,
           address_line: addressParts.length > 0 ? addressParts.join('، ') : String(item.display_name || shortName),
@@ -298,13 +433,152 @@ export async function searchPlaces(params: {
         };
       })
       .filter((x): x is GeoPlaceSuggestion => x !== null);
-
-    setCached(geocodeCache, cacheKey, mapped, 10 * 60 * 1000);
-    return mapped;
   } catch (err) {
     console.warn('[GeoService] Nominatim search failed:', err instanceof Error ? err.message : err);
     return [];
   }
+}
+
+async function fetchPhotonBatch(
+  q: string,
+  limit: number,
+  nearLat?: number,
+  nearLng?: number
+): Promise<GeoPlaceSuggestion[]> {
+  const base = sanitizeServiceBaseUrl(process.env.PHOTON_BASE_URL, DEFAULT_PHOTON_BASE, true);
+  const qs = new URLSearchParams({
+    q,
+    limit: String(limit),
+  });
+  if (Number.isFinite(nearLat) && Number.isFinite(nearLng)) {
+    qs.set('lat', Number(nearLat).toFixed(5));
+    qs.set('lon', Number(nearLng).toFixed(5));
+  }
+
+  try {
+    const data = await fetchJsonWithTimeout<{ features?: Array<Record<string, any>> }>(
+      `${base}/api/?${qs.toString()}`,
+      {
+        Accept: 'application/json',
+        'User-Agent': getNominatimUserAgent(),
+      },
+      4500
+    );
+    const features = Array.isArray(data?.features) ? data.features : [];
+    return features
+      .map((f, idx): GeoPlaceSuggestion | null => {
+        const coords = f?.geometry?.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) return null;
+        const lng = Number(coords[0]);
+        const lat = Number(coords[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        const p = (f.properties || {}) as Record<string, any>;
+        const shortName = String(p.name || p.street || p.district || p.city || q).trim();
+        const city = String(p.city || p.town || p.county || p.state || '').trim();
+        const country = String(p.country || '').trim();
+        const parts = [p.name, p.street, p.district, city, country].filter((x) => typeof x === 'string' && x.trim().length > 0);
+        const displayName = parts.length > 0 ? Array.from(new Set(parts)).join('، ') : shortName;
+        return {
+          place_id: `ph_${String(p.osm_id || idx)}_${lat.toFixed(4)}_${lng.toFixed(4)}`,
+          display_name: displayName,
+          short_name: shortName,
+          address_line: [p.street, p.district, city].filter(Boolean).join('، ') || displayName,
+          city,
+          country,
+          lat: Number(lat.toFixed(6)),
+          lng: Number(lng.toFixed(6)),
+          category: String(p.osm_value || p.osm_key || 'place'),
+          source: 'photon' as const,
+        };
+      })
+      .filter((x): x is GeoPlaceSuggestion => x !== null);
+  } catch (err) {
+    console.warn('[GeoService] Photon search failed:', err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+export async function searchPlaces(params: {
+  query: string;
+  nearLat?: number;
+  nearLng?: number;
+  countryCodes?: string;
+  limit?: number;
+  extraLocalPlaces?: GeoPlaceSuggestion[];
+}): Promise<GeoPlaceSuggestion[]> {
+  const q = String(params.query || '').trim();
+  if (q.length < 2) return [];
+  const limit = Math.min(12, Math.max(1, params.limit ?? 10));
+  const nearLat = Number.isFinite(params.nearLat) ? Number(params.nearLat) : undefined;
+  const nearLng = Number.isFinite(params.nearLng) ? Number(params.nearLng) : undefined;
+
+  // Layer 1: Instant curated Al-Manzala / Dakahlia landmarks + Otlobha DB places
+  const localMatches = matchLocalLandmarks(q, params.extraLocalPlaces || [], nearLat, nearLng).map((m) => m.item);
+
+  const nearKey = nearLat !== undefined && nearLng !== undefined ? `${nearLat.toFixed(2)},${nearLng.toFixed(2)}` : 'global';
+  const cacheKey = `${q.toLowerCase()}|${nearKey}|${params.countryCodes || ''}|${limit}`;
+  let remoteResults = getCached(geocodeCache, cacheKey);
+
+  if (!remoteResults) {
+    const isNearEgypt =
+      nearLat !== undefined && nearLng !== undefined && nearLat >= 22 && nearLat <= 32.5 && nearLng >= 24 && nearLng <= 37;
+    const isNearManzala =
+      nearLat !== undefined && nearLng !== undefined && haversineKm(nearLat, nearLng, 31.1583, 31.9369) <= 45;
+    const normQ = normalizeArabicText(q);
+    const alreadyHasCity =
+      normQ.includes('المنزله') ||
+      normQ.includes('الدقهليه') ||
+      normQ.includes('مصر') ||
+      normQ.includes('الرياض') ||
+      normQ.includes('القاهره') ||
+      normQ.includes('المنصوره') ||
+      normQ.includes('دمياط') ||
+      normQ.includes('بورسعيد');
+
+    const tasks: Array<Promise<GeoPlaceSuggestion[]>> = [
+      fetchNominatimBatch(q, limit, nearLat, nearLng, params.countryCodes),
+      fetchPhotonBatch(q, limit, nearLat, nearLng),
+    ];
+
+    // Boost Al-Manzala / Egypt local street & POI hits on Nominatim when user searches short Arabic names
+    if (isNearManzala && !alreadyHasCity) {
+      tasks.push(fetchNominatimBatch(`${q} المنزلة الدقهلية`, 6, nearLat, nearLng, 'eg'));
+    } else if (isNearEgypt && !alreadyHasCity && !params.countryCodes) {
+      tasks.push(fetchNominatimBatch(`${q} مصر`, 5, nearLat, nearLng, 'eg'));
+    }
+
+    const batches = await Promise.all(tasks);
+    remoteResults = batches.flat();
+    setCached(geocodeCache, cacheKey, remoteResults, 10 * 60 * 1000);
+  }
+
+  // Merge & deduplicate nearby entries, prioritizing local landmarks/stores and closest OSM results
+  const combined: GeoPlaceSuggestion[] = [...localMatches];
+  const sortedRemote = [...remoteResults].sort((a, b) => {
+    if (nearLat !== undefined && nearLng !== undefined) {
+      const da = haversineKm(nearLat, nearLng, a.lat, a.lng);
+      const db = haversineKm(nearLat, nearLng, b.lat, b.lng);
+      return da - db;
+    }
+    return 0;
+  });
+  combined.push(...sortedRemote);
+
+  const deduped: GeoPlaceSuggestion[] = [];
+  for (const item of combined) {
+    const normName = normalizeArabicText(item.short_name);
+    const isDup = deduped.some((existing) => {
+      const sameCoords = haversineKm(existing.lat, existing.lng, item.lat, item.lng) < 0.08;
+      const sameName = normalizeArabicText(existing.short_name) === normName;
+      return sameCoords && sameName;
+    });
+    if (!isDup) {
+      deduped.push(item);
+      if (deduped.length >= limit) break;
+    }
+  }
+
+  return deduped;
 }
 
 export async function reverseGeocode(lat: number, lng: number): Promise<{

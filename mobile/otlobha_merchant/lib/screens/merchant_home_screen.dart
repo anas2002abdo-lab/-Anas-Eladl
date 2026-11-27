@@ -27,10 +27,12 @@ class MerchantHomeScreen extends StatefulWidget {
   State<MerchantHomeScreen> createState() => _MerchantHomeScreenState();
 }
 
-class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
+class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBindingObserver {
   int _tabIndex = 0;
   String _orderFilter = 'all';
   bool _loadingOrders = false;
+  DateTime? _loadingOrdersStartedAt;
+  int _ordersReqSeq = 0;
   bool _loadingProducts = false;
   bool _loadingRequests = false;
   String? _busyOrderId;
@@ -80,16 +82,8 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     'cancelled': 'ملغى / مرفوض',
   };
 
-  @override
-  void initState() {
-    super.initState();
-    _initPushCallbacks();
-    _refreshOrders(initial: true);
-    _refreshNotifications(isInitial: true);
-    _refreshProducts(page: 1);
-    _loadCategories();
-    _refreshApprovalRequests();
-    _connectWs();
+  void _startPollingTimer() {
+    _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       if (!_disposed) {
         _refreshOrders();
@@ -98,15 +92,78 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     });
   }
 
+  void _stopPollingTimer() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  void _closeWs() {
+    _wsReconnectTimer?.cancel();
+    _wsReconnectTimer = null;
+    _wsSub?.cancel();
+    _wsSub = null;
+    try {
+      _wsChannel?.sink.close();
+    } catch (_) {}
+    _wsChannel = null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initPushCallbacks();
+    _refreshOrders(initial: true);
+    _refreshNotifications(isInitial: true);
+    _refreshProducts(page: 1);
+    _loadCategories();
+    _refreshApprovalRequests();
+    _connectWs();
+    _startPollingTimer();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      _stopPollingTimer();
+      _closeWs();
+      return;
+    }
+    if (state == AppLifecycleState.resumed) {
+      widget.api.resetConnectionPool();
+      if (mounted) {
+        setState(() {
+          _loadingOrders = false;
+          _loadingProducts = false;
+          _loadingRequests = false;
+          _loadingOrdersStartedAt = null;
+        });
+      }
+      _startPollingTimer();
+      unawaited(
+        widget.api.reloadTokensFromStorage().then((_) {
+          if (_disposed || !mounted) return;
+          _connectWs();
+          _refreshOrders(force: true);
+          _refreshNotifications();
+          if (_products.isEmpty) {
+            _refreshProducts(page: 1);
+          }
+        }),
+      );
+    }
+  }
+
   @override
   void dispose() {
     _disposed = true;
-    _pollTimer?.cancel();
-    _wsReconnectTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _stopPollingTimer();
     _bannerTimer?.cancel();
     _productSearchDebounce?.cancel();
-    _wsSub?.cancel();
-    _wsChannel?.sink.close();
+    _closeWs();
     for (final c in _quoteControllers.values) {
       c.dispose();
     }
@@ -200,8 +257,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
 
   void _connectWs() {
     if (_disposed || _merchantId.isEmpty) return;
-    _wsSub?.cancel();
-    _wsChannel?.sink.close();
+    _closeWs();
     try {
       final wsUrl = MerchantAppConfig.wsUrlForMerchant(_merchantId, widget.api.accessToken);
       _wsChannel = WebSocketChannel.connect(Uri.parse(wsUrl));
@@ -319,12 +375,21 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
     };
   }
 
-  Future<void> _refreshOrders({bool initial = false}) async {
-    if (_loadingOrders || _merchantId.isEmpty) return;
+  Future<void> _refreshOrders({bool initial = false, bool force = false}) async {
+    if (_merchantId.isEmpty) return;
+    final staleLock = _loadingOrders &&
+        _loadingOrdersStartedAt != null &&
+        DateTime.now().difference(_loadingOrdersStartedAt!).inSeconds >= 12;
+    if (_loadingOrders && !force && !staleLock) return;
+
+    final seq = ++_ordersReqSeq;
+    _loadingOrdersStartedAt = DateTime.now();
     setState(() => _loadingOrders = true);
     try {
-      final list = await widget.api.fetchStoreOrders(_merchantId);
-      if (!mounted) return;
+      final list = await widget.api
+          .fetchStoreOrders(_merchantId)
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || seq != _ordersReqSeq) return;
       if (!initial && _knownOrderIds.isNotEmpty) {
         for (final ord in list) {
           final oid = ord['id']?.toString() ?? '';
@@ -349,9 +414,12 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
         _orders = list;
       });
     } catch (e) {
-      if (initial) _snack(e.toString(), isError: true);
+      if (initial && seq == _ordersReqSeq) _snack(e.toString(), isError: true);
     } finally {
-      if (mounted) setState(() => _loadingOrders = false);
+      if (mounted && seq == _ordersReqSeq) {
+        _loadingOrdersStartedAt = null;
+        setState(() => _loadingOrders = false);
+      }
     }
   }
 
@@ -717,6 +785,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
                           style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Color(0xFF3730A3)),
                         ),
                       ),
+                    _buildPaymentMethodBadge(order['payment_method']?.toString() ?? 'cash'),
                   ],
                 ),
                 Column(
@@ -753,6 +822,8 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
               ],
             ),
             const Divider(height: 16),
+            _buildPaymentVerificationCard(order, mySubtotal),
+            const SizedBox(height: 10),
             if (myItems.isEmpty)
               Container(
                 padding: const EdgeInsets.all(10),
@@ -905,6 +976,321 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> {
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  String _paymentMethodLabel(String rawMethod) {
+    switch (rawMethod.trim().toLowerCase()) {
+      case 'vodafone_cash':
+        return 'فودافون كاش';
+      case 'instapay':
+        return 'إنستا باي (InstaPay)';
+      case 'network':
+        return 'دفع بالشبكة / POS';
+      case 'wallet':
+        return 'محفظة إلكترونية';
+      default:
+        return 'كاش عند الاستلام';
+    }
+  }
+
+  Widget _buildPaymentMethodBadge(String rawMethod) {
+    final pm = rawMethod.trim().toLowerCase();
+    Color bg;
+    Color fg;
+    String text;
+    if (pm == 'vodafone_cash') {
+      bg = const Color(0xFFFEE2E2);
+      fg = const Color(0xFF991B1B);
+      text = 'فودافون كاش';
+    } else if (pm == 'instapay') {
+      bg = const Color(0xFFF3E8FF);
+      fg = const Color(0xFF6B21A8);
+      text = 'إنستا باي';
+    } else if (pm == 'network') {
+      bg = const Color(0xFFDBEAFE);
+      fg = const Color(0xFF1E40AF);
+      text = 'شبكة / POS';
+    } else if (pm == 'wallet') {
+      bg = const Color(0xFFE0E7FF);
+      fg = const Color(0xFF3730A3);
+      text = 'محفظة';
+    } else {
+      bg = const Color(0xFFD1FAE5);
+      fg = const Color(0xFF065F46);
+      text = 'كاش عند الاستلام';
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: fg),
+      ),
+    );
+  }
+
+  Uint8List? _tryDecodePaymentDataUrl(String raw) {
+    final trimmed = raw.trim();
+    if (!trimmed.startsWith('data:image/')) return null;
+    final comma = trimmed.indexOf(',');
+    if (comma < 0 || comma + 1 >= trimmed.length) return null;
+    try {
+      return base64Decode(trimmed.substring(comma + 1).replaceAll(RegExp(r'\s+'), ''));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Widget _buildPaymentProofImage(String rawUrl, {double? width, double? height, BoxFit fit = BoxFit.cover}) {
+    final bytes = _tryDecodePaymentDataUrl(rawUrl);
+    if (bytes != null) {
+      return Image.memory(
+        bytes,
+        width: width,
+        height: height,
+        fit: fit,
+        errorBuilder: (_, __, ___) => const Center(
+          child: Icon(Icons.broken_image_outlined, color: Color(0xFF94A3B8)),
+        ),
+      );
+    }
+    final resolvedUrl = rawUrl.startsWith('http://') || rawUrl.startsWith('https://')
+        ? rawUrl
+        : '${MerchantAppConfig.normalizedBaseUrl}${rawUrl.startsWith('/') ? rawUrl : '/$rawUrl'}';
+    return Image.network(
+      resolvedUrl,
+      width: width,
+      height: height,
+      fit: fit,
+      errorBuilder: (_, __, ___) => const Center(
+        child: Icon(Icons.broken_image_outlined, color: Color(0xFF94A3B8)),
+      ),
+    );
+  }
+
+  void _showPaymentProofDialog({
+    required String proofUrl,
+    required String orderNumber,
+    required String methodLabel,
+    required double totalAmount,
+    required double mySubtotal,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              color: MerchantAppConfig.brandSlate,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'إيصال التحويل — طلب #$orderNumber',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13.5),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '$methodLabel · أصناف متجرك ${mySubtotal.toStringAsFixed(0)} ج.م (الإجمالي ${totalAmount.toStringAsFixed(0)} ج.م)',
+                          style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              color: const Color(0xFFF1F5F9),
+              constraints: const BoxConstraints(maxHeight: 420),
+              padding: const EdgeInsets.all(12),
+              child: InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 4.0,
+                child: _buildPaymentProofImage(proofUrl, fit: BoxFit.contain),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'تأكد من مطابقة المبلغ وبيانات التحويل قبل البدء في تجهيز الطلب',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: Color(0xFF0F766E)),
+                  ),
+                  const SizedBox(height: 8),
+                  FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: MerchantAppConfig.brandSlate),
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text('إغلاق'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPaymentVerificationCard(Map<String, dynamic> order, double mySubtotal) {
+    final pm = (order['payment_method'] ?? 'cash').toString().trim().toLowerCase();
+    final isTransfer = pm == 'vodafone_cash' || pm == 'instapay';
+    final proofUrl = (order['payment_proof_image_url'] ?? '').toString().trim();
+    final methodLabel = _paymentMethodLabel(pm);
+    final totalAmount = (order['total_amount'] as num?)?.toDouble() ?? mySubtotal;
+    final orderNumber = (order['order_number'] ?? order['id'] ?? '').toString();
+
+    if (isTransfer) {
+      if (proofUrl.isNotEmpty) {
+        return Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0FDFA),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF99F6E4)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => _showPaymentProofDialog(
+                  proofUrl: proofUrl,
+                  orderNumber: orderNumber,
+                  methodLabel: methodLabel,
+                  totalAmount: totalAmount,
+                  mySubtotal: mySubtotal,
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    width: 62,
+                    height: 62,
+                    color: Colors.white,
+                    child: _buildPaymentProofImage(proofUrl, width: 62, height: 62, fit: BoxFit.cover),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'الدفع: $methodLabel · مرفق صورة التحويل ✓',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF115E59),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    const Text(
+                      'يرجى مراجعة صورة التحويل والتأكد من وصول المبلغ قبل البدء في تجهيز الطلب.',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF0F766E)),
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      height: 30,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF0F766E),
+                          side: const BorderSide(color: Color(0xFF0F766E)),
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onPressed: () => _showPaymentProofDialog(
+                          proofUrl: proofUrl,
+                          orderNumber: orderNumber,
+                          methodLabel: methodLabel,
+                          totalAmount: totalAmount,
+                          mySubtotal: mySubtotal,
+                        ),
+                        icon: const Icon(Icons.visibility_rounded, size: 15),
+                        label: const Text('عرض إيصال التحويل', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+      return Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF1F2),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFDA4AF)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Color(0xFFBE123C), size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'تنبيه هام: الدفع ($methodLabel) — بدون صورة تحويل!',
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: Color(0xFF9F1239)),
+                  ),
+                  const SizedBox(height: 2),
+                  const Text(
+                    'لا تبدأ بتجهيز الطلب قبل التأكد من وصول التحويل.',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFFBE123C)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.payments_outlined, size: 16, color: Color(0xFF475569)),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              pm == 'cash'
+                  ? 'طريقة الدفع: كاش عند الاستلام (التحصيل مع الطيار)'
+                  : 'طريقة الدفع: $methodLabel',
+              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: Color(0xFF334155)),
+            ),
+          ),
+        ],
       ),
     );
   }

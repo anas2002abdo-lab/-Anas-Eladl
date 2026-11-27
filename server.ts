@@ -43,6 +43,10 @@ import {
 } from './src/server/masterCatalog.ts';
 import { registerRidesRoutes } from './src/server/ridesSystem.ts';
 import {
+  registerStoresReviewsRoutes,
+  notifyStoreFollowers,
+} from './src/server/storesReviewsSystem.ts';
+import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
   getCategoryAndDescendantIds,
@@ -2021,9 +2025,14 @@ function sanitizePublicMerchantRow(m: Record<string, unknown>) {
     merchant_type: m.merchant_type,
     branch_name: m.branch_name,
     zone_name: m.zone_name,
+    address_detail: m.address_detail || '',
     phone: m.phone,
+    whatsapp_phone: m.whatsapp_phone || '',
     working_hours: m.working_hours,
     image_url: m.image_url,
+    cover_image_url: m.cover_image_url || '',
+    description_ar: m.description_ar || '',
+    share_slug: m.share_slug || '',
     verification_status: m.verification_status,
     supports_free_order: Boolean(m.supports_free_order),
     is_open_now: Boolean(m.is_open_now),
@@ -2068,19 +2077,46 @@ function canAccessOrder(auth: AuthContext, order: Record<string, unknown>): bool
   return true;
 }
 
+function attachStoreRatingMetrics(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  if (rows.length === 0) return rows;
+  const ratingRows = db
+    .prepare(
+      `SELECT merchant_id, ROUND(AVG(rating), 1) AS rating_avg, COUNT(*) AS rating_count
+       FROM store_reviews
+       WHERE status = 'visible'
+       GROUP BY merchant_id`
+    )
+    .all() as Array<{ merchant_id: string; rating_avg: number; rating_count: number }>;
+  const followRows = db
+    .prepare('SELECT merchant_id, COUNT(*) AS followers_count FROM store_follows GROUP BY merchant_id')
+    .all() as Array<{ merchant_id: string; followers_count: number }>;
+  const ratingMap = new Map(ratingRows.map((r) => [r.merchant_id, r]));
+  const followMap = new Map(followRows.map((r) => [r.merchant_id, Number(r.followers_count || 0)]));
+  return rows.map((row) => {
+    const id = String(row.id || '');
+    const rm = ratingMap.get(id);
+    return {
+      ...row,
+      rating_avg: rm ? Number(rm.rating_avg || 0) : 0,
+      rating_count: rm ? Number(rm.rating_count || 0) : 0,
+      followers_count: followMap.get(id) ?? 0,
+    };
+  });
+}
+
 app.get('/api/merchants', (req, res) => {
   const approvedOnly = req.query.approved_only === '1' || req.query.approved_only === 'true';
   if (approvedOnly) {
     const rows = db
       .prepare("SELECT * FROM merchants WHERE verification_status = 'approved' ORDER BY rowid DESC")
       .all() as Array<Record<string, unknown>>;
-    return res.json(rows.map(sanitizePublicMerchantRow));
+    return res.json(attachStoreRatingMetrics(rows.map(sanitizePublicMerchantRow)));
   }
 
   return requireAuth(req, res, () => {
     return requireRole(...ALL_ADMIN_ROLES)(req, res, () => {
       const rows = db.prepare('SELECT * FROM merchants ORDER BY rowid DESC').all() as Array<Record<string, unknown>>;
-      return res.json(rows.map(sanitizeMerchantRow));
+      return res.json(attachStoreRatingMetrics(rows.map(sanitizeMerchantRow)));
     });
   });
 });
@@ -2154,7 +2190,21 @@ app.patch(
   requireOwnership((req) => req.params.id, { allowRoles: [...ALL_ADMIN_ROLES] }),
   (req, res) => {
     const { id } = req.params;
-    const { verification_status, commission_rate, is_open_now, image_url, business_name_ar, branch_name, phone } = req.body;
+    const {
+      verification_status,
+      commission_rate,
+      is_open_now,
+      image_url,
+      cover_image_url,
+      description_ar,
+      working_hours,
+      address_detail,
+      lat,
+      lng,
+      business_name_ar,
+      branch_name,
+      phone,
+    } = req.body;
     const isAdminActor = (ALL_ADMIN_ROLES as readonly string[]).includes(req.auth!.role);
     if (!isAdminActor && (verification_status !== undefined || commission_rate !== undefined)) {
       return res.status(403).json({ error: 'غير مصرح للتاجر بتعديل حالة الاعتماد أو نسبة العمولة' });
@@ -2168,6 +2218,12 @@ app.patch(
         commission_rate = ?,
         is_open_now = ?,
         image_url = ?,
+        cover_image_url = ?,
+        description_ar = ?,
+        working_hours = ?,
+        address_detail = ?,
+        lat = ?,
+        lng = ?,
         business_name_ar = ?,
         branch_name = ?,
         phone = ?
@@ -2177,6 +2233,12 @@ app.patch(
       isAdminActor && commission_rate !== undefined ? Number(commission_rate) : existing.commission_rate,
       is_open_now !== undefined ? (is_open_now ? 1 : 0) : existing.is_open_now,
       image_url !== undefined ? String(image_url || '') : String(existing.image_url || ''),
+      cover_image_url !== undefined ? String(cover_image_url || '') : String(existing.cover_image_url || ''),
+      description_ar !== undefined ? String(description_ar || '').trim().slice(0, 600) : String(existing.description_ar || ''),
+      working_hours !== undefined ? String(working_hours || '').trim().slice(0, 120) : String(existing.working_hours || ''),
+      address_detail !== undefined ? String(address_detail || '').trim().slice(0, 300) : String(existing.address_detail || ''),
+      lat !== undefined && Number.isFinite(Number(lat)) ? Number(lat) : existing.lat ?? null,
+      lng !== undefined && Number.isFinite(Number(lng)) ? Number(lng) : existing.lng ?? null,
       business_name_ar !== undefined ? String(business_name_ar).trim() : existing.business_name_ar,
       branch_name !== undefined ? String(branch_name).trim() : existing.branch_name,
       phone !== undefined ? String(phone).trim() : existing.phone,
@@ -2929,6 +2991,18 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
   const rawPaymentProof = req.body.payment_proof_image_url;
   const resolvedPaymentProofUrl = sanitizePaymentImageValue(rawPaymentProof) || null;
 
+  if (
+    (resolvedPaymentMethod === 'vodafone_cash' || resolvedPaymentMethod === 'instapay') &&
+    !resolvedPaymentProofUrl
+  ) {
+    return res.status(400).json({
+      error:
+        resolvedPaymentMethod === 'vodafone_cash'
+          ? 'يجب إضافة صورة إيصال تحويل فودافون كاش أولاً قبل إرسال الطلب'
+          : 'يجب إضافة صورة إيصال تحويل إنستا باي أولاً قبل إرسال الطلب',
+    });
+  }
+
   const insertOrderTx = db.transaction(() => {
     if (validatedCouponId) {
       const couponRes = db
@@ -3059,10 +3133,20 @@ app.post('/api/orders', allowAnyUserOrGuest, (req, res) => {
 
   if (merchant_id) {
     const storeItemCount = Array.isArray(sanitizedItems) ? sanitizedItems.length : 0;
+    const paymentSummaryAr =
+      resolvedPaymentMethod === 'vodafone_cash'
+        ? 'الدفع: فودافون كاش (مرفق صورة التحويل — يرجى المراجعة والتأكد من الدفع قبل التجهيز)'
+        : resolvedPaymentMethod === 'instapay'
+        ? 'الدفع: إنستا باي (مرفق صورة التحويل — يرجى المراجعة والتأكد من الدفع قبل التجهيز)'
+        : resolvedPaymentMethod === 'network'
+        ? 'الدفع: شبكة / POS عند الاستلام'
+        : resolvedPaymentMethod === 'wallet'
+        ? 'الدفع: محفظة إلكترونية'
+        : 'الدفع: كاش عند الاستلام';
     const merchantBody =
       storeItemCount > 0
-        ? `وصلك طلب جديد (${storeItemCount} صنف) بقيمة ${resolvedSubtotal} ج.م من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لتجهيزه الآن.`
-        : `وصلك طلب جديد${resolvedChannel === 'pharmacy_prescription' ? ' (روشتة)' : ''} من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لمراجعته وتجهيزه الآن.`;
+        ? `وصلك طلب جديد (${storeItemCount} صنف) بقيمة ${resolvedSubtotal} ج.م من ${resolvedCustName} في ${String(zone.name_ar)} · ${paymentSummaryAr}.`
+        : `وصلك طلب جديد${resolvedChannel === 'pharmacy_prescription' ? ' (روشتة)' : ''} من ${resolvedCustName} في ${String(zone.name_ar)} · ${paymentSummaryAr}.`;
     enqueueSystemPushNotification({
       targetApp: 'merchant',
       targetZone: String(zone.name_ar || 'all'),
@@ -3376,6 +3460,18 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
 
   const resolvedPaymentProofUrl = sanitizePaymentImageValue(req.body.payment_proof_image_url) || null;
 
+  if (
+    (resolvedPaymentMethod === 'vodafone_cash' || resolvedPaymentMethod === 'instapay') &&
+    !resolvedPaymentProofUrl
+  ) {
+    return res.status(400).json({
+      error:
+        resolvedPaymentMethod === 'vodafone_cash'
+          ? 'يجب إضافة صورة إيصال تحويل فودافون كاش أولاً قبل إرسال الطلب'
+          : 'يجب إضافة صورة إيصال تحويل إنستا باي أولاً قبل إرسال الطلب',
+    });
+  }
+
   const bundleTx = db.transaction(() => {
     if (validatedCouponId) {
       const couponRes = db
@@ -3519,14 +3615,24 @@ function handleBundleOrder(req: express.Request, res: express.Response) {
   });
 
   // Notify EACH merchant separately with ONLY their own isolated items count & subtotal (never leaking other stores' items/totals)
+  const bundlePaymentSummaryAr =
+    resolvedPaymentMethod === 'vodafone_cash'
+      ? 'الدفع: فودافون كاش (مرفق صورة التحويل — يرجى المراجعة والتأكد من الدفع قبل التجهيز)'
+      : resolvedPaymentMethod === 'instapay'
+      ? 'الدفع: إنستا باي (مرفق صورة التحويل — يرجى المراجعة والتأكد من الدفع قبل التجهيز)'
+      : resolvedPaymentMethod === 'network'
+      ? 'الدفع: شبكة / POS عند الاستلام'
+      : resolvedPaymentMethod === 'wallet'
+      ? 'الدفع: محفظة إلكترونية'
+      : 'الدفع: كاش عند الاستلام';
   for (const p of preparedStores) {
     const storeMerchantId = String(p.merchant.id || '').trim();
     if (!storeMerchantId) continue;
     const myItemsCount = Array.isArray(p.sanitizedItems) ? p.sanitizedItems.length : 0;
     const storeBody =
       myItemsCount > 0
-        ? `وصلك طلب جديد (${myItemsCount} صنف) بقيمة ${p.subtotal} ج.م من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لتجهيز أصناف متجرك.`
-        : `وصلك طلب جديد${p.channel === 'pharmacy_prescription' || p.channel === 'prescription' ? ' (روشتة)' : ''} من ${resolvedCustName} في ${String(zone.name_ar)}. افتح التطبيق لمراجعة طلب متجرك.`;
+        ? `وصلك طلب جديد (${myItemsCount} صنف) بقيمة ${p.subtotal} ج.م من ${resolvedCustName} في ${String(zone.name_ar)} · ${bundlePaymentSummaryAr}.`
+        : `وصلك طلب جديد${p.channel === 'pharmacy_prescription' || p.channel === 'prescription' ? ' (روشتة)' : ''} من ${resolvedCustName} في ${String(zone.name_ar)} · ${bundlePaymentSummaryAr}.`;
     enqueueSystemPushNotification({
       targetApp: 'merchant',
       targetZone: String(zone.name_ar || 'all'),
@@ -5196,6 +5302,35 @@ app.post('/api/products', requireAuth, requireRole('merchant', ...ALL_ADMIN_ROLE
     entity_id: id,
     details: `إضافة منتج جديد: ${String(name_ar).trim()} (الكود ${finalCode}، السعر ${parsedBase} ج.م، المخزون ${parsedStock}${effectiveIsOffer ? ' · مضاف للعروض' : ''})`,
   });
+
+  if (is_available !== false && effectiveMerchantId) {
+    try {
+      const mRow = db.prepare('SELECT business_name_ar FROM merchants WHERE id = ?').get(effectiveMerchantId) as
+        | { business_name_ar?: string }
+        | undefined;
+      const storeName = String(mRow?.business_name_ar || 'متجر تتابعه');
+      if (effectiveIsOffer && parsedSale !== null && parsedSale < parsedBase) {
+        notifyStoreFollowers({
+          merchantId: effectiveMerchantId,
+          eventType: 'limited_discount',
+          titleAr: `خصم جديد في ${storeName}`,
+          bodyAr: `${String(name_ar).trim()} بسعر ${parsedSale} ج.م بدلاً من ${parsedBase} ج.م`,
+          refId: id,
+        });
+      } else {
+        notifyStoreFollowers({
+          merchantId: effectiveMerchantId,
+          eventType: 'new_product',
+          titleAr: `منتج جديد في ${storeName}`,
+          bodyAr: `تمت إضافة "${String(name_ar).trim()}" بسعر ${parsedSale ?? parsedBase} ج.م — تصفّح المتجر الآن.`,
+          refId: id,
+        });
+      }
+    } catch {
+      // non-blocking notification dispatch
+    }
+  }
+
   res.status(201).json({ id, product_code: finalCode, is_offer: Boolean(effectiveIsOffer) });
 });
 
@@ -5605,6 +5740,45 @@ app.patch('/api/products/:id', requireAuth, requireRole('merchant', ...ALL_ADMIN
     entity_id: id,
     details: `تعديل المنتج: ${b.name_ar ?? existing.name_ar}`,
   });
+
+  try {
+    const targetMerchantId = String(existing.merchant_id || '');
+    const prodTitle = String(b.name_ar ?? existing.name_ar ?? '').trim();
+    const prevAvailable = Boolean(existing.is_available);
+    const nowAvailable = b.is_available !== undefined ? Boolean(b.is_available) : prevAvailable;
+    const prevEffective =
+      existing.sale_price != null && Number(existing.sale_price) > 0 && Number(existing.sale_price) < Number(existing.base_price)
+        ? Number(existing.sale_price)
+        : Number(existing.base_price || 0);
+    const nowSale = nextSale != null && Number(nextSale) > 0 && Number(nextSale) < Number(nextBase) ? Number(nextSale) : null;
+
+    if (targetMerchantId && prodTitle) {
+      const mRow = db.prepare('SELECT business_name_ar FROM merchants WHERE id = ?').get(targetMerchantId) as
+        | { business_name_ar?: string }
+        | undefined;
+      const storeName = String(mRow?.business_name_ar || 'متجر تتابعه');
+      if (!prevAvailable && nowAvailable) {
+        notifyStoreFollowers({
+          merchantId: targetMerchantId,
+          eventType: 'back_in_stock',
+          titleAr: `عاد للتوفر في ${storeName}`,
+          bodyAr: `المنتج "${prodTitle}" عاد متوفراً الآن في المخزون بسعر ${nowSale ?? nextBase} ج.م.`,
+          refId: String(id),
+        });
+      } else if (nowAvailable && nowSale !== null && nowSale < prevEffective) {
+        notifyStoreFollowers({
+          merchantId: targetMerchantId,
+          eventType: 'limited_discount',
+          titleAr: `تخفيض جديد في ${storeName}`,
+          bodyAr: `"${prodTitle}" أصبح بسعر ${nowSale} ج.م بدلاً من ${nextBase} ج.م.`,
+          refId: String(id),
+        });
+      }
+    }
+  } catch {
+    // non-blocking follower notification
+  }
+
   res.json({ ok: true, is_offer: Boolean(nextIsOffer) });
 });
 
@@ -6601,10 +6775,12 @@ function buildBootstrapStaticCatalogSnapshot() {
   return {
     services: services.map((s) => ({ ...s, is_enabled: Boolean(s.is_enabled) })),
     zones,
-    merchants: merchants.map((m) => ({
-      ...sanitizePublicMerchantRow(m),
-      product_count: merchantProductCounts[String(m.id)] || 0,
-    })),
+    merchants: attachStoreRatingMetrics(
+      merchants.map((m) => ({
+        ...sanitizePublicMerchantRow(m),
+        product_count: merchantProductCounts[String(m.id)] || 0,
+      }))
+    ),
     categories: categories.map((c) => ({
       ...c,
       is_active: Boolean(c.is_active),
@@ -13379,6 +13555,12 @@ registerRidesRoutes(app, {
   createPendingCaptainRating,
   ensureTripChatStarter,
   canAccessTrip,
+});
+
+// Register Otlobha Independent Store Pages, Store/Product Reviews, Store Follows & Moderation APIs
+registerStoresReviewsRoutes(app, {
+  enqueueSystemPushNotification,
+  broadcastToRooms,
 });
 
 async function startServer() {

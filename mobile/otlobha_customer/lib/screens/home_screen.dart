@@ -83,6 +83,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _loadingMore = false;
   bool _hasMore = false;
   int _page = 1;
+  int _fetchSeq = 0;
+  DateTime? _loadingStartedAt;
   String _shuffleSeed = '';
   DateTime? _pausedAt;
   String? _error;
@@ -126,15 +128,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
       _pausedAt = DateTime.now();
+      _heroFadeTimer?.cancel();
+      _heroFadeTimer = null;
       return;
     }
-    if (state == AppLifecycleState.resumed && _pausedAt != null) {
-      final elapsed = DateTime.now().difference(_pausedAt!);
+    if (state == AppLifecycleState.resumed) {
+      _startHeroTimer();
+      final pausedAt = _pausedAt;
       _pausedAt = null;
-      if (elapsed.inSeconds >= 3 && _isAllHomeFeed && !_loading) {
-        _fetchStorefront(reset: true);
+      final elapsed = pausedAt != null ? DateTime.now().difference(pausedAt) : Duration.zero;
+      final isStuckLoading = _loading &&
+          (_loadingStartedAt == null || DateTime.now().difference(_loadingStartedAt!).inSeconds >= 6);
+      if (isStuckLoading || _products.isEmpty || (elapsed.inSeconds >= 3 && _isAllHomeFeed)) {
+        widget.api.resetConnectionPool();
+        _fetchStorefront(reset: true, silent: _products.isNotEmpty);
       }
     }
   }
@@ -209,12 +220,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return List<Map<String, dynamic>>.from(_products);
   }
 
-  Future<void> _fetchStorefront({required bool reset}) async {
+  Future<void> _fetchStorefront({required bool reset, bool silent = false}) async {
+    final seq = ++_fetchSeq;
     if (reset) {
       _shuffleSeed = '${DateTime.now().microsecondsSinceEpoch}_${math.Random().nextInt(1 << 30)}';
+      _loadingStartedAt = DateTime.now();
       if (mounted) {
         setState(() {
-          _loading = true;
+          if (!silent || _products.isEmpty) {
+            _loading = true;
+          }
           _error = null;
           _page = 1;
         });
@@ -229,16 +244,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     final targetPage = reset ? 1 : _page + 1;
     try {
-      final res = await widget.api.getStorefrontHome(
-        filter: widget.storefrontFilter,
-        categoryId: widget.selectedCategoryId.isNotEmpty ? widget.selectedCategoryId : null,
-        brand: widget.selectedBrand.isNotEmpty ? widget.selectedBrand : null,
-        merchantId: widget.selectedMerchantId.isNotEmpty ? widget.selectedMerchantId : null,
-        page: targetPage,
-        limit: 24,
-        shuffleSeed: _shuffleSeed,
-      );
-      if (!mounted) return;
+      final res = await widget.api
+          .getStorefrontHome(
+            filter: widget.storefrontFilter,
+            categoryId: widget.selectedCategoryId.isNotEmpty ? widget.selectedCategoryId : null,
+            brand: widget.selectedBrand.isNotEmpty ? widget.selectedBrand : null,
+            merchantId: widget.selectedMerchantId.isNotEmpty ? widget.selectedMerchantId : null,
+            page: targetPage,
+            limit: 24,
+            shuffleSeed: _shuffleSeed,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted || seq != _fetchSeq) return;
 
       final rawBanners = (res['banners'] as List?) ?? [];
       final rawCats = (res['categories'] as List?) ?? [];
@@ -273,6 +290,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         widget.onCategoriesLoaded(parsedCats);
       }
 
+      _loadingStartedAt = null;
       setState(() {
         if (reset) {
           _products = parsedProducts;
@@ -297,11 +315,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _error = null;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || seq != _fetchSeq) return;
+      _loadingStartedAt = null;
       setState(() {
         _loading = false;
         _loadingMore = false;
-        if (reset) {
+        if (reset && _products.isEmpty) {
           _error = e.toString().replaceFirst('Exception: ', '');
         }
       });
@@ -1251,6 +1270,172 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  Widget _buildStoresStrip() {
+    final merchants = ((widget.bootstrap['merchants'] as List?) ?? [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .where((m) => (m['status'] ?? 'active').toString() == 'active')
+        .toList();
+    if (merchants.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'المتاجر المعتمدة',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF0F172A),
+                ),
+              ),
+              InkWell(
+                onTap: () => widget.onOpenService('stores'),
+                child: const Text(
+                  'عرض الكل',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFFA92224),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 86,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            itemCount: merchants.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (_, idx) {
+              final m = merchants[idx];
+              final mId = (m['id'] ?? '').toString();
+              final mName = (m['business_name_ar'] ?? m['name_ar'] ?? 'متجر').toString();
+              final logo = OtlobhaCustomerApi.resolveMediaUrl(m['image_url']);
+              final isOpen = m['is_open'] == true || m['is_open'] == 1;
+              final ratingAvg = (m['rating_avg'] as num?)?.toDouble() ?? 0;
+              final ratingCount = (m['rating_count'] as num?)?.toInt() ?? 0;
+
+              return Material(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                child: InkWell(
+                  onTap: () => widget.onSelectMerchant(mId, mName),
+                  borderRadius: BorderRadius.circular(18),
+                  child: Container(
+                    width: 196,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFFEAECEF)),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x080F172A),
+                          blurRadius: 10,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 54,
+                          height: 54,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF2F2),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: const Color(0xFFE2E8F0)),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: logo.isNotEmpty
+                              ? Image.network(
+                                  logo,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => const Icon(
+                                    Icons.storefront_rounded,
+                                    color: Color(0xFFA92224),
+                                    size: 26,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.storefront_rounded,
+                                  color: Color(0xFFA92224),
+                                  size: 26,
+                                ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                mName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFF0F172A),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.circle,
+                                    size: 7,
+                                    color: isOpen ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    isOpen ? 'مفتوح' : 'مغلق',
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: isOpen ? const Color(0xFF047857) : const Color(0xFFB91C1C),
+                                    ),
+                                  ),
+                                  if (ratingCount > 0) ...[
+                                    const SizedBox(width: 6),
+                                    const Icon(Icons.star_rounded, size: 13, color: Color(0xFFF5A623)),
+                                    const SizedBox(width: 2),
+                                    Text(
+                                      ratingAvg.toStringAsFixed(1),
+                                      style: const TextStyle(
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w800,
+                                        color: Color(0xFF334155),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildCategoriesStrip68() {
     final hasNoCat = widget.selectedCategoryId.isEmpty &&
         widget.selectedBrand.isEmpty &&
@@ -1577,6 +1762,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   child: Padding(
                     padding: const EdgeInsets.only(top: 12),
                     child: _buildServicesStrip(),
+                  ),
+                ),
+
+                // 3B. Approved Stores Horizontal Cards (opens independent Store Page)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: _buildStoresStrip(),
                   ),
                 ),
 

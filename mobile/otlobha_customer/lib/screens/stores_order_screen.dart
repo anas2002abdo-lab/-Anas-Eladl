@@ -13,6 +13,7 @@ class StoresOrderScreen extends StatefulWidget {
   final void Function(Map<String, dynamic> product, int delta) onAddProduct;
   final VoidCallback onOpenCart;
   final Future<void> Function() onRefresh;
+  final void Function(String merchantId, String merchantName)? onOpenStore;
 
   const StoresOrderScreen({
     super.key,
@@ -25,6 +26,7 @@ class StoresOrderScreen extends StatefulWidget {
     required this.onAddProduct,
     required this.onOpenCart,
     required this.onRefresh,
+    this.onOpenStore,
   });
 
   @override
@@ -495,6 +497,52 @@ class _StoresOrderScreenState extends State<StoresOrderScreen> {
                     },
                   ),
                 ),
+                if (selectedMerchant != null && widget.onOpenStore != null) ...[
+                  const SizedBox(height: 8),
+                  InkWell(
+                    onTap: () => widget.onOpenStore!(
+                      '${selectedMerchant['id']}',
+                      '${selectedMerchant['business_name_ar'] ?? selectedMerchant['name_ar'] ?? ''}',
+                    ),
+                    borderRadius: BorderRadius.circular(14),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEF2F2),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: const Color(0xFFFECACA)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.storefront_rounded, color: Color(0xFFA92224), size: 20),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'صفحة ${selectedMerchant['business_name_ar'] ?? selectedMerchant['name_ar'] ?? 'المتجر'} المستقلة',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w900,
+                                    color: Color(0xFF86191B),
+                                  ),
+                                ),
+                                const Text(
+                                  'عرض التقييمات، ساعات العمل، المتابعة ومشاركة الرابط',
+                                  style: TextStyle(fontSize: 10.5, color: Color(0xFF64748B)),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.arrow_back_ios_new_rounded, size: 14, color: Color(0xFFA92224)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 if (storeSections.isNotEmpty) ...[
                   const Row(

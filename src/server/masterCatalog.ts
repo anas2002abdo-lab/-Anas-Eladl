@@ -21,6 +21,7 @@ import {
   runOtlobhaGeminiAssistant,
   type AssistantHistoryTurn,
 } from './geminiAssistant.ts';
+import { notifyStoreFollowers } from './storesReviewsSystem.ts';
 
 // ============================================================================
 // 1. Text, Brand & Size Normalization Engine (Arabic + English + Units)
@@ -3419,6 +3420,26 @@ export function registerMasterCatalogRoutes(app: Express): void {
       JSON.stringify(Array.isArray(req.body?.bundle_product_ids) ? req.body.bundle_product_ids : []),
       Math.max(0, Number(req.body?.min_amount || 0))
     );
+
+    if (effectiveMerchantId) {
+      try {
+        const mRow = db.prepare('SELECT business_name_ar FROM merchants WHERE id = ?').get(effectiveMerchantId) as
+          | { business_name_ar?: string }
+          | undefined;
+        const storeName = String(mRow?.business_name_ar || 'متجر تتابعه');
+        const hasDiscount = Number(req.body?.discount_percent || 0) > 0 || Number(req.body?.discount_amount || 0) > 0;
+        notifyStoreFollowers({
+          merchantId: String(effectiveMerchantId),
+          eventType: hasDiscount ? 'limited_discount' : 'new_offer',
+          titleAr: `عرض جديد من ${storeName}`,
+          bodyAr: `${titleAr}${req.body?.subtitle_ar ? ` — ${String(req.body.subtitle_ar)}` : ''}`,
+          refId: id,
+        });
+      } catch {
+        // non-blocking follower notification
+      }
+    }
+
     res.status(201).json({ ok: true, id });
   });
 

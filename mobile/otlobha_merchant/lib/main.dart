@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -10,11 +12,23 @@ import 'core/push_notification_service.dart';
 import 'screens/merchant_home_screen.dart';
 import 'screens/merchant_login_screen.dart';
 
+class _OtlobhaHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    final client = super.createHttpClient(context);
+    client.connectionTimeout = const Duration(seconds: 10);
+    client.idleTimeout = const Duration(seconds: 8);
+    client.maxConnectionsPerHost = 6;
+    return client;
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  HttpOverrides.global = _OtlobhaHttpOverrides();
   try {
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp();
+      await Firebase.initializeApp().timeout(const Duration(seconds: 3));
     }
     FirebaseMessaging.onBackgroundMessage(otlobhaMerchantBackgroundHandler);
   } catch (e) {
@@ -54,31 +68,51 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
       MerchantPushNotificationService.instance.scheduleNativeBackgroundSync(fastCheck: true);
     } else if (state == AppLifecycleState.resumed) {
+      _api.resetConnectionPool();
       MerchantPushNotificationService.instance.refreshShownIdsFromStorage();
       MerchantPushNotificationService.instance.scheduleNativeBackgroundSync();
       final merchantId = _merchant?['id']?.toString() ?? '';
       if (merchantId.isNotEmpty) {
-        _api.reloadTokensFromStorage().then((_) {
-          if (mounted) {
-            MerchantPushNotificationService.instance.syncTokenWithBackend(_api, merchantId);
-          }
-        });
+        unawaited(
+          _api.reloadTokensFromStorage().then((_) {
+            if (mounted) {
+              unawaited(MerchantPushNotificationService.instance.syncTokenWithBackend(_api, merchantId));
+            }
+          }),
+        );
       }
     }
   }
 
-  Future<void> _restoreSession() async {
+  Future<void> _initPushInBackground(String merchantId) async {
     try {
-      await MerchantPushNotificationService.instance.init();
-      await MerchantPushNotificationService.instance.requestPermissions();
-      await MerchantPushNotificationService.instance.syncGuestTokenWithBackend(_api);
+      await MerchantPushNotificationService.instance.init().timeout(const Duration(seconds: 8));
+      await MerchantPushNotificationService.instance.requestPermissions().timeout(const Duration(seconds: 5));
+      await MerchantPushNotificationService.instance
+          .syncGuestTokenWithBackend(_api)
+          .timeout(const Duration(seconds: 10));
+      if (merchantId.isNotEmpty) {
+        await MerchantPushNotificationService.instance
+            .syncTokenWithBackend(_api, merchantId)
+            .timeout(const Duration(seconds: 10));
+      }
+    } catch (_) {
+      // Never block UI startup on Firebase/push registration
+    }
+  }
 
-      final prefs = await SharedPreferences.getInstance();
+  Future<void> _restoreSession() async {
+    String restoredMerchantId = '';
+    try {
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload();
+        await prefs.reload().timeout(const Duration(seconds: 3));
       } catch (_) {}
       final token = prefs.getString(_tokenKey)?.trim();
       final refreshToken = prefs.getString(_refreshTokenKey)?.trim();
@@ -90,16 +124,14 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
           _api.accessToken = (token != null && token.isNotEmpty) ? token : null;
           _api.refreshToken = (refreshToken != null && refreshToken.isNotEmpty) ? refreshToken : null;
           _merchant = Map<String, dynamic>.from(decoded);
-          final merchantId = _merchant?['id']?.toString() ?? '';
-          if (merchantId.isNotEmpty) {
-            await MerchantPushNotificationService.instance.syncTokenWithBackend(_api, merchantId);
-          }
+          restoredMerchantId = _merchant?['id']?.toString() ?? '';
         }
       }
     } catch (_) {
       // ignore corrupted local storage or test environment plugin exceptions
     } finally {
       if (mounted) setState(() => _bootstrapping = false);
+      unawaited(_initPushInBackground(restoredMerchantId));
     }
   }
 
@@ -115,14 +147,13 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
     }
     await prefs.setString(_merchantKey, jsonEncode(merchant));
     final merchantId = merchant['id']?.toString() ?? '';
-    if (merchantId.isNotEmpty) {
-      await MerchantPushNotificationService.instance.requestPermissions();
-      await MerchantPushNotificationService.instance.syncTokenWithBackend(_api, merchantId);
-    }
     if (mounted) {
       setState(() {
         _merchant = merchant;
       });
+    }
+    if (merchantId.isNotEmpty) {
+      unawaited(_initPushInBackground(merchantId));
     }
   }
 

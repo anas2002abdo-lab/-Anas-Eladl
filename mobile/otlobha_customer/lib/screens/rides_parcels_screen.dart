@@ -59,6 +59,7 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
   List<LatLng> _routePoints = [];
   List<Map<String, dynamic>> _searchSuggestions = [];
   bool _searchingPlaces = false;
+  bool _usingManualDropoff = false;
   Timer? _searchDebounce;
 
   Map<String, dynamic>? _activeTrip;
@@ -312,26 +313,46 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
         _waypointCtrl.text = label;
       } else {
         _dropoffPoint = pt;
+        _usingManualDropoff = false;
         _dropoffCtrl.text = label;
       }
     });
     try {
       _mapController.move(pt, 14.0);
     } catch (_) {}
-    if (_dropoffPoint != null) {
+    if (_dropoffPoint != null || _usingManualDropoff) {
       await _estimateRide();
     }
   }
 
+  Future<void> _useTypedDropoffAddress() async {
+    final text = _dropoffCtrl.text.trim();
+    if (text.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اكتب اسم الوجهة أولاً (حرفين على الأقل)')),
+      );
+      return;
+    }
+    setState(() {
+      _dropoffPoint = null;
+      _usingManualDropoff = true;
+      _searchSuggestions = [];
+      _routePoints = [];
+    });
+    await _estimateRide();
+  }
+
   Future<void> _estimateRide() async {
-    if (_dropoffPoint == null) return;
+    final typedAddr = _dropoffCtrl.text.trim();
+    if (_dropoffPoint == null && (!_usingManualDropoff || typedAddr.length < 2)) return;
     setState(() => _estimating = true);
     try {
       final res = await widget.api.estimateRide(
         pickupLat: _pickupPoint.latitude,
         pickupLng: _pickupPoint.longitude,
-        dropoffLat: _dropoffPoint!.latitude,
-        dropoffLng: _dropoffPoint!.longitude,
+        dropoffLat: _dropoffPoint?.latitude,
+        dropoffLng: _dropoffPoint?.longitude,
+        dropoffAddress: typedAddr.isNotEmpty ? typedAddr : null,
         waypointLat: _showWaypoint && _waypointPoint != null ? _waypointPoint!.latitude : null,
         waypointLng: _showWaypoint && _waypointPoint != null ? _waypointPoint!.longitude : null,
         zoneId: widget.selectedZoneId,
@@ -351,8 +372,10 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
           orElse: () => vehicles.isNotEmpty ? vehicles.first : <String, dynamic>{},
         );
         final pts = activeVeh['route_points'] ?? activeVeh['route_geometry'] ?? res['route_geometry'];
-        if (pts != null) {
+        if (pts != null && pts is List && pts.isNotEmpty) {
           _applyRouteGeometry(pts);
+        } else {
+          _routePoints = [];
         }
       });
     } catch (e) {
@@ -373,9 +396,10 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
 
   Future<void> _showConfirmSheet() async {
     final veh = _selectedVehicleData;
-    if (veh == null || _dropoffPoint == null) {
+    final hasValidDropoff = _dropoffPoint != null || (_usingManualDropoff && _dropoffCtrl.text.trim().length >= 2);
+    if (veh == null || !hasValidDropoff) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('حدد الوجهة أولاً لحساب المسار والأجرة الفعلية')),
+        const SnackBar(content: Text('اكتب اسم الوجهة أو حددها على الخريطة أولاً')),
       );
       return;
     }
@@ -407,7 +431,12 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
                     _confirmRow('نقطة توقف وسيطة', _waypointCtrl.text.trim().isEmpty ? 'نقطة وسيطة' : _waypointCtrl.text.trim()),
                   _confirmRow('الوجهة', _dropoffCtrl.text.trim().isEmpty ? 'الوجهة المحددة' : _dropoffCtrl.text.trim()),
                   _confirmRow('نوع المركبة', '${veh['name_ar']} (${veh['max_passengers'] ?? 1} ركاب)'),
-                  _confirmRow('مسافة الطريق الفعلية', '${veh['distance_km']} كم · ~${veh['duration_min']} دقيقة'),
+                  _confirmRow(
+                    'مسافة الطريق والوقت',
+                    veh['unmapped_destination'] == true
+                        ? 'وجهة مكتوبة يدوياً بدون نقطة على الخريطة'
+                        : '${veh['distance_km']} كم · ~${veh['duration_min']} دقيقة',
+                  ),
                   _confirmRow('الأجرة المعتمدة (ثابتة)', '${(veh['fare'] is Map ? (veh['fare']['total_fare'] ?? veh['fare']['estimated_fare']) : veh['estimated_fare'])} ج.م'),
                   const SizedBox(height: 10),
                   const Text('وسيلة الدفع', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
@@ -484,7 +513,8 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
   }
 
   Future<void> _confirmAndCreateRide() async {
-    if (_dropoffPoint == null) return;
+    final dropText = _dropoffCtrl.text.trim();
+    if (_dropoffPoint == null && (!_usingManualDropoff || dropText.length < 2)) return;
     setState(() => _requestingRide = true);
     try {
       final res = await widget.api.requestRideV2({
@@ -492,9 +522,11 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
         'pickup_address': _pickupCtrl.text.trim().isEmpty ? 'موقعي الحالي' : _pickupCtrl.text.trim(),
         'pickup_lat': _pickupPoint.latitude,
         'pickup_lng': _pickupPoint.longitude,
-        'dropoff_address': _dropoffCtrl.text.trim().isEmpty ? 'الوجهة المحددة' : _dropoffCtrl.text.trim(),
-        'dropoff_lat': _dropoffPoint!.latitude,
-        'dropoff_lng': _dropoffPoint!.longitude,
+        'dropoff_address': dropText.isEmpty ? 'الوجهة المحددة' : dropText,
+        if (_dropoffPoint != null) ...{
+          'dropoff_lat': _dropoffPoint!.latitude,
+          'dropoff_lng': _dropoffPoint!.longitude,
+        },
         if (_showWaypoint && _waypointPoint != null) ...{
           'waypoint_lat': _waypointPoint!.latitude,
           'waypoint_lng': _waypointPoint!.longitude,
@@ -1020,27 +1052,49 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
               ),
             ],
             const SizedBox(height: 8),
-            TextField(
-              controller: _dropoffCtrl,
-              onTap: () => setState(() => _mapPickTarget = 'dropoff'),
-              onChanged: (v) {
-                _mapPickTarget = 'dropoff';
-                _onSearchQueryChanged(v);
-              },
-              decoration: InputDecoration(
-                border: const OutlineInputBorder(),
-                isDense: true,
-                labelText: 'إلى أين تريد الذهاب؟ (ابحث بالاسم أو اضغط الخريطة)',
-                prefixIcon: const Icon(Icons.location_on, color: _primaryRed, size: 18),
-                suffixIcon: _searchingPlaces
-                    ? const Padding(
-                        padding: EdgeInsets.all(10),
-                        child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
-                      )
-                    : null,
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _dropoffCtrl,
+                    onTap: () => setState(() => _mapPickTarget = 'dropoff'),
+                    onChanged: (v) {
+                      setState(() {
+                        _mapPickTarget = 'dropoff';
+                        _usingManualDropoff = false;
+                      });
+                      _onSearchQueryChanged(v);
+                    },
+                    onSubmitted: (_) => _useTypedDropoffAddress(),
+                    decoration: InputDecoration(
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                      labelText: 'اكتب اسم الوجهة (حتى لو غير موجودة على الخريطة)',
+                      prefixIcon: const Icon(Icons.location_on, color: _primaryRed, size: 18),
+                      suffixIcon: _searchingPlaces
+                          ? const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                            )
+                          : null,
+                    ),
+                  ),
+                ),
+                if (_dropoffCtrl.text.trim().length >= 2) ...[
+                  const SizedBox(width: 6),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _primaryRed,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+                    ),
+                    onPressed: _useTypedDropoffAddress,
+                    child: const Text('اعتماد', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ],
             ),
-            if (_searchSuggestions.isNotEmpty) ...[
+            if (_searchSuggestions.isNotEmpty || (_mapPickTarget == 'dropoff' && _dropoffCtrl.text.trim().length >= 2 && !_usingManualDropoff && _dropoffPoint == null)) ...[
               const SizedBox(height: 6),
               Container(
                 decoration: BoxDecoration(
@@ -1049,14 +1103,60 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
                   color: Colors.white,
                 ),
                 child: Column(
-                  children: _searchSuggestions.take(5).map((s) {
-                    return ListTile(
-                      dense: true,
-                      leading: const Icon(Icons.place_outlined, size: 18, color: _primaryRed),
-                      title: Text(s['display_name']?.toString() ?? '', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                      onTap: () => _selectSuggestion(s),
-                    );
-                  }).toList(),
+                  children: [
+                    ..._searchSuggestions.take(7).map((s) {
+                      final src = s['source']?.toString() ?? '';
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.place_outlined, size: 18, color: _primaryRed),
+                        title: Text(
+                          s['short_name']?.toString() ?? s['display_name']?.toString() ?? '',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+                        ),
+                        subtitle: Text(
+                          s['address_line']?.toString() ?? s['display_name']?.toString() ?? '',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 10.5, color: Colors.black54),
+                        ),
+                        trailing: src == 'local_landmark' || src == 'otlobha_place'
+                            ? Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: src == 'local_landmark' ? const Color(0xFFECFDF5) : const Color(0xFFFFFBEB),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  src == 'local_landmark' ? 'معلم محلي' : 'اطلبها',
+                                  style: TextStyle(
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.bold,
+                                    color: src == 'local_landmark' ? const Color(0xFF047857) : const Color(0xFFB45309),
+                                  ),
+                                ),
+                              )
+                            : null,
+                        onTap: () => _selectSuggestion(s),
+                      );
+                    }),
+                    if (_mapPickTarget == 'dropoff' && _dropoffCtrl.text.trim().length >= 2)
+                      ListTile(
+                        dense: true,
+                        tileColor: const Color(0xFFFFFBEB),
+                        leading: const Icon(Icons.edit_location_alt, size: 18, color: _primaryRed),
+                        title: Text(
+                          'استخدام العنوان كما كُتب: «${_dropoffCtrl.text.trim()}»',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: _primaryRed),
+                        ),
+                        subtitle: const Text(
+                          'اطلب المشوار مباشرة حتى لو المكان غير موجود على الخريطة',
+                          style: TextStyle(fontSize: 10.5, color: Colors.black54),
+                        ),
+                        onTap: _useTypedDropoffAddress,
+                      ),
+                  ],
                 ),
               ),
             ],
@@ -1109,7 +1209,9 @@ class _RidesParcelsScreenState extends State<RidesParcelsScreen> {
                             children: [
                               Text('${v['name_ar']} · ${v['max_passengers'] ?? 1} ركاب', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5)),
                               Text(
-                                'وصول السائق ~${v['driver_eta_min'] ?? 4} د · الرحلة ${v['duration_min']} د · ${v['distance_km']} كم',
+                                v['unmapped_destination'] == true
+                                    ? 'وصول السائق ~${v['driver_eta_min'] ?? 4} د · وجهة مكتوبة يدوياً'
+                                    : 'وصول السائق ~${v['driver_eta_min'] ?? 4} د · الرحلة ${v['duration_min']} د · ${v['distance_km']} كم',
                                 style: const TextStyle(fontSize: 11, color: Colors.black54),
                               ),
                               if (v['warnings'] is List && (v['warnings'] as List).isNotEmpty)

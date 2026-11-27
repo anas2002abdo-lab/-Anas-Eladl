@@ -1252,6 +1252,19 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       onNotify(isAr ? 'اكتب تفاصيل الطلب الحر أو وصف الصورة/الصوت' : 'Enter free-text order details');
       return;
     }
+    if (
+      (checkoutPaymentMethod === 'vodafone_cash' || checkoutPaymentMethod === 'instapay') &&
+      !paymentProofImageUrl.trim()
+    ) {
+      onNotify(
+        isAr
+          ? checkoutPaymentMethod === 'vodafone_cash'
+            ? 'يجب إضافة صورة إيصال تحويل فودافون كاش أولاً قبل إرسال الطلب'
+            : 'يجب إضافة صورة إيصال تحويل إنستا باي أولاً قبل إرسال الطلب'
+          : 'Please attach your transfer receipt image before submitting the order'
+      );
+      return;
+    }
     const zone = zones.find((z) => z.id === selectedZoneId);
     let createdOrderId = '';
     let createdOrderNumber = '';
@@ -1447,7 +1460,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       subtotal: 0,
       customer_lat: pickupLat,
       customer_lng: pickupLng,
-      payment_method: checkoutPaymentMethod,
+      payment_method: 'cash',
     });
     if (res.id) {
       setTrackedOrderId(res.id);
@@ -4231,7 +4244,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                             ) : (
                               <label className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors">
                                 <Upload className="w-4 h-4" />
-                                <span>{isAr ? 'إضافة صورة التحويل' : 'Attach Transfer Photo'}</span>
+                                <span>{isAr ? 'إضافة صورة التحويل (إلزامي لإرسال الطلب)' : 'Attach Transfer Photo (Required)'}</span>
                                 <input
                                   type="file"
                                   accept="image/*"
@@ -4357,7 +4370,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                             ) : (
                               <label className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors">
                                 <Upload className="w-4 h-4" />
-                                <span>{isAr ? 'إضافة صورة التحويل' : 'Attach Transfer Photo'}</span>
+                                <span>{isAr ? 'إضافة صورة التحويل (إلزامي لإرسال الطلب)' : 'Attach Transfer Photo (Required)'}</span>
                                 <input
                                   type="file"
                                   accept="image/*"
@@ -4480,12 +4493,37 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                 </div>
               </div>
 
+              {(checkoutPaymentMethod === 'vodafone_cash' || checkoutPaymentMethod === 'instapay') &&
+                !paymentProofImageUrl.trim() && (
+                  <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-bold leading-relaxed flex items-start gap-2">
+                    <span className="shrink-0">⚠️</span>
+                    <span>
+                      {isAr
+                        ? `لا يمكن إرسال الطلب قبل إرفاق صورة إيصال تحويل ${
+                            checkoutPaymentMethod === 'vodafone_cash' ? 'فودافون كاش' : 'إنستا باي'
+                          } حتى يتمكن التاجر من مراجعة الدفع والبدء في تجهيز طلبك.`
+                        : 'You must attach the transfer receipt photo before placing your order.'}
+                    </span>
+                  </div>
+                )}
+
               <button
                 type="button"
+                disabled={
+                  (checkoutPaymentMethod === 'vodafone_cash' || checkoutPaymentMethod === 'instapay') &&
+                  !paymentProofImageUrl.trim()
+                }
                 onClick={handleSubmitStoreOrder}
-                className="w-full py-3 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-sm font-bold min-h-[46px] shadow-sm transition-colors"
+                className="w-full py-3 bg-orange-600 hover:bg-orange-700 disabled:bg-slate-300 disabled:text-slate-600 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold min-h-[46px] shadow-sm transition-colors"
               >
-                {isAr ? 'تأكيد وإرسال الطلب الآن' : 'Confirm Order'}
+                {(checkoutPaymentMethod === 'vodafone_cash' || checkoutPaymentMethod === 'instapay') &&
+                !paymentProofImageUrl.trim()
+                  ? isAr
+                    ? 'أرفق صورة التحويل أولاً لإتمام الطلب'
+                    : 'Attach Transfer Receipt First'
+                  : isAr
+                  ? 'تأكيد وإرسال الطلب الآن'
+                  : 'Confirm Order'}
               </button>
             </div>
           </div>

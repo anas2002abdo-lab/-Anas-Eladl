@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -21,8 +22,20 @@ import 'screens/captain_profile_screen.dart';
 import 'screens/captain_trip_chat_screen.dart';
 import 'screens/register_kyc_screen.dart';
 
+class _OtlobhaHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    final client = super.createHttpClient(context);
+    client.connectionTimeout = const Duration(seconds: 10);
+    client.idleTimeout = const Duration(seconds: 8);
+    client.maxConnectionsPerHost = 6;
+    return client;
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  HttpOverrides.global = _OtlobhaHttpOverrides();
   try {
     if (Firebase.apps.isEmpty) {
       await Firebase.initializeApp().timeout(const Duration(seconds: 3));
@@ -97,6 +110,7 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
   WebSocketChannel? _ridesWs;
   StreamSubscription? _ridesSub;
   Map<String, dynamic>? _pendingPushTap;
+  int _loadSeq = 0;
 
   static const String _prefTabIndex = 'otlobha_cap_tab_index';
 
@@ -161,6 +175,29 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
     }
   }
 
+  void _startForegroundTimers() {
+    _pollTimer?.cancel();
+    _gpsTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) => _silentSync());
+    _gpsTimer = Timer.periodic(const Duration(seconds: 20), (_) => _pushCaptainGps());
+  }
+
+  void _stopForegroundTimers() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _gpsTimer?.cancel();
+    _gpsTimer = null;
+  }
+
+  void _closeRidesWs() {
+    _ridesSub?.cancel();
+    _ridesSub = null;
+    try {
+      _ridesWs?.sink.close();
+    } catch (_) {}
+    _ridesWs = null;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -183,24 +220,38 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
         }),
       );
     });
-    _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) => _silentSync());
-    _gpsTimer = Timer.periodic(const Duration(seconds: 20), (_) => _pushCaptainGps());
+    _startForegroundTimers();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final push = CaptainPushNotificationService.instance;
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.inactive) {
+      push.scheduleNativeBackgroundSync(fastCheck: true);
+      return;
+    }
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      _stopForegroundTimers();
+      _closeRidesWs();
       push.scheduleNativeBackgroundSync(fastCheck: true);
       return;
     }
     if (state == AppLifecycleState.resumed) {
+      api.resetConnectionPool();
+      _startForegroundTimers();
       push.refreshShownIdsFromStorage();
       if (_activeCaptainId != null && api.hasTokens) {
         unawaited(
           api.reloadTokensFromStorage().then((_) {
             if (!mounted || _activeCaptainId == null || !api.hasTokens) return;
-            _silentSync();
+            _connectRidesWs();
+            if (_loading || _activeCaptain == null) {
+              _loadAll();
+            } else {
+              _silentSync();
+            }
             if (push.currentToken == null || !push.isTokenSynced) {
               push.registerForAuthenticatedCaptain(api);
             }
@@ -219,8 +270,9 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
 
   Future<void> _restorePersistedSession() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       final savedId = await api.restorePersistedSession();
+      final cachedCap = await api.restoreCaptainSnapshot();
       final savedTab = prefs.getInt(_prefTabIndex) ?? 0;
       final kycDraftActive = prefs.getBool(RegisterKycScreen.prefDraftActive) ?? false;
 
@@ -228,12 +280,16 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
       if (savedId != null && savedId.isNotEmpty) {
         setState(() {
           _activeCaptainId = savedId;
+          if (cachedCap != null) {
+            _activeCaptain = cachedCap;
+            _loading = false;
+          }
           _index = savedTab.clamp(0, 4);
         });
         _connectRidesWs();
-        await _loadAll();
+        unawaited(_loadAll());
         _pushCaptainGps();
-        CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api);
+        unawaited(CaptainPushNotificationService.instance.registerForAuthenticatedCaptain(api));
         return;
       }
 
@@ -404,16 +460,13 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _pollTimer?.cancel();
-    _gpsTimer?.cancel();
-    _ridesSub?.cancel();
-    _ridesWs?.sink.close();
+    _stopForegroundTimers();
+    _closeRidesWs();
     super.dispose();
   }
 
   void _connectRidesWs() {
-    _ridesSub?.cancel();
-    _ridesWs?.sink.close();
+    _closeRidesWs();
     final capId = _activeCaptainId;
     if (capId == null || !api.hasTokens) return;
     try {
@@ -462,72 +515,81 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
     } catch (_) {}
   }
 
-  Future<void> _silentSync() async {
-    if (_activeCaptainId == null || !api.hasTokens) return;
+  Future<void> _fetchDashboardParallel({required bool isInitial}) async {
+    final seq = ++_loadSeq;
+    final selectedId = _activeCaptainId ?? '';
+    if (selectedId.isEmpty || !api.hasTokens) {
+      if (mounted && _loading) setState(() => _loading = false);
+      return;
+    }
+
+    if (isInitial && _activeCaptain == null && mounted && !_loading) {
+      setState(() => _loading = true);
+    }
+
     try {
-      final selectedId = _activeCaptainId ?? '';
-      final meRes = await api.getMe();
+      final results = await Future.wait<dynamic>([
+        api.getMe().timeout(const Duration(seconds: 18)).catchError((_) => <String, dynamic>{}),
+        api.getOrders().timeout(const Duration(seconds: 18)).catchError((_) => _orders),
+        api.getParcels().timeout(const Duration(seconds: 18)).catchError((_) => _parcels),
+        api.getTrips().timeout(const Duration(seconds: 18)).catchError((_) => _trips),
+        api
+            .getSettlements(selectedId)
+            .timeout(const Duration(seconds: 18))
+            .catchError((_) => <String, dynamic>{'settlements': _settlements}),
+        selectedId.isNotEmpty
+            ? api.getNotifications(selectedId).timeout(const Duration(seconds: 18)).catchError((_) => _notifications)
+            : Future.value(<dynamic>[]),
+      ]);
+
+      if (!mounted || seq != _loadSeq) return;
+
+      final meRes = results[0] is Map ? Map<String, dynamic>.from(results[0] as Map) : <String, dynamic>{};
       final user = meRes['user'];
-      final orders = await api.getOrders();
-      final parcels = await api.getParcels();
-      final trips = await api.getTrips();
-      final settlementsRes = await api.getSettlements(selectedId);
-      final notifs = selectedId.isNotEmpty ? await api.getNotifications(selectedId) : [];
-      if (mounted) {
-        final prevApproved = _activeCaptain?['verification_status'] == 'approved';
-        final nextCap = user is Map ? Map<String, dynamic>.from(user) : _activeCaptain;
-        final nextApproved = nextCap?['verification_status'] == 'approved';
-        setState(() {
-          if (nextCap != null) _activeCaptain = nextCap;
-          _parcels = parcels;
-          _trips = trips;
-          _orders = orders;
-          _settlements = (settlementsRes['settlements'] as List?) ?? [];
-          _notifications = notifs;
-        });
-        if (prevApproved != nextApproved) {
-          _connectRidesWs();
-        }
+      final orders = results[1] is List ? results[1] as List<dynamic> : _orders;
+      final parcels = results[2] is List ? results[2] as List<dynamic> : _parcels;
+      final trips = results[3] is List ? results[3] as List<dynamic> : _trips;
+      final settlementsRes = results[4] is Map ? Map<String, dynamic>.from(results[4] as Map) : <String, dynamic>{};
+      final notifs = results[5] is List ? results[5] as List<dynamic> : _notifications;
+
+      final prevApproved = _activeCaptain?['verification_status'] == 'approved';
+      final nextCap = user is Map ? Map<String, dynamic>.from(user) : _activeCaptain;
+      if (user is Map) {
+        unawaited(api.persistCaptainSnapshot(Map<String, dynamic>.from(user)));
+      }
+      final nextApproved = nextCap?['verification_status'] == 'approved';
+
+      setState(() {
+        if (nextCap != null) _activeCaptain = nextCap;
+        _parcels = parcels;
+        _trips = trips;
+        _orders = orders;
+        _settlements = (settlementsRes['settlements'] as List?) ?? _settlements;
+        _notifications = notifs;
+        _loading = false;
+      });
+
+      if (_ridesWs == null || prevApproved != nextApproved) {
+        _connectRidesWs();
+      }
+      if (!isInitial) {
         CaptainPushNotificationService.instance.syncUnreadNotificationsToStatusBar(notifs);
       }
-    } catch (_) {}
+    } catch (_) {
+      if (mounted && seq == _loadSeq) setState(() => _loading = false);
+    } finally {
+      if (mounted && seq == _loadSeq && _loading) {
+        setState(() => _loading = false);
+      }
+    }
+  }
+
+  Future<void> _silentSync() async {
+    await _fetchDashboardParallel(isInitial: false);
   }
 
   Future<void> _loadAll() async {
-    if (_activeCaptainId == null || !api.hasTokens) {
-      if (mounted) setState(() => _loading = false);
-      return;
-    }
-    setState(() => _loading = true);
-    try {
-      final selectedId = _activeCaptainId ?? '';
-      final meRes = await api.getMe();
-      final user = meRes['user'];
-      final orders = await api.getOrders();
-      final parcels = await api.getParcels();
-      final trips = await api.getTrips();
-      final settlementsRes = await api.getSettlements(selectedId);
-      final notifs = selectedId.isNotEmpty ? await api.getNotifications(selectedId) : [];
-      if (mounted) {
-        final prevApproved = _activeCaptain?['verification_status'] == 'approved';
-        final nextCap = user is Map ? Map<String, dynamic>.from(user) : _activeCaptain;
-        final nextApproved = nextCap?['verification_status'] == 'approved';
-        setState(() {
-          if (nextCap != null) _activeCaptain = nextCap;
-          _parcels = parcels;
-          _trips = trips;
-          _orders = orders;
-          _settlements = (settlementsRes['settlements'] as List?) ?? [];
-          _notifications = notifs;
-          _loading = false;
-        });
-        if (_ridesWs == null || prevApproved != nextApproved) {
-          _connectRidesWs();
-        }
-      }
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
+    await _fetchDashboardParallel(isInitial: true);
   }
 
   Future<void> _logout() async {
@@ -856,10 +918,55 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
             ),
           ],
         ),
-        body: _loading
-            ? const Center(child: CircularProgressIndicator())
+        body: (_loading && cap == null)
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 16),
+                    TextButton.icon(
+                      onPressed: () {
+                        api.resetConnectionPool();
+                        _loadAll();
+                      },
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('إعادة المحاولة'),
+                    ),
+                  ],
+                ),
+              )
             : cap == null
-                ? const Center(child: Text('جاري تحميل بيانات الطيار...'))
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.wifi_off_rounded, size: 48, color: Color(0xFF94A3B8)),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'تعذّر تحميل بيانات الطيار، تحقق من الاتصال بالإنترنت',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF334155)),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              api.resetConnectionPool();
+                              _loadAll();
+                            },
+                            icon: const Icon(Icons.refresh_rounded),
+                            label: const Text('إعادة المحاولة'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFA92224),
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
                 : IndexedStack(
                     index: _index,
                     children: [

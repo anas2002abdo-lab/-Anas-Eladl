@@ -450,6 +450,27 @@ if manifest_path.exists():
         )
         m_text = m_text.replace("</activity>", click_filter, 1)
 
+    if (not is_captain_app and not is_merchant_app) and 'android:scheme="otlobha"' not in m_text and "</activity>" in m_text:
+        from urllib.parse import urlparse
+        parsed_base = urlparse(os.environ.get("BG_API_BASE_URL", "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"))
+        store_host = parsed_base.hostname or "otlobha.app"
+        deep_link_filters = (
+            '            <intent-filter>\n'
+            '                <action android:name="android.intent.action.VIEW" />\n'
+            '                <category android:name="android.intent.category.DEFAULT" />\n'
+            '                <category android:name="android.intent.category.BROWSABLE" />\n'
+            '                <data android:scheme="otlobha" android:host="store" />\n'
+            '            </intent-filter>\n'
+            '            <intent-filter>\n'
+            '                <action android:name="android.intent.action.VIEW" />\n'
+            '                <category android:name="android.intent.category.DEFAULT" />\n'
+            '                <category android:name="android.intent.category.BROWSABLE" />\n'
+            f'                <data android:scheme="https" android:host="{store_host}" android:pathPrefix="/store/" />\n'
+            '            </intent-filter>\n'
+            '        </activity>'
+        )
+        m_text = m_text.replace("</activity>", deep_link_filters, 1)
+
     if "</application>" in m_text:
         bg_components_xml = ""
         if "OtlobhaBgPushService" not in m_text:
@@ -1327,8 +1348,11 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {{
     private val bgChannelName = "com.otlobha/background_push"
+    private val deepLinkChannelName = "com.otlobha.customer/deep_links"
     private var bgChannel: MethodChannel? = null
+    private var deepLinkChannel: MethodChannel? = null
     private var pendingBgPayload: String? = null
+    private var pendingDeepLinkUrl: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {{
         super.onCreate(savedInstanceState)
@@ -1401,11 +1425,26 @@ class MainActivity : FlutterActivity() {{
                                     OtlobhaBgPollEngine.PREFS_NAME,
                                     Context.MODE_PRIVATE
                                 )
-                                prefs.edit().putString(OtlobhaBgPollEngine.KEY_API_BASE, apiBase).commit()
+                                prefs.edit().putString(OtlobhaBgPollEngine.KEY_API_BASE, apiBase).apply()
                             }}
                             OtlobhaBgScheduler.ensureScheduled(applicationContext, fastCheck = true)
                             OtlobhaBgScheduler.tryStartKeepAliveService(applicationContext)
                             result.success(true)
+                        }}
+                        else -> result.notImplemented()
+                    }}
+                }} catch (e: Throwable) {{
+                    result.success(null)
+                }}
+            }}
+            deepLinkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, deepLinkChannelName)
+            deepLinkChannel?.setMethodCallHandler {{ call, result ->
+                try {{
+                    when (call.method) {{
+                        "consumeInitialDeepLink" -> {{
+                            val url = pendingDeepLinkUrl
+                            pendingDeepLinkUrl = null
+                            result.success(url)
                         }}
                         else -> result.notImplemented()
                     }}
@@ -1427,6 +1466,15 @@ class MainActivity : FlutterActivity() {{
                     bgChannel?.invokeMethod("onBackgroundNotificationTap", payload)
                 }} else {{
                     pendingBgPayload = payload
+                }}
+            }}
+            val deepUrl = safeIntent.dataString?.trim()
+            if (!deepUrl.isNullOrEmpty() && (deepUrl.startsWith("otlobha://store/") || deepUrl.contains("/store/"))) {{
+                safeIntent.data = null
+                if (notifyFlutter && deepLinkChannel != null) {{
+                    deepLinkChannel?.invokeMethod("onDeepLink", deepUrl)
+                }} else {{
+                    pendingDeepLinkUrl = deepUrl
                 }}
             }}
         }} catch (e: Throwable) {{

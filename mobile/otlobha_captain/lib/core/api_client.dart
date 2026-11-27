@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -21,12 +22,21 @@ class OtlobhaCaptainApi {
     defaultValue: 'https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app',
   );
 
-  static const Duration _defaultTimeout = Duration(seconds: 30);
-  static const Duration _uploadTimeout = Duration(seconds: 60);
+  static const Duration _defaultTimeout = Duration(seconds: 15);
+  static const Duration _uploadTimeout = Duration(seconds: 45);
 
   String? _accessToken;
   String? _refreshToken;
   Future<bool>? _refreshFuture;
+  DateTime? _refreshStartedAt;
+
+  void resetConnectionPool() {
+    if (_refreshFuture != null &&
+        (_refreshStartedAt == null || DateTime.now().difference(_refreshStartedAt!).inSeconds >= 8)) {
+      _refreshFuture = null;
+      _refreshStartedAt = null;
+    }
+  }
 
   bool get hasTokens => (_accessToken ?? '').isNotEmpty || (_refreshToken ?? '').isNotEmpty;
 
@@ -76,6 +86,7 @@ class OtlobhaCaptainApi {
   static const String _prefAccessToken = 'otlobha_cap_access_token';
   static const String _prefRefreshToken = 'otlobha_cap_refresh_token';
   static const String _prefCaptainId = 'otlobha_cap_active_id';
+  static const String _prefCaptainProfileJson = 'otlobha_cap_profile_json';
 
   void setTokens({String? accessToken, String? refreshToken}) {
     if (accessToken != null && accessToken.isNotEmpty) {
@@ -111,6 +122,7 @@ class OtlobhaCaptainApi {
       await prefs.remove(_prefAccessToken);
       await prefs.remove(_prefRefreshToken);
       await prefs.remove(_prefCaptainId);
+      await prefs.remove(_prefCaptainProfileJson);
     } catch (_) {}
   }
 
@@ -121,11 +133,32 @@ class OtlobhaCaptainApi {
     } catch (_) {}
   }
 
-  Future<void> reloadTokensFromStorage() async {
+  Future<void> persistCaptainSnapshot(Map<String, dynamic> captain) async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefCaptainProfileJson, jsonEncode(captain));
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>?> restoreCaptainSnapshot() async {
+    try {
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+      final raw = prefs.getString(_prefCaptainProfileJson);
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return Map<String, dynamic>.from(decoded);
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> reloadTokensFromStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload();
+        await prefs.reload().timeout(const Duration(seconds: 3));
       } catch (_) {}
       final savedAccess = prefs.getString(_prefAccessToken)?.trim();
       final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
@@ -140,9 +173,9 @@ class OtlobhaCaptainApi {
 
   Future<String?> restorePersistedSession() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload();
+        await prefs.reload().timeout(const Duration(seconds: 3));
       } catch (_) {}
       final savedAccess = prefs.getString(_prefAccessToken)?.trim();
       final savedRefresh = prefs.getString(_prefRefreshToken)?.trim();
@@ -174,20 +207,43 @@ class OtlobhaCaptainApi {
   Future<http.Response> _execute(
     Future<http.Response> Function() requestFn, {
     Duration timeout = _defaultTimeout,
+    bool retryOnNetworkError = true,
   }) async {
-    try {
-      return await requestFn().timeout(timeout);
-    } on TimeoutException {
-      throw const ApiException('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
-    } on ApiException {
-      rethrow;
-    } on http.ClientException catch (e) {
-      debugPrint('[OtlobhaCaptainApi] ClientException: ${e.message}');
-      throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
-    } catch (e) {
-      debugPrint('[OtlobhaCaptainApi] Network error: ${e.runtimeType}');
-      throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await requestFn().timeout(timeout);
+      } on TimeoutException {
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 350));
+          continue;
+        }
+        throw const ApiException('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+      } on ApiException {
+        rethrow;
+      } on SocketException catch (e) {
+        debugPrint('[OtlobhaCaptainApi] SocketException (attempt ${attempt + 1}): ${e.message}');
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
+      } on http.ClientException catch (e) {
+        debugPrint('[OtlobhaCaptainApi] ClientException (attempt ${attempt + 1}): ${e.message}');
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw const ApiException('تعذر الاتصال بالخادم، يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى');
+      } catch (e) {
+        debugPrint('[OtlobhaCaptainApi] Network error: ${e.runtimeType}');
+        if (retryOnNetworkError && attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
+        throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
+      }
     }
+    throw const ApiException('تعذر الاتصال بالخادم حاليًا، يرجى التحقق من الإنترنت والمحاولة مرة أخرى');
   }
 
   bool _isExplicitAuthInvalidation(http.Response res) {
@@ -214,8 +270,18 @@ class OtlobhaCaptainApi {
     await reloadTokensFromStorage();
     final activeRefresh = (_refreshToken ?? '').trim();
     if (activeRefresh.isEmpty) return false;
-    if (_refreshFuture != null) return _refreshFuture!;
+    if (_refreshFuture != null) {
+      final elapsed = _refreshStartedAt == null
+          ? const Duration(seconds: 99)
+          : DateTime.now().difference(_refreshStartedAt!);
+      if (elapsed.inSeconds < 12) {
+        return _refreshFuture!;
+      }
+      _refreshFuture = null;
+      _refreshStartedAt = null;
+    }
 
+    _refreshStartedAt = DateTime.now();
     _refreshFuture = () async {
       try {
         final res = await _execute(
@@ -224,6 +290,7 @@ class OtlobhaCaptainApi {
             headers: _headers(json: true, includeAuth: false),
             body: jsonEncode({'refresh_token': activeRefresh}),
           ),
+          timeout: const Duration(seconds: 12),
         );
         if (res.statusCode >= 200 && res.statusCode < 300) {
           final decoded = parseJsonResponse(res, endpointHint: '/api/auth/refresh');
@@ -252,6 +319,7 @@ class OtlobhaCaptainApi {
         return false;
       } finally {
         _refreshFuture = null;
+        _refreshStartedAt = null;
       }
     }();
 

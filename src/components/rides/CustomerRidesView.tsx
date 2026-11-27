@@ -66,7 +66,7 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
     lng: 31.9369,
     address: 'موقعي الحالي (GPS)',
   });
-  const [dropoff, setDropoff] = useState<{ lat: number; lng: number; address: string } | null>(null);
+  const [dropoff, setDropoff] = useState<{ lat: number | null; lng: number | null; address: string; isManual?: boolean } | null>(null);
   const [showWaypoint, setShowWaypoint] = useState(false);
   const [waypoint, setWaypoint] = useState<{ lat: number; lng: number; address: string } | null>(null);
   const [pickMode, setPickMode] = useState<'pickup' | 'dropoff' | 'waypoint' | null>('dropoff');
@@ -241,8 +241,10 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
 
     const pLat = activeTrip ? Number(activeTrip.pickup_lat) : pickup.lat;
     const pLng = activeTrip ? Number(activeTrip.pickup_lng) : pickup.lng;
-    const dLat = activeTrip ? Number(activeTrip.dropoff_lat) : dropoff?.lat;
-    const dLng = activeTrip ? Number(activeTrip.dropoff_lng) : dropoff?.lng;
+    const rawDropLat = activeTrip ? activeTrip.dropoff_lat : dropoff?.lat;
+    const rawDropLng = activeTrip ? activeTrip.dropoff_lng : dropoff?.lng;
+    const dLat = rawDropLat !== null && rawDropLat !== undefined ? Number(rawDropLat) : NaN;
+    const dLng = rawDropLng !== null && rawDropLng !== undefined ? Number(rawDropLng) : NaN;
 
     if (Number.isFinite(pLat) && Number.isFinite(pLng)) {
       bounds.push([pLat, pLng]);
@@ -264,7 +266,7 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
       L.marker([waypoint.lat, waypoint.lng], { icon: pin }).addTo(layer);
     }
 
-    if (dLat !== undefined && dLng !== undefined && Number.isFinite(dLat) && Number.isFinite(dLng)) {
+    if (Number.isFinite(dLat) && Number.isFinite(dLng)) {
       bounds.push([dLat, dLng]);
       const pin = L.divIcon({
         className: 'otlobha-drop-pin',
@@ -302,9 +304,10 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
     }
   }, [pickup, dropoff, waypoint, selectedOption, activeTrip, liveDriverPos]);
 
-  // 4. Auto-estimate real OSRM road route & fares whenever pickup/dropoff/waypoint changes
+  // 4. Auto-estimate real OSRM road route & fares (or manual typed address min-fare) whenever pickup/dropoff/waypoint changes
   useEffect(() => {
     if (!dropoff || activeTrip) return;
+    if ((dropoff.lat === null || dropoff.lng === null) && dropoff.address.trim().length < 2) return;
     let cancelled = false;
     setEstimating(true);
     api
@@ -313,6 +316,7 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
         pickup_lng: pickup.lng,
         dropoff_lat: dropoff.lat,
         dropoff_lng: dropoff.lng,
+        dropoff_address: dropoff.address,
         waypoint_lat: waypoint?.lat ?? null,
         waypoint_lng: waypoint?.lng ?? null,
         zone_id: selectedZoneId,
@@ -334,7 +338,7 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
     return () => {
       cancelled = true;
     };
-  }, [pickup.lat, pickup.lng, dropoff?.lat, dropoff?.lng, waypoint?.lat, waypoint?.lng, selectedZoneId, activeTrip?.id]);
+  }, [pickup.lat, pickup.lng, dropoff?.lat, dropoff?.lng, dropoff?.address, waypoint?.lat, waypoint?.lng, selectedZoneId, activeTrip?.id]);
 
   // 5. Nominatim place search (debounced)
   useEffect(() => {
@@ -386,10 +390,21 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
   };
 
   const handleSelectSuggestion = (place: any) => {
-    const point = { lat: Number(place.lat), lng: Number(place.lng), address: place.short_name || place.display_name };
-    if (searchTarget === 'pickup') setPickup(point);
-    else if (searchTarget === 'waypoint') setWaypoint(point);
+    const point = { lat: Number(place.lat), lng: Number(place.lng), address: place.short_name || place.display_name, isManual: false };
+    if (searchTarget === 'pickup') setPickup({ lat: point.lat, lng: point.lng, address: point.address });
+    else if (searchTarget === 'waypoint') setWaypoint({ lat: point.lat, lng: point.lng, address: point.address });
     else setDropoff(point);
+    setSuggestions([]);
+    setSearchQuery('');
+  };
+
+  const handleUseTypedDropoff = () => {
+    const text = searchQuery.trim();
+    if (text.length < 2) {
+      notify('يرجى كتابة اسم المكان أو العنوان أولاً (حرفين على الأقل)');
+      return;
+    }
+    setDropoff({ lat: null, lng: null, address: text, isManual: true });
     setSuggestions([]);
     setSearchQuery('');
   };
@@ -688,15 +703,33 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
                   onFocus={() => {
                     setSearchTarget('dropoff');
                     setPickMode('dropoff');
+                    if (dropoff?.address && !searchQuery) {
+                      setSearchQuery(dropoff.address);
+                    }
                   }}
                   onChange={(e) => {
                     setSearchTarget('dropoff');
                     setSearchQuery(e.target.value);
                   }}
-                  placeholder="إلى أين تريد الذهاب؟ ابحث باسم المكان أو اضغط الخريطة..."
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && searchTarget === 'dropoff' && searchQuery.trim().length >= 2) {
+                      e.preventDefault();
+                      handleUseTypedDropoff();
+                    }
+                  }}
+                  placeholder="اكتب اسم الوجهة (حتى لو غير موجودة على الخريطة) أو اضغط الخريطة..."
                   className="w-full pr-9 pl-3 py-2 text-xs rounded-xl border border-slate-300 font-bold"
                 />
               </div>
+              {searchTarget === 'dropoff' && searchQuery.trim().length >= 2 && (
+                <button
+                  type="button"
+                  onClick={handleUseTypedDropoff}
+                  className="px-2.5 py-2 rounded-xl bg-[#A92224] text-white text-[11px] font-black hover:bg-[#86191B] shrink-0 cursor-pointer"
+                >
+                  اعتماد
+                </button>
+              )}
               {!showWaypoint && (
                 <button
                   type="button"
@@ -709,12 +742,12 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
               )}
             </div>
 
-            {/* Nominatim Autocomplete Suggestions */}
-            {(searchingPlaces || suggestions.length > 0) && (
-              <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 max-h-44 overflow-y-auto shadow-md">
+            {/* Smart Local + OpenStreetMap Autocomplete Suggestions + Free-Text Fallback */}
+            {(searchingPlaces || suggestions.length > 0 || (searchTarget === 'dropoff' && searchQuery.trim().length >= 2)) && (
+              <div className="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100 max-h-56 overflow-y-auto shadow-md">
                 {searchingPlaces && (
                   <div className="p-2.5 text-xs text-slate-500 flex items-center gap-2">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> جاري البحث في OpenStreetMap...
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> جاري البحث في أماكن المنزلة والخريطة...
                   </div>
                 )}
                 {suggestions.map((s) => (
@@ -725,12 +758,37 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
                     className="w-full text-right p-2.5 hover:bg-slate-50 flex items-start gap-2 cursor-pointer"
                   >
                     <MapPin className="w-4 h-4 text-[#A92224] shrink-0 mt-0.5" />
-                    <div className="min-w-0">
-                      <div className="text-xs font-black text-slate-900 truncate">{s.short_name}</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-black text-slate-900 truncate flex items-center gap-1.5">
+                        <span className="truncate">{s.short_name}</span>
+                        {s.source === 'local_landmark' && (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[9px] font-bold shrink-0">معلم محلي</span>
+                        )}
+                        {s.source === 'otlobha_place' && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 text-[9px] font-bold shrink-0">اطلبها</span>
+                        )}
+                      </div>
                       <div className="text-[10px] text-slate-500 truncate">{s.address_line}</div>
                     </div>
                   </button>
                 ))}
+                {searchTarget === 'dropoff' && searchQuery.trim().length >= 2 && (
+                  <button
+                    type="button"
+                    onClick={handleUseTypedDropoff}
+                    className="w-full text-right p-2.5 bg-amber-50/70 hover:bg-amber-100/70 flex items-start gap-2 cursor-pointer"
+                  >
+                    <Navigation className="w-4 h-4 text-[#A92224] shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-black text-[#A92224]">
+                        استخدام العنوان كما كُتب: «{searchQuery.trim()}»
+                      </div>
+                      <div className="text-[10px] text-slate-600">
+                        اطلب المشوار مباشرة حتى لو المكان غير مسجل على الخريطة (بدون تحديد نقطة)
+                      </div>
+                    </div>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -748,7 +806,9 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
                 <span className="font-black text-slate-800">اختر نوع المركبة</span>
                 {selectedOption && (
                   <span className="text-[11px] font-bold text-slate-500">
-                    مسافة الطريق: {selectedOption.distance_km} كم · {selectedOption.duration_min} د
+                    {selectedOption.unmapped_destination
+                      ? 'وجهة مكتوبة يدوياً · الحد الأدنى المبدئي'
+                      : `مسافة الطريق: ${selectedOption.distance_km} كم · ${selectedOption.duration_min} د`}
                   </span>
                 )}
               </div>
@@ -777,7 +837,11 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
                             </span>
                           </div>
                           <div className="text-[11px] text-slate-600 flex items-center gap-2">
-                            <span>الرحلة: {opt.duration_min} د ({opt.distance_km} كم)</span>
+                            <span>
+                              {opt.unmapped_destination
+                                ? 'وجهة يدوية (تواصل مع الكابتن)'
+                                : `الرحلة: ${opt.duration_min} د (${opt.distance_km} كم)`}
+                            </span>
                             <span>·</span>
                             <span className="text-emerald-700 font-bold">
                               {opt.driver_eta_min ? `وصول السائق ~${opt.driver_eta_min} د` : 'بحث تلقائي'}
@@ -821,7 +885,12 @@ export function CustomerRidesView({ customerName, customerPhone, selectedZoneId,
             {waypoint && <div><strong>نقطة توقف وسيطة:</strong> {waypoint.address}</div>}
             <div><strong>الوجهة:</strong> {dropoff.address}</div>
             <div><strong>المركبة:</strong> {selectedOption.name_ar} (حتى {selectedOption.max_passengers} ركاب)</div>
-            <div><strong>مسافة الطريق والوقت:</strong> {selectedOption.distance_km} كم · ~{selectedOption.duration_min} دقيقة</div>
+            <div>
+              <strong>مسافة الطريق والوقت:</strong>{' '}
+              {selectedOption.unmapped_destination
+                ? 'عنوان مكتوب يدوياً بدون نقطة على الخريطة (الحد الأدنى المبدئي)'
+                : `${selectedOption.distance_km} كم · ~${selectedOption.duration_min} دقيقة`}
+            </div>
           </div>
           <div className="text-xs space-y-1 border-t border-slate-200 pt-2">
             <div className="flex justify-between"><span>سعر البداية</span><span>{selectedOption.fare.base_fare} ج.م</span></div>

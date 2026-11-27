@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -27,9 +28,23 @@ import 'screens/storefront_categories_screen.dart';
 import 'screens/storefront_product_pager_sheet.dart';
 import 'screens/storefront_smart_search_screen.dart';
 import 'screens/storefront_assistant_sheet.dart';
+import 'screens/store_page_screen.dart';
+import 'screens/followed_stores_screen.dart';
+
+class _OtlobhaHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    final client = super.createHttpClient(context);
+    client.connectionTimeout = const Duration(seconds: 10);
+    client.idleTimeout = const Duration(seconds: 8);
+    client.maxConnectionsPerHost = 6;
+    return client;
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  HttpOverrides.global = _OtlobhaHttpOverrides();
   try {
     if (Firebase.apps.isEmpty) {
       await Firebase.initializeApp().timeout(const Duration(seconds: 3));
@@ -119,6 +134,9 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   WebSocketChannel? _ridesWs;
   StreamSubscription? _ridesSub;
   Map<String, dynamic>? _pendingPushTap;
+  String? _pendingDeepLinkUrl;
+  int _loadSeq = 0;
+  static const MethodChannel _deepLinkChannel = MethodChannel('com.otlobha.customer/deep_links');
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey<StorefrontCategoriesScreenState> _categoriesKey =
@@ -236,6 +254,27 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     }
   }
 
+  void _startForegroundTimers() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (_isAuthenticated && !_isGuest) _silentSync();
+    });
+  }
+
+  void _stopForegroundTimers() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  void _closeRidesWs() {
+    _ridesSub?.cancel();
+    _ridesSub = null;
+    try {
+      _ridesWs?.sink.close();
+    } catch (_) {}
+    _ridesWs = null;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -258,30 +297,90 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         }),
       );
     });
-    _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
-      if (_isAuthenticated && !_isGuest) _silentSync();
+    _startForegroundTimers();
+    _initDeepLinkListener();
+  }
+
+  Future<void> _initDeepLinkListener() async {
+    _deepLinkChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onDeepLink') {
+        final raw = call.arguments?.toString().trim() ?? '';
+        if (raw.isNotEmpty) _handleIncomingUrl(raw);
+      }
+    });
+    try {
+      final initial = await _deepLinkChannel.invokeMethod<String>('consumeInitialDeepLink');
+      if (initial != null && initial.trim().isNotEmpty) {
+        _handleIncomingUrl(initial.trim());
+      }
+    } catch (_) {}
+  }
+
+  void _handleIncomingUrl(String rawUrl) {
+    final uri = Uri.tryParse(rawUrl.trim());
+    if (uri == null) return;
+    String? merchantId;
+    if (uri.scheme == 'otlobha' && uri.host == 'store') {
+      if (uri.pathSegments.isNotEmpty) {
+        merchantId = uri.pathSegments.first.trim();
+      }
+    } else if (uri.pathSegments.length >= 2 && uri.pathSegments.first == 'store') {
+      merchantId = uri.pathSegments[1].trim();
+    } else if (uri.queryParameters.containsKey('store')) {
+      merchantId = uri.queryParameters['store']?.trim();
+    }
+    if (merchantId == null || merchantId.isEmpty) return;
+
+    if (!mounted || _showAuthScreen || _needsProfileCompletion) {
+      _pendingDeepLinkUrl = rawUrl;
+      return;
+    }
+    final targetId = merchantId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _openStorePage(targetId);
     });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final push = CustomerPushNotificationService.instance;
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.inactive) {
+      push.scheduleNativeBackgroundSync(fastCheck: true);
+      return;
+    }
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      _stopForegroundTimers();
+      _closeRidesWs();
       push.scheduleNativeBackgroundSync(fastCheck: true);
       return;
     }
     if (state == AppLifecycleState.resumed) {
+      api.resetConnectionPool();
+      _startForegroundTimers();
       push.refreshShownIdsFromStorage();
       if (_isAuthenticated && !_isGuest) {
         unawaited(
           api.reloadTokensFromStorage().then((_) {
             if (!mounted || !_isAuthenticated || _isGuest) return;
-            _silentSync();
+            if (!_needsProfileCompletion) {
+              _connectRidesWs();
+              if (_loading || _bootstrap.isEmpty) {
+                _loadData();
+              } else {
+                _silentSync();
+              }
+            }
             if (push.currentToken == null || !push.isTokenSynced) {
               push.registerForAuthenticatedUser(api);
             }
           }),
         );
+      } else if (_isGuest) {
+        if (_loading || _bootstrap.isEmpty) {
+          _loadData();
+        }
       }
     }
   }
@@ -485,7 +584,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
 
   Future<void> _restoreSavedNavigationAndSession() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       final savedTab = prefs.getInt(_prefTabIndex) ?? 0;
       final savedSub = prefs.getString(_prefServiceSubView) ?? 'hub';
       final savedGuest = prefs.getBool(_prefGuestMode) ?? false;
@@ -509,6 +608,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           if (zoneId.isNotEmpty) _selectedZoneId = zoneId;
           _index = savedTab.clamp(0, 5);
           _serviceSubView = savedSub;
+          if (needsProfile) _loading = false;
         });
         if (!needsProfile) {
           _connectRidesWs();
@@ -526,8 +626,12 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _serviceSubView = savedSub;
         });
         _loadData();
+      } else {
+        setState(() => _loading = false);
       }
-    } catch (_) {}
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   void _markLocalNotificationRead(String notifId) {
@@ -652,12 +756,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         String merName = '';
         for (final m in merchants) {
           if (m is Map && (m['id'] ?? '').toString() == merId) {
-            merName = (m['name_ar'] ?? '').toString();
+            merName = (m['business_name_ar'] ?? m['name_ar'] ?? '').toString();
             break;
           }
         }
-        _selectStorefrontMerchant(merId, merName);
-        _switchTab(0);
+        _openStorePage(merId, merName);
         return;
       }
       _switchTab(2, serviceSubView: 'stores');
@@ -723,15 +826,13 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _pollTimer?.cancel();
-    _ridesSub?.cancel();
-    _ridesWs?.sink.close();
+    _stopForegroundTimers();
+    _closeRidesWs();
     super.dispose();
   }
 
   void _connectRidesWs() {
-    _ridesSub?.cancel();
-    _ridesWs?.sink.close();
+    _closeRidesWs();
     if (!api.hasTokens) return;
     try {
       _ridesWs = IOWebSocketChannel.connect(api.customerChannelWsUri(), headers: api.wsHeaders);
@@ -903,7 +1004,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
   Future<void> _silentSync() async {
     if (_isGuest) return;
     try {
-      final data = await api.bootstrap(lite: true);
+      final data = await api.bootstrap(lite: true).timeout(const Duration(seconds: 20));
       if (mounted) {
         setState(() {
           if (_bootstrap.isEmpty) {
@@ -922,38 +1023,41 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
             };
           }
           _applyCustomerFromBootstrap(data);
+          if (_loading) _loading = false;
         });
       }
     } catch (_) {}
   }
 
   Future<void> _loadData() async {
-    setState(() => _loading = true);
+    final seq = ++_loadSeq;
+    if (_bootstrap.isEmpty && mounted && !_loading) {
+      setState(() => _loading = true);
+    }
     try {
-      final data = _isGuest ? await api.guestBootstrap() : await api.bootstrap();
-      if (mounted) {
-        setState(() {
-          _bootstrap = data;
-          if (!_isGuest) {
-            _applyCustomerFromBootstrap(data);
-          }
-          final merchants = ((data['merchants'] as List?) ?? [])
-              .where((m) => m['merchant_type'] != 'pharmacy')
-              .toList();
-          if (_quickMerchantId.isEmpty && merchants.isNotEmpty) {
-            _quickMerchantId = merchants.first['id'] as String;
-          }
-          _loading = false;
-        });
-      }
+      final data = await (_isGuest ? api.guestBootstrap() : api.bootstrap())
+          .timeout(const Duration(seconds: 22));
+      if (!mounted || seq != _loadSeq) return;
+      setState(() {
+        _bootstrap = data;
+        if (!_isGuest) {
+          _applyCustomerFromBootstrap(data);
+        }
+        final merchants = ((data['merchants'] as List?) ?? [])
+            .where((m) => m['merchant_type'] != 'pharmacy')
+            .toList();
+        if (_quickMerchantId.isEmpty && merchants.isNotEmpty) {
+          _quickMerchantId = merchants.first['id'] as String;
+        }
+        _loading = false;
+      });
       _refreshStorefrontCategories();
     } catch (e) {
-      if (mounted) {
-        setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-        );
-      }
+      if (!mounted || seq != _loadSeq) return;
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
     }
   }
 
@@ -1038,16 +1142,67 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     _persistNavState(tabIndex: 0);
   }
 
+  void _openStorePage(String merchantId, [String merchantName = '']) {
+    final cleanId = merchantId.trim();
+    if (cleanId.isEmpty || !mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StorePageScreen(
+          api: api,
+          merchantId: cleanId,
+          initialStoreName: merchantName.isNotEmpty ? merchantName : null,
+          cart: _quickCart,
+          getCartCount: () => _quickCart.values.fold<int>(0, (sum, q) => sum + q),
+          onAddProduct: _onQuickAdd,
+          onOpenCart: () {
+            Navigator.of(context).popUntil((r) => r.isFirst);
+            _switchTab(3);
+          },
+          onSelectBrand: (brand) {
+            Navigator.of(context).popUntil((r) => r.isFirst);
+            _selectStorefrontBrand(brand);
+          },
+          onOpenStore: (mId, mName) => _openStorePage(mId, mName),
+          isGuest: _isGuest,
+          onRequireAuth: _isGuest ? _openAuthFromGuest : null,
+        ),
+      ),
+    );
+  }
+
+  void _openFollowedStores() {
+    if (!mounted) return;
+    if (_isGuest) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('يرجى تسجيل الدخول لمتابعة المتاجر وعرض المفضلة')),
+      );
+      _openAuthFromGuest();
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FollowedStoresScreen(
+          api: api,
+          cart: _quickCart,
+          onAddProduct: _onQuickAdd,
+          onOpenStore: (mId, mName) => _openStorePage(mId, mName),
+        ),
+      ),
+    );
+  }
+
   void _selectStorefrontMerchant(String merchantId, String merchantName) {
+    final cleanId = merchantId.trim();
+    if (cleanId.isNotEmpty) {
+      _openStorePage(cleanId, merchantName);
+      return;
+    }
     setState(() {
-      _storefrontMerchantId = merchantId;
-      _storefrontMerchantName = merchantName;
-      _storefrontCategoryId = '';
-      _storefrontCategoryName = '';
-      _storefrontBrand = '';
-      _index = 0;
+      _storefrontMerchantId = '';
+      _storefrontMerchantName = '';
     });
-    _persistNavState(tabIndex: 0);
   }
 
   void _clearStorefrontFilters() {
@@ -1577,6 +1732,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                   _pendingPushTap = null;
                   WidgetsBinding.instance.addPostFrameCallback((_) => _handlePushNotificationTap(pending));
                 }
+                if (_pendingDeepLinkUrl != null) {
+                  final link = _pendingDeepLinkUrl!;
+                  _pendingDeepLinkUrl = null;
+                  WidgetsBinding.instance.addPostFrameCallback((_) => _handleIncomingUrl(link));
+                }
               }
             },
           ),
@@ -1709,6 +1869,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         selectedZoneId: _selectedZoneId,
         addressLandmark: _addressLandmark,
         onOpenTripChat: _openTripChat,
+        onOpenStore: _openStorePage,
       ),
       CartScreen(
         api: api,
@@ -1778,6 +1939,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         },
         onOpenNotifications: _openNotifications,
         onOpenOffers: () => _switchTab(5),
+        onOpenFollowedStores: _openFollowedStores,
         onOpenOrderChat: _openOrderChat,
         onOpenTripChat: _openTripChat,
         onRateCaptain: _showCaptainRatingDialog,
@@ -1872,8 +2034,24 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
                     ),
                   ],
                 ),
-          body: _loading
-              ? const Center(child: CircularProgressIndicator())
+          body: (_loading && _bootstrap.isEmpty)
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(),
+                      const SizedBox(height: 16),
+                      TextButton.icon(
+                        onPressed: () {
+                          api.resetConnectionPool();
+                          _loadData();
+                        },
+                        icon: const Icon(Icons.refresh_rounded, size: 18),
+                        label: const Text('إعادة المحاولة'),
+                      ),
+                    ],
+                  ),
+                )
               : Column(
                   children: [
                     if (_isAuthenticated && !_isGuest && !_isEmailVerified && _customerEmail.trim().isNotEmpty)
@@ -2080,6 +2258,15 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               onTap: () {
                 Navigator.pop(context);
                 _switchTab(2, serviceSubView: 'stores');
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.favorite_rounded, color: Color(0xFFA92224)),
+              title: const Text('المتاجر المفضلة والمتابعة', style: TextStyle(fontWeight: FontWeight.w600)),
+              onTap: () {
+                Navigator.pop(context);
+                _openFollowedStores();
               },
             ),
             ListTile(
