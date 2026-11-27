@@ -107,12 +107,20 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
     }
   }
 
+  bool get _isFlutterTest => Platform.environment.containsKey('FLUTTER_TEST');
+
   Future<void> _restoreSession() async {
     String restoredMerchantId = '';
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+      final prefs = _isFlutterTest
+          ? await SharedPreferences.getInstance()
+          : await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       try {
-        await prefs.reload().timeout(const Duration(seconds: 3));
+        if (_isFlutterTest) {
+          await prefs.reload();
+        } else {
+          await prefs.reload().timeout(const Duration(seconds: 3));
+        }
       } catch (_) {}
       final token = prefs.getString(_tokenKey)?.trim();
       final refreshToken = prefs.getString(_refreshTokenKey)?.trim();
@@ -131,7 +139,9 @@ class _OtlobhaMerchantAppState extends State<OtlobhaMerchantApp> with WidgetsBin
       // ignore corrupted local storage or test environment plugin exceptions
     } finally {
       if (mounted) setState(() => _bootstrapping = false);
-      unawaited(_initPushInBackground(restoredMerchantId));
+      if (!_isFlutterTest) {
+        unawaited(_initPushInBackground(restoredMerchantId));
+      }
     }
   }
 

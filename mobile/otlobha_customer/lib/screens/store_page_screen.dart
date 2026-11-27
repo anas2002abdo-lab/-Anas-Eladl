@@ -1410,7 +1410,10 @@ class _StorePageScreenState extends State<StorePageScreen> with SingleTickerProv
                           backgroundColor: const Color(0xFFFFF7ED),
                           foregroundColor: _brandRed,
                           child: Text(
-                            ((rev['customer_name_display'] ?? 'ع').toString()).characters.first,
+                            () {
+                              final dn = (rev['customer_name_display'] ?? '').toString().trim();
+                              return dn.isNotEmpty ? String.fromCharCode(dn.runes.first) : 'ع';
+                            }(),
                             style: const TextStyle(fontWeight: FontWeight.w900),
                           ),
                         ),

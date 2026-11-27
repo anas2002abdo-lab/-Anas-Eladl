@@ -450,26 +450,31 @@ if manifest_path.exists():
         )
         m_text = m_text.replace("</activity>", click_filter, 1)
 
-    if (not is_captain_app and not is_merchant_app) and 'android:scheme="otlobha"' not in m_text and "</activity>" in m_text:
+    if (not is_captain_app and not is_merchant_app) and "</activity>" in m_text:
         from urllib.parse import urlparse
         parsed_base = urlparse(os.environ.get("BG_API_BASE_URL", "https://ais-dev-xcfo2sxsvz6eimo6tdzhrg-565346403151.europe-west2.run.app"))
         store_host = parsed_base.hostname or "otlobha.app"
-        deep_link_filters = (
-            '            <intent-filter>\n'
-            '                <action android:name="android.intent.action.VIEW" />\n'
-            '                <category android:name="android.intent.category.DEFAULT" />\n'
-            '                <category android:name="android.intent.category.BROWSABLE" />\n'
-            '                <data android:scheme="otlobha" android:host="store" />\n'
-            '            </intent-filter>\n'
-            '            <intent-filter>\n'
-            '                <action android:name="android.intent.action.VIEW" />\n'
-            '                <category android:name="android.intent.category.DEFAULT" />\n'
-            '                <category android:name="android.intent.category.BROWSABLE" />\n'
-            f'                <data android:scheme="https" android:host="{store_host}" android:pathPrefix="/store/" />\n'
-            '            </intent-filter>\n'
-            '        </activity>'
-        )
-        m_text = m_text.replace("</activity>", deep_link_filters, 1)
+        deep_link_blocks = []
+        if 'android:scheme="otlobha"' not in m_text:
+            deep_link_blocks.append(
+                '            <intent-filter>\n'
+                '                <action android:name="android.intent.action.VIEW" />\n'
+                '                <category android:name="android.intent.category.DEFAULT" />\n'
+                '                <category android:name="android.intent.category.BROWSABLE" />\n'
+                '                <data android:scheme="otlobha" android:host="store" />\n'
+                '            </intent-filter>'
+            )
+        if 'android:pathPrefix="/store/"' not in m_text:
+            deep_link_blocks.append(
+                '            <intent-filter>\n'
+                '                <action android:name="android.intent.action.VIEW" />\n'
+                '                <category android:name="android.intent.category.DEFAULT" />\n'
+                '                <category android:name="android.intent.category.BROWSABLE" />\n'
+                f'                <data android:scheme="https" android:host="{store_host}" android:pathPrefix="/store/" />\n'
+                '            </intent-filter>'
+            )
+        if deep_link_blocks:
+            m_text = m_text.replace("</activity>", "\n".join(deep_link_blocks) + "\n        </activity>", 1)
 
     if "</application>" in m_text:
         bg_components_xml = ""

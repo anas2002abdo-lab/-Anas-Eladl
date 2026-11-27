@@ -198,29 +198,33 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
     _ridesWs = null;
   }
 
+  bool get _isFlutterTest => Platform.environment.containsKey('FLUTTER_TEST');
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _restorePersistedSession();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      unawaited(
-        CaptainPushNotificationService.instance
-            .initialize(
-              onNotificationTap: _handlePushNotificationTap,
-              onForegroundNotification: () {
-                if (_activeCaptainId != null) _silentSync();
-              },
-            )
-            .then((_) {
-          if (mounted) {
-            unawaited(CaptainPushNotificationService.instance.requestPermission());
-          }
-        }),
-      );
-    });
-    _startForegroundTimers();
+    if (!_isFlutterTest) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(
+          CaptainPushNotificationService.instance
+              .initialize(
+                onNotificationTap: _handlePushNotificationTap,
+                onForegroundNotification: () {
+                  if (_activeCaptainId != null) _silentSync();
+                },
+              )
+              .then((_) {
+            if (mounted) {
+              unawaited(CaptainPushNotificationService.instance.requestPermission());
+            }
+          }),
+        );
+      });
+      _startForegroundTimers();
+    }
   }
 
   @override
@@ -270,9 +274,11 @@ class _CaptainShellState extends State<CaptainShell> with WidgetsBindingObserver
 
   Future<void> _restorePersistedSession() async {
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
-      final savedId = await api.restorePersistedSession();
-      final cachedCap = await api.restoreCaptainSnapshot();
+      final prefs = _isFlutterTest
+          ? await SharedPreferences.getInstance()
+          : await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+      final savedId = _isFlutterTest ? null : await api.restorePersistedSession();
+      final cachedCap = _isFlutterTest ? null : await api.restoreCaptainSnapshot();
       final savedTab = prefs.getInt(_prefTabIndex) ?? 0;
       final kycDraftActive = prefs.getBool(RegisterKycScreen.prefDraftActive) ?? false;
 

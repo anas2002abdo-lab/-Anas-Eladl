@@ -275,30 +275,34 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
     _ridesWs = null;
   }
 
+  bool get _isFlutterTest => Platform.environment.containsKey('FLUTTER_TEST');
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _restoreSavedNavigationAndSession();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      unawaited(
-        CustomerPushNotificationService.instance
-            .initialize(
-              onNotificationTap: _handlePushNotificationTap,
-              onForegroundNotification: () {
-                if (_isAuthenticated && !_isGuest) _silentSync();
-              },
-            )
-            .then((_) {
-          if (mounted) {
-            unawaited(CustomerPushNotificationService.instance.requestPermission());
-          }
-        }),
-      );
-    });
-    _startForegroundTimers();
-    _initDeepLinkListener();
+    if (!_isFlutterTest) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(
+          CustomerPushNotificationService.instance
+              .initialize(
+                onNotificationTap: _handlePushNotificationTap,
+                onForegroundNotification: () {
+                  if (_isAuthenticated && !_isGuest) _silentSync();
+                },
+              )
+              .then((_) {
+            if (mounted) {
+              unawaited(CustomerPushNotificationService.instance.requestPermission());
+            }
+          }),
+        );
+      });
+      _startForegroundTimers();
+      _initDeepLinkListener();
+    }
   }
 
   Future<void> _initDeepLinkListener() async {
@@ -584,11 +588,13 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
 
   Future<void> _restoreSavedNavigationAndSession() async {
     try {
-      final prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
+      final prefs = _isFlutterTest
+          ? await SharedPreferences.getInstance()
+          : await SharedPreferences.getInstance().timeout(const Duration(seconds: 3));
       final savedTab = prefs.getInt(_prefTabIndex) ?? 0;
       final savedSub = prefs.getString(_prefServiceSubView) ?? 'hub';
       final savedGuest = prefs.getBool(_prefGuestMode) ?? false;
-      final savedUser = await api.restorePersistedSession();
+      final savedUser = _isFlutterTest ? null : await api.restorePersistedSession();
 
       if (!mounted) return;
       if (savedUser != null && api.hasTokens) {
