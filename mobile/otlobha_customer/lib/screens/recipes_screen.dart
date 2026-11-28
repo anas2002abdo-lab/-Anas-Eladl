@@ -285,7 +285,7 @@ class _RecipesHubScreenState extends State<RecipesHubScreen> {
   }
 
   Widget _buildRecipeCard(Map<String, dynamic> recipe) {
-    final imgUrl = widget.api.resolveMediaUrl((recipe['image_url'] ?? '').toString());
+    final imgUrl = OtlobhaCustomerApi.resolveMediaUrl((recipe['image_url'] ?? '').toString());
     final title = (recipe['title_ar'] ?? '').toString();
     final desc = (recipe['description_ar'] ?? '').toString();
     final source = (recipe['source_name'] ?? 'مطبخ اطلبها').toString();
@@ -616,7 +616,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
           picked ??= alts.isNotEmpty ? alts.first : null;
 
           final defaultQtyRaw = double.tryParse('${picked?['default_qty'] ?? picked?['default_quantity'] ?? 1}') ?? 1;
-          final defaultQty = defaultQtyRaw.ceil().clamp(1, 20);
+          final defaultQty = defaultQtyRaw.ceil().clamp(1, 20).toInt();
           _selections[ingId] = _IngredientSelection(
             productId: picked != null ? (picked['product_id'] ?? '').toString() : null,
             qty: defaultQty,
@@ -697,7 +697,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   }
 
   String _formatTimer(int seconds) {
-    final s = seconds.clamp(0, 86400);
+    final s = seconds.clamp(0, 86400).toInt();
     final m = (s ~/ 60).toString().padLeft(2, '0');
     final r = (s % 60).toString().padLeft(2, '0');
     return '$m:$r';
@@ -788,7 +788,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   }
 
   Widget _buildHeroHeader(Map<String, dynamic> recipe) {
-    final imgUrl = widget.api.resolveMediaUrl((recipe['image_url'] ?? '').toString());
+    final imgUrl = OtlobhaCustomerApi.resolveMediaUrl((recipe['image_url'] ?? '').toString());
     final videoUrl = (recipe['video_url'] ?? '').toString().trim();
     final title = (recipe['title_ar'] ?? '').toString();
     final desc = (recipe['description_ar'] ?? '').toString();
@@ -1175,7 +1175,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
     final isOffer = prod['is_offer'] == true;
     final basePrice = double.tryParse('${prod['base_price'] ?? 0}') ?? 0;
     final effPrice = double.tryParse('${prod['effective_price'] ?? basePrice}') ?? basePrice;
-    final imgUrl = widget.api.resolveMediaUrl((prod['image_url'] ?? '').toString());
+    final imgUrl = OtlobhaCustomerApi.resolveMediaUrl((prod['image_url'] ?? '').toString());
     final storeName = (prod['merchant_name'] ?? '').toString();
     final sizeLabel = (prod['size_label'] ?? '').toString();
 
@@ -1339,7 +1339,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                           icon: Icons.add_rounded,
                           onTap: () {
                             setState(() {
-                              _selections[ingId] = sel.copyWith(qty: (sel.qty + 1).clamp(1, 20));
+                              _selections[ingId] = sel.copyWith(qty: (sel.qty + 1).clamp(1, 20).toInt());
                             });
                           },
                         ),
@@ -1396,7 +1396,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
         .toList();
     final total = steps.length;
     final done = _completedSteps.length;
-    final ratio = total > 0 ? (done / total).clamp(0.0, 1.0) : 0.0;
+    final ratio = total > 0 ? (done / total).clamp(0.0, 1.0).toDouble() : 0.0;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),

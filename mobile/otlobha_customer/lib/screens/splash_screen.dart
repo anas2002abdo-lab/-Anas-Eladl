@@ -114,7 +114,7 @@ class _OtlobhaSplashScreenState extends State<OtlobhaSplashScreen>
     final media = MediaQuery.of(context);
     final reduceMotion = media.disableAnimations;
     final shortestSide = media.size.shortestSide;
-    final logoSize = (shortestSide * 0.54).clamp(172.0, 236.0);
+    final logoSize = (shortestSide * 0.54).clamp(172.0, 236.0).toDouble();
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
@@ -129,12 +129,12 @@ class _OtlobhaSplashScreenState extends State<OtlobhaSplashScreen>
         child: AnimatedBuilder(
           animation: _controller,
           builder: (context, child) {
-            final exitAlpha = _exitOpacity.value.clamp(0.0, 1.0);
-            final logoAlpha = reduceMotion ? 1.0 : _logoOpacity.value.clamp(0.0, 1.0);
+            final exitAlpha = _exitOpacity.value.clamp(0.0, 1.0).toDouble();
+            final logoAlpha = reduceMotion ? 1.0 : _logoOpacity.value.clamp(0.0, 1.0).toDouble();
             final logoZoom = reduceMotion ? 1.0 : _logoScale.value;
-            final lineAlpha = reduceMotion ? 1.0 : _dividerOpacity.value.clamp(0.0, 1.0);
+            final lineAlpha = reduceMotion ? 1.0 : _dividerOpacity.value.clamp(0.0, 1.0).toDouble();
             final lineScale = reduceMotion ? 1.0 : _dividerScaleX.value;
-            final textAlpha = reduceMotion ? 1.0 : _taglineOpacity.value.clamp(0.0, 1.0);
+            final textAlpha = reduceMotion ? 1.0 : _taglineOpacity.value.clamp(0.0, 1.0).toDouble();
             final textShiftY = reduceMotion ? 0.0 : _taglineOffsetY.value;
 
             return IgnorePointer(
@@ -195,7 +195,7 @@ class _OtlobhaSplashScreenState extends State<OtlobhaSplashScreen>
                                   child: Transform(
                                     alignment: Alignment.center,
                                     transform: Matrix4.diagonal3Values(
-                                      lineScale.clamp(0.01, 1.0),
+                                      lineScale.clamp(0.01, 1.0).toDouble(),
                                       1.0,
                                       1.0,
                                     ),

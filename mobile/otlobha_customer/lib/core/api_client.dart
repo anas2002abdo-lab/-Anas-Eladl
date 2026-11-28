@@ -1959,7 +1959,7 @@ class OtlobhaCustomerApi {
     }
     final res = await _execute(
       () => http.get(
-        _apiUri('/api/recipes', qp.isEmpty ? null : qp),
+        _apiUri('/api/recipes', queryParameters: qp.isEmpty ? null : qp),
         headers: _headers(includeAuth: false),
       ),
     );
