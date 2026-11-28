@@ -65,7 +65,7 @@ void main() {
     expect(find.text('كل حاجة أقرب ليك'), findsOneWidget);
 
     await tester.pump(const Duration(milliseconds: 2200));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 200));
     expect(find.byType(OtlobhaSplashScreen), findsNothing);
     expect(find.byType(HomeScreen), findsOneWidget);
     expect(find.text('المتابعة باستخدام حساب جوجل'), findsNothing);

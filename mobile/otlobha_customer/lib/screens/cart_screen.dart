@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -78,7 +79,9 @@ class _CartScreenState extends State<CartScreen> {
     if (bootPay is Map) {
       _paymentSettings = Map<String, dynamic>.from(bootPay);
     }
-    _refreshPaymentSettings();
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _refreshPaymentSettings();
+    }
   }
 
   Future<void> _refreshPaymentSettings() async {

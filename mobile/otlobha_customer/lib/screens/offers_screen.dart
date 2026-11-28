@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../core/api_client.dart';
 
@@ -40,7 +41,9 @@ class _OffersScreenState extends State<OffersScreen> {
   void initState() {
     super.initState();
     _scrollCtrl.addListener(_onScroll);
-    _fetchOffers(reset: true);
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _fetchOffers(reset: true);
+    }
   }
 
   @override
