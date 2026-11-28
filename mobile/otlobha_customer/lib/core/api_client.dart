@@ -1976,6 +1976,48 @@ class OtlobhaCustomerApi {
     );
     return _decode(res, endpointHint: '/api/recipes/$recipeId');
   }
+
+  Future<Map<String, dynamic>> getMainCategories() async {
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/main-categories'),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/main-categories');
+  }
+
+  Future<Map<String, dynamic>> exploreMainCategory(
+    String mainCategoryId, {
+    String? merchantId,
+    String? internalCategoryId,
+    String? q,
+    int page = 1,
+    int limit = 24,
+  }) async {
+    final enc = Uri.encodeComponent(mainCategoryId);
+    final qp = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+    };
+    if (merchantId != null && merchantId.trim().isNotEmpty) {
+      qp['merchant_id'] = merchantId.trim();
+    }
+    if (internalCategoryId != null && internalCategoryId.trim().isNotEmpty) {
+      qp['internal_category_id'] = internalCategoryId.trim();
+    }
+    if (q != null && q.trim().isNotEmpty) {
+      qp['q'] = q.trim();
+    }
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/main-categories/$enc/explore', queryParameters: qp),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/main-categories/$mainCategoryId/explore');
+  }
 }
+
 
 

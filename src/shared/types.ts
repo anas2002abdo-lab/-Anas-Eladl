@@ -1047,3 +1047,70 @@ export interface RecipeUpsertPayload {
   }>;
 }
 
+export interface PlatformMainCategory {
+  id: string;
+  slug: string;
+  name_ar: string;
+  name_en: string;
+  description_ar: string;
+  icon_key: string;
+  image_url: string;
+  accent_color: string;
+  sort_order: number;
+  is_active: boolean;
+  is_general: boolean;
+  merchants_count: number;
+  products_count: number;
+  internal_links_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface MainCategoryExploreMerchant {
+  id: string;
+  business_name_ar: string;
+  business_name_en: string;
+  merchant_type: string;
+  branch_name: string;
+  zone_name: string;
+  image_url: string;
+  working_hours: string;
+  is_open_now: boolean;
+  is_open: boolean;
+  rating_avg: number;
+  rating_count: number;
+  products_count: number;
+  include_all_categories: boolean;
+}
+
+export interface MainCategoryInternalNode {
+  id: string;
+  parent_id: string | null;
+  original_parent_id: string | null;
+  level: number;
+  name_ar: string;
+  name_en: string;
+  image_url: string;
+  sort_order: number;
+  full_path_ar: string;
+  products_count: number;
+  children_count: number;
+}
+
+export interface MainCategoryExploreResponse {
+  main_category: PlatformMainCategory;
+  selected_merchant_id: string | null;
+  selected_internal_category_id: string | null;
+  merchants: MainCategoryExploreMerchant[];
+  internal_categories: MainCategoryInternalNode[];
+  products: StorefrontProductCard[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+    has_more: boolean;
+  };
+}
+
+

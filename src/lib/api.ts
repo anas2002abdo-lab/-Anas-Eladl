@@ -1818,7 +1818,214 @@ export const api = {
       { cache: 'no-store' }
     );
   },
+
+  // =========================================================================
+  // Platform Main Categories & Store Internal Categories System APIs
+  // =========================================================================
+  getMainCategories: () =>
+    request<{ main_categories: import('../shared/types').PlatformMainCategory[] }>(
+      '/api/main-categories',
+      { cache: 'no-store' }
+    ),
+  exploreMainCategory: (
+    mainCategoryId: string,
+    params?: {
+      merchant_id?: string | null;
+      internal_category_id?: string | null;
+      q?: string;
+      page?: number;
+      limit?: number;
+    }
+  ) => {
+    const qs = new URLSearchParams();
+    if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
+    if (params?.internal_category_id) qs.set('internal_category_id', params.internal_category_id);
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<import('../shared/types').MainCategoryExploreResponse>(
+      `/api/main-categories/${encodeURIComponent(mainCategoryId)}/explore${suffix}`,
+      { cache: 'no-store' }
+    );
+  },
+  adminGetMainCategories: () =>
+    request<{
+      main_categories: import('../shared/types').PlatformMainCategory[];
+      summary: {
+        total_main_categories: number;
+        active_main_categories: number;
+        total_products: number;
+        assigned_products: number;
+        unassigned_in_general: number;
+        total_merchants: number;
+        total_internal_categories: number;
+      };
+    }>('/api/admin/main-categories', { cache: 'no-store' }),
+  adminCreateMainCategory: (body: {
+    name_ar: string;
+    name_en?: string;
+    description_ar?: string;
+    icon_key?: string;
+    image_url?: string;
+    accent_color?: string;
+    sort_order?: number;
+    is_active?: boolean;
+  }) =>
+    request<{ ok: boolean; main_category: import('../shared/types').PlatformMainCategory }>(
+      '/api/admin/main-categories',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+  adminUpdateMainCategory: (
+    id: string,
+    body: Partial<{
+      name_ar: string;
+      name_en: string;
+      description_ar: string;
+      icon_key: string;
+      image_url: string;
+      accent_color: string;
+      sort_order: number;
+      is_active: boolean;
+    }>
+  ) =>
+    request<{ ok: boolean; main_category: import('../shared/types').PlatformMainCategory }>(
+      `/api/admin/main-categories/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }
+    ),
+  adminReorderMainCategories: (ordered_ids: string[]) =>
+    request<{ ok: boolean; updated_count: number }>('/api/admin/main-categories/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ ordered_ids }),
+    }),
+  adminDeleteMainCategory: (id: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/admin/main-categories/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
+  adminGetMainCategoryLinks: (id: string) =>
+    request<{
+      main_category: import('../shared/types').PlatformMainCategory;
+      merchant_links: Array<{
+        id: string;
+        main_category_id: string;
+        merchant_id: string;
+        include_all_categories: boolean;
+        sort_order: number;
+        merchant_name: string;
+        merchant_image: string;
+        merchant_is_open: boolean;
+      }>;
+      internal_links: Array<{
+        id: string;
+        main_category_id: string;
+        merchant_id: string;
+        internal_category_id: string;
+        include_descendants: boolean;
+        link_type: 'include' | 'exclude';
+        category_name_ar: string;
+        category_full_path_ar: string;
+        category_level: number;
+        merchant_name: string;
+      }>;
+      product_links: Array<{
+        product_id: string;
+        name_ar: string;
+        image_url: string;
+        merchant_id: string;
+        merchant_name: string;
+        category_id: string;
+        category_name: string;
+        base_price: number;
+        sale_price: number | null;
+      }>;
+      resolved_merchants_count: number;
+      resolved_products_count: number;
+    }>(`/api/admin/main-categories/${encodeURIComponent(id)}/links`, { cache: 'no-store' }),
+  adminLinkMerchantToMainCategory: (
+    mainCategoryId: string,
+    body: { merchant_id: string; include_all_categories?: boolean; sort_order?: number }
+  ) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/admin/main-categories/${encodeURIComponent(mainCategoryId)}/merchant-links`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  adminUnlinkMerchantFromMainCategory: (mainCategoryId: string, merchantId: string) =>
+    request<{ ok: boolean }>(
+      `/api/admin/main-categories/${encodeURIComponent(mainCategoryId)}/merchant-links/${encodeURIComponent(merchantId)}`,
+      { method: 'DELETE' }
+    ),
+  adminLinkInternalCategoryToMainCategory: (
+    mainCategoryId: string,
+    body: {
+      internal_category_id: string;
+      merchant_id?: string;
+      include_descendants?: boolean;
+      link_type?: 'include' | 'exclude';
+    }
+  ) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/admin/main-categories/${encodeURIComponent(mainCategoryId)}/category-links`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  adminUnlinkInternalCategoryFromMainCategory: (mainCategoryId: string, linkId: string) =>
+    request<{ ok: boolean }>(
+      `/api/admin/main-categories/${encodeURIComponent(mainCategoryId)}/category-links/${encodeURIComponent(linkId)}`,
+      { method: 'DELETE' }
+    ),
+  adminUpdateMainCategoryProductLinks: (
+    mainCategoryId: string,
+    body: { product_ids?: string[]; product_id?: string; action?: 'add' | 'remove' }
+  ) =>
+    request<{ ok: boolean; action: string; count: number }>(
+      `/api/admin/main-categories/${encodeURIComponent(mainCategoryId)}/product-links`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  adminSearchMainCategoryProducts: (params?: {
+    q?: string;
+    merchant_id?: string;
+    category_id?: string;
+    unassigned_only?: boolean;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    if (params?.merchant_id) qs.set('merchant_id', params.merchant_id);
+    if (params?.category_id) qs.set('category_id', params.category_id);
+    if (params?.unassigned_only) qs.set('unassigned_only', '1');
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{
+      products: Array<{
+        id: string;
+        name_ar: string;
+        image_url: string;
+        merchant_id: string;
+        merchant_name: string;
+        category_id: string;
+        category_name: string;
+        base_price: number;
+        sale_price: number | null;
+        direct_main_category_ids: string[];
+        resolved_main_category_ids: string[];
+        in_general_only: boolean;
+      }>;
+      total: number;
+    }>(`/api/admin/main-categories/catalog/products${suffix}`, { cache: 'no-store' });
+  },
+  adminSetProductMainCategories: (productId: string, main_category_ids: string[]) =>
+    request<{ ok: boolean; product_id: string; main_category_ids: string[] }>(
+      `/api/admin/products/${encodeURIComponent(productId)}/main-categories`,
+      { method: 'PUT', body: JSON.stringify({ main_category_ids }) }
+    ),
 };
+
 
 
 

@@ -48,6 +48,7 @@ import {
 } from './src/server/storesReviewsSystem.ts';
 import { registerMerchantOnboardingRoutes } from './src/server/merchantOnboarding.ts';
 import { registerRecipesRoutes } from './src/server/recipesSystem.ts';
+import { registerMainCategoriesRoutes } from './src/server/mainCategoriesSystem.ts';
 import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
@@ -13629,6 +13630,9 @@ app.use('/brand-assets', express.static(path.join(process.cwd(), 'mobile', 'otlo
 
 // Register Otlobha Smart Recipes & Shop-by-Ingredients System
 registerRecipesRoutes(app);
+
+// Register Platform Main Categories & Store Internal Categories System
+registerMainCategoriesRoutes(app);
 
 async function startServer() {
   const PORT = Number(process.env.PORT || 3000);

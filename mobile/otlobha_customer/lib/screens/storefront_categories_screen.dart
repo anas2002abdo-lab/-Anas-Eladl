@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../core/api_client.dart';
 import '../widgets/storefront_product_card.dart';
@@ -39,279 +40,212 @@ class StorefrontCategoriesScreen extends StatefulWidget {
   State<StorefrontCategoriesScreen> createState() => StorefrontCategoriesScreenState();
 }
 
-class _CategoryGroupMeta {
-  final String key;
-  final String title;
-  final IconData icon;
-  final Color accent;
-  final Color bg;
-
-  const _CategoryGroupMeta({
-    required this.key,
-    required this.title,
-    required this.icon,
-    required this.accent,
-    required this.bg,
-  });
-}
-
 class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> {
-  static const List<_CategoryGroupMeta> _groups = [
-    _CategoryGroupMeta(
-      key: 'groceries',
-      title: 'المقاضي والمواد الغذائية',
-      icon: Icons.shopping_basket_rounded,
-      accent: Color(0xFFA92224),
-      bg: Color(0xFFFEF2F2),
-    ),
-    _CategoryGroupMeta(
-      key: 'fresh',
-      title: 'المنتجات الطازجة والمخبوزات',
-      icon: Icons.eco_rounded,
-      accent: Color(0xFF047857),
-      bg: Color(0xFFECFDF5),
-    ),
-    _CategoryGroupMeta(
-      key: 'drinks',
-      title: 'المشروبات والقهوة والشاي',
-      icon: Icons.local_cafe_rounded,
-      accent: Color(0xFFD97706),
-      bg: Color(0xFFFFFBEB),
-    ),
-    _CategoryGroupMeta(
-      key: 'home_care',
-      title: 'المنظفات والعناية بالمنزل',
-      icon: Icons.cleaning_services_rounded,
-      accent: Color(0xFF0284C7),
-      bg: Color(0xFFF0F9FF),
-    ),
-    _CategoryGroupMeta(
-      key: 'kitchen',
-      title: 'مستلزمات المطبخ والمنزل',
-      icon: Icons.kitchen_rounded,
-      accent: Color(0xFF7C3AED),
-      bg: Color(0xFFF5F3FF),
-    ),
-    _CategoryGroupMeta(
-      key: 'other',
-      title: 'أقسام أخرى والصيدلية',
-      icon: Icons.grid_view_rounded,
-      accent: Color(0xFF475569),
-      bg: Color(0xFFF1F5F9),
-    ),
-  ];
+  // Step 1: Platform Main Categories
+  List<Map<String, dynamic>> _mainCategories = [];
+  bool _loadingMainCats = false;
+  String? _mainCatsError;
 
-  // 3-level inline hierarchy:
-  // L1 (Root square cards) -> L2 (Horizontal strip 1) -> L3 (Horizontal strip 2) -> Inline products
-  String? _selectedL1Id;
-  String? _selectedL2Id;
-  String? _selectedL3Id;
+  // Step 2: Active Main Category -> Linked Merchants Strip -> Optional Selected Store -> Internal L1/L2/L3+ -> Products
+  Map<String, dynamic>? _selectedMainCat;
+  List<Map<String, dynamic>> _linkedMerchants = [];
+  String? _selectedMerchantId;
+
+  List<Map<String, dynamic>> _internalCategories = [];
+  List<String> _internalPathIds = [];
 
   List<Map<String, dynamic>> _products = [];
-  bool _loadingProducts = false;
+  bool _loadingExplore = false;
   bool _loadingMore = false;
   bool _hasMore = false;
   int _page = 1;
   int _totalProducts = 0;
-  String? _error;
+  String? _exploreError;
   int _fetchSeq = 0;
 
   final ScrollController _productsScrollCtrl = ScrollController();
-  final ScrollController _l2ScrollCtrl = ScrollController();
-  final ScrollController _l3ScrollCtrl = ScrollController();
 
   @override
   void initState() {
     super.initState();
     _productsScrollCtrl.addListener(_onProductsScroll);
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      _loadMainCategories();
+    }
   }
 
   @override
   void dispose() {
     _productsScrollCtrl.removeListener(_onProductsScroll);
     _productsScrollCtrl.dispose();
-    _l2ScrollCtrl.dispose();
-    _l3ScrollCtrl.dispose();
     super.dispose();
   }
 
   /// Called by parent PopScope hardware Back button handler.
-  /// Returns true if an inline category selection was cleared back to root squares.
+  /// Steps cleanly: Internal Subcategory -> Selected Store -> Main Categories Root.
   bool handleSystemBack() {
-    if (_selectedL1Id != null) {
-      _backToRoots();
+    if (_internalPathIds.isNotEmpty) {
+      setState(() {
+        _internalPathIds = _internalPathIds.sublist(0, _internalPathIds.length - 1);
+      });
+      _fetchExplore(reset: true);
+      return true;
+    }
+    if (_selectedMerchantId != null) {
+      setState(() {
+        _selectedMerchantId = null;
+        _internalPathIds = [];
+      });
+      _fetchExplore(reset: true);
+      return true;
+    }
+    if (_selectedMainCat != null) {
+      _backToMainCategories();
       return true;
     }
     return false;
   }
 
-  /// Opens a specific category (L1, L2, or L3) directly from a push notification deep link.
+  /// Opens a platform main category (or falls back to General + internal category) from deep link.
   bool openCategoryById(String categoryId) {
     final targetId = categoryId.trim();
     if (targetId.isEmpty) return false;
-    final target = _findById(targetId);
-    if (target == null) return false;
-
-    final chain = <String>[];
-    String? curId = targetId;
-    var guard = 0;
-    while (curId != null && curId.isNotEmpty && guard < 5) {
-      guard++;
-      chain.insert(0, curId);
-      final node = _findById(curId);
-      final pid = node != null ? _parentIdOf(node) : '';
-      if (pid.isEmpty || _findById(pid) == null) break;
-      curId = pid;
+    for (final mc in _mainCategories) {
+      final id = (mc['id'] ?? '').toString();
+      final slug = (mc['slug'] ?? '').toString();
+      if (id == targetId || slug == targetId) {
+        _openMainCategory(mc);
+        return true;
+      }
     }
-
-    setState(() {
-      _selectedL1Id = chain.isNotEmpty ? chain[0] : targetId;
-      _selectedL2Id = chain.length >= 2 ? chain[1] : null;
-      _selectedL3Id = chain.length >= 3 ? chain[2] : null;
-    });
-    if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
-    _fetchCategoryProducts(targetId, reset: true);
-    return true;
+    final general = _mainCategories.cast<Map<String, dynamic>?>().firstWhere(
+          (m) => m != null && (m['is_general'] == true || m['is_general'] == 1),
+          orElse: () => null,
+        );
+    if (general != null) {
+      setState(() {
+        _selectedMainCat = general;
+        _selectedMerchantId = null;
+        _internalPathIds = [targetId];
+      });
+      _fetchExplore(reset: true);
+      return true;
+    }
+    return false;
   }
 
   void _onProductsScroll() {
     if (!_productsScrollCtrl.hasClients) return;
     final pos = _productsScrollCtrl.position;
-    if (pos.pixels >= pos.maxScrollExtent - 320 && !_loadingMore && _hasMore && !_loadingProducts) {
-      final activeId = _activeCategoryId();
-      if (activeId != null) {
-        _fetchCategoryProducts(activeId, reset: false);
-      }
+    if (pos.pixels >= pos.maxScrollExtent - 320 &&
+        !_loadingMore &&
+        _hasMore &&
+        !_loadingExplore &&
+        _selectedMainCat != null) {
+      _fetchExplore(reset: false);
     }
   }
 
-  String _idOf(Map<String, dynamic> c) => (c['id'] ?? '').toString().trim();
-
-  String _parentIdOf(Map<String, dynamic> c) => (c['parent_id'] ?? '').toString().trim();
-
-  Map<String, dynamic>? _findById(String? id) {
-    if (id == null || id.isEmpty) return null;
-    for (final c in widget.categories) {
-      if (_idOf(c) == id) return c;
+  Future<void> _loadMainCategories() async {
+    if (mounted) {
+      setState(() {
+        _loadingMainCats = true;
+        _mainCatsError = null;
+      });
     }
-    return null;
+    try {
+      final res = await widget.api.getMainCategories();
+      if (!mounted) return;
+      final list = ((res['main_categories'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      setState(() {
+        _mainCategories = list;
+        _loadingMainCats = false;
+        _mainCatsError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingMainCats = false;
+        _mainCatsError = e.toString().replaceFirst('Exception: ', '');
+      });
+    }
   }
 
-  List<Map<String, dynamic>> _childrenOf(String parentId) {
-    return widget.categories.where((c) => _parentIdOf(c) == parentId).toList();
-  }
-
-  List<Map<String, dynamic>> _rootCategories() {
-    final ids = widget.categories.map(_idOf).toSet();
-    return widget.categories.where((c) {
-      final pid = _parentIdOf(c);
-      return pid.isEmpty || !ids.contains(pid);
-    }).toList();
-  }
-
-  String? _activeCategoryId() => _selectedL3Id ?? _selectedL2Id ?? _selectedL1Id;
-
-  String _resolveGroupKey(Map<String, dynamic> c) {
-    final explicit = (c['group_key'] ?? '').toString().trim().toLowerCase();
-    if (_groups.any((g) => g.key == explicit)) return explicit;
-    final name = '${c['name_ar'] ?? ''} ${c['full_path_ar'] ?? ''}'.toLowerCase();
-    if (name.contains('خضار') ||
-        name.contains('فاكه') ||
-        name.contains('طازج') ||
-        name.contains('مخبوز') ||
-        name.contains('لحوم') ||
-        name.contains('دواجن') ||
-        name.contains('ألبان') ||
-        name.contains('جبن')) {
-      return 'fresh';
-    }
-    if (name.contains('مشروب') ||
-        name.contains('قهو') ||
-        name.contains('شاي') ||
-        name.contains('عصير') ||
-        name.contains('مياه')) {
-      return 'drinks';
-    }
-    if (name.contains('منظف') ||
-        name.contains('عناي') ||
-        name.contains('تنظيف') ||
-        name.contains('غسيل') ||
-        name.contains('شخصي')) {
-      return 'home_care';
-    }
-    if (name.contains('مطبخ') || name.contains('أواني') || name.contains('أدوات')) {
-      return 'kitchen';
-    }
-    if (name.contains('سوبر') ||
-        name.contains('مقاض') ||
-        name.contains('غذائ') ||
-        name.contains('بقال') ||
-        name.contains('معلب') ||
-        name.contains('حلويات') ||
-        name.contains('سناكس')) {
-      return 'groceries';
-    }
-    return 'other';
-  }
-
-  void _selectL1(Map<String, dynamic> cat) {
-    final id = _idOf(cat);
-    if (id.isEmpty) return;
+  void _openMainCategory(Map<String, dynamic> mc) {
     setState(() {
-      _selectedL1Id = id;
-      _selectedL2Id = null;
-      _selectedL3Id = null;
-    });
-    if (_l2ScrollCtrl.hasClients) _l2ScrollCtrl.jumpTo(0);
-    if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
-    _fetchCategoryProducts(id, reset: true);
-  }
-
-  void _selectL2(String? l2Id) {
-    final l1Id = _selectedL1Id;
-    if (l1Id == null) return;
-    setState(() {
-      _selectedL2Id = l2Id;
-      _selectedL3Id = null;
-    });
-    if (_l3ScrollCtrl.hasClients) _l3ScrollCtrl.jumpTo(0);
-    if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
-    _fetchCategoryProducts(l2Id ?? l1Id, reset: true);
-  }
-
-  void _selectL3(String? l3Id) {
-    final fallbackId = _selectedL2Id ?? _selectedL1Id;
-    if (fallbackId == null) return;
-    setState(() {
-      _selectedL3Id = l3Id;
+      _selectedMainCat = mc;
+      _selectedMerchantId = null;
+      _internalPathIds = [];
+      _linkedMerchants = [];
+      _internalCategories = [];
+      _products = [];
+      _totalProducts = 0;
+      _hasMore = false;
+      _page = 1;
+      _exploreError = null;
     });
     if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
-    _fetchCategoryProducts(l3Id ?? fallbackId, reset: true);
+    _fetchExplore(reset: true);
   }
 
-  void _backToRoots() {
+  void _backToMainCategories() {
     _fetchSeq++;
     setState(() {
-      _selectedL1Id = null;
-      _selectedL2Id = null;
-      _selectedL3Id = null;
+      _selectedMainCat = null;
+      _selectedMerchantId = null;
+      _internalPathIds = [];
+      _linkedMerchants = [];
+      _internalCategories = [];
       _products = [];
-      _loadingProducts = false;
+      _loadingExplore = false;
       _loadingMore = false;
       _hasMore = false;
       _page = 1;
       _totalProducts = 0;
-      _error = null;
+      _exploreError = null;
     });
   }
 
-  Future<void> _fetchCategoryProducts(String categoryId, {required bool reset}) async {
+  void _toggleMerchantSelection(String? merchantId) {
+    final nextId = (_selectedMerchantId == merchantId) ? null : merchantId;
+    setState(() {
+      _selectedMerchantId = nextId;
+      _internalPathIds = [];
+    });
+    if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
+    _fetchExplore(reset: true);
+  }
+
+  void _selectInternalAtDepth(int depth, String? catId) {
+    final next = _internalPathIds.take(depth).toList();
+    if (catId != null && catId.isNotEmpty) {
+      next.add(catId);
+    }
+    setState(() {
+      _internalPathIds = next;
+    });
+    if (_productsScrollCtrl.hasClients) _productsScrollCtrl.jumpTo(0);
+    _fetchExplore(reset: true);
+  }
+
+  String? get _activeInternalId =>
+      _internalPathIds.isNotEmpty ? _internalPathIds.last : null;
+
+  Future<void> _fetchExplore({required bool reset}) async {
+    final mc = _selectedMainCat;
+    if (mc == null) return;
+    final mcId = (mc['id'] ?? '').toString();
+    if (mcId.isEmpty) return;
+
     final seq = ++_fetchSeq;
     if (reset) {
       if (mounted) {
         setState(() {
-          _loadingProducts = true;
-          _error = null;
+          _loadingExplore = true;
+          _exploreError = null;
           _page = 1;
         });
       }
@@ -322,50 +256,60 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
 
     final targetPage = reset ? 1 : _page + 1;
     try {
-      final res = await widget.api.getStorefrontHome(
-        categoryId: categoryId,
+      final res = await widget.api.exploreMainCategory(
+        mcId,
+        merchantId: _selectedMerchantId,
+        internalCategoryId: _activeInternalId,
         page: targetPage,
         limit: 24,
       );
       if (!mounted || seq != _fetchSeq) return;
 
-      final rawProducts = (res['products'] as List?) ?? [];
+      final merchantsList = ((res['merchants'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final internalList = ((res['internal_categories'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final parsedProducts = ((res['products'] as List?) ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
       final pagination = res['pagination'] is Map
           ? Map<String, dynamic>.from(res['pagination'] as Map)
           : <String, dynamic>{};
 
-      final parsedProducts = rawProducts
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-
       setState(() {
+        _linkedMerchants = merchantsList;
+        _internalCategories = internalList;
         if (reset) {
           _products = parsedProducts;
         } else {
-          final existingIds = _products.map((p) => (p['id'] ?? '').toString()).toSet();
+          final seen = _products.map((p) => (p['id'] ?? '').toString()).toSet();
           for (final p in parsedProducts) {
             final pid = (p['id'] ?? '').toString();
-            if (pid.isEmpty || !existingIds.contains(pid)) {
+            if (pid.isEmpty || !seen.contains(pid)) {
               _products.add(p);
-              if (pid.isNotEmpty) existingIds.add(pid);
+              if (pid.isNotEmpty) seen.add(pid);
             }
           }
         }
         _page = targetPage;
         _hasMore = pagination['has_more'] == true;
         _totalProducts = (pagination['total'] as num?)?.toInt() ?? _products.length;
-        _loadingProducts = false;
+        _loadingExplore = false;
         _loadingMore = false;
-        _error = null;
+        _exploreError = null;
       });
     } catch (e) {
       if (!mounted || seq != _fetchSeq) return;
       setState(() {
-        _loadingProducts = false;
+        _loadingExplore = false;
         _loadingMore = false;
         if (reset) {
-          _error = e.toString().replaceFirst('Exception: ', '');
+          _exploreError = e.toString().replaceFirst('Exception: ', '');
           _products = [];
         }
       });
@@ -373,9 +317,8 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
   }
 
   Future<List<Map<String, dynamic>>> _loadMoreForPager() async {
-    final activeId = _activeCategoryId();
-    if (activeId == null || !_hasMore) return _products;
-    await _fetchCategoryProducts(activeId, reset: false);
+    if (_selectedMainCat == null || !_hasMore) return _products;
+    await _fetchExplore(reset: false);
     return List<Map<String, dynamic>>.from(_products);
   }
 
@@ -396,19 +339,96 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
     );
   }
 
+  IconData _iconForKey(String key) {
+    switch (key) {
+      case 'shopping_basket':
+        return Icons.shopping_basket_rounded;
+      case 'meat':
+        return Icons.local_fire_department_rounded;
+      case 'produce':
+        return Icons.eco_rounded;
+      case 'fish':
+        return Icons.set_meal_rounded;
+      case 'detergents':
+        return Icons.cleaning_services_rounded;
+      case 'electronics':
+        return Icons.devices_other_rounded;
+      case 'perfumes':
+        return Icons.auto_awesome_rounded;
+      case 'restaurants':
+        return Icons.restaurant_rounded;
+      case 'home':
+        return Icons.kitchen_rounded;
+      case 'clothing':
+        return Icons.checkroom_rounded;
+      default:
+        return Icons.grid_view_rounded;
+    }
+  }
+
+  Color _parseHexColor(String? hex, {Color fallback = const Color(0xFFA92224)}) {
+    final clean = (hex ?? '').trim().replaceFirst('#', '');
+    if (clean.length == 6) {
+      final val = int.tryParse('FF$clean', radix: 16);
+      if (val != null) return Color(val);
+    }
+    return fallback;
+  }
+
+  List<_InternalLevelStrip> _buildInternalLevelStrips() {
+    if (_internalCategories.isEmpty) return const [];
+    final idSet = _internalCategories.map((c) => (c['id'] ?? '').toString()).toSet();
+    final childrenByParent = <String, List<Map<String, dynamic>>>{};
+
+    for (final c in _internalCategories) {
+      final rawPid = (c['parent_id'] ?? '').toString().trim();
+      final key = (rawPid.isNotEmpty && idSet.contains(rawPid)) ? rawPid : '__root__';
+      childrenByParent.putIfAbsent(key, () => []).add(c);
+    }
+
+    final strips = <_InternalLevelStrip>[];
+    final roots = childrenByParent['__root__'] ?? const [];
+    if (roots.isEmpty) return strips;
+
+    strips.add(_InternalLevelStrip(
+      depth: 0,
+      selectedId: _internalPathIds.isNotEmpty ? _internalPathIds[0] : null,
+      items: roots,
+    ));
+
+    for (var i = 0; i < _internalPathIds.length; i++) {
+      final cur = _internalPathIds[i];
+      final kids = childrenByParent[cur] ?? const [];
+      if (kids.isNotEmpty) {
+        strips.add(_InternalLevelStrip(
+          depth: i + 1,
+          selectedId: _internalPathIds.length > i + 1 ? _internalPathIds[i + 1] : null,
+          items: kids,
+        ));
+      }
+    }
+    return strips;
+  }
+
+  Map<String, dynamic>? _findSelectedMerchant() {
+    if (_selectedMerchantId == null) return null;
+    for (final m in _linkedMerchants) {
+      if ((m['id'] ?? '').toString() == _selectedMerchantId) return m;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final selectedL1 = _findById(_selectedL1Id);
-    final l2Children = selectedL1 != null ? _childrenOf(_idOf(selectedL1)) : <Map<String, dynamic>>[];
-    final selectedL2 = _findById(_selectedL2Id);
-    final l3Children = selectedL2 != null ? _childrenOf(_idOf(selectedL2)) : <Map<String, dynamic>>[];
-    final selectedL3 = _findById(_selectedL3Id);
+    final selectedMain = _selectedMainCat;
+    final selectedMerchant = _findSelectedMerchant();
+    final levelStrips = selectedMain != null ? _buildInternalLevelStrips() : const <_InternalLevelStrip>[];
 
     return Container(
       color: const Color(0xFFF6F7F9),
       child: Column(
         children: [
-          // Top Header + Horizontal Level 2 & Level 3 Strips when a Root Category is selected
+          // Top Header + Internal Multi-Level Category Strips
           Container(
             decoration: const BoxDecoration(
               color: Colors.white,
@@ -421,12 +441,12 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                   padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
                   child: Row(
                     children: [
-                      if (selectedL1 != null) ...[
+                      if (selectedMain != null) ...[
                         Material(
                           color: const Color(0xFFF1F5F9),
                           borderRadius: BorderRadius.circular(12),
                           child: InkWell(
-                            onTap: _backToRoots,
+                            onTap: _backToMainCategories,
                             borderRadius: BorderRadius.circular(12),
                             child: Container(
                               height: 38,
@@ -456,8 +476,8 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              selectedL1 != null
-                                  ? (selectedL1['name_ar'] ?? 'القسم').toString()
+                              selectedMain != null
+                                  ? (selectedMain['name_ar'] ?? 'القسم').toString()
                                   : 'الأقسام الرئيسية',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -468,18 +488,24 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                               ),
                             ),
                             const SizedBox(height: 2),
-                            if (selectedL1 != null && selectedL2 != null)
-                              Text(
-                                selectedL3 != null
-                                    ? '${selectedL2['name_ar'] ?? ''} / ${selectedL3['name_ar'] ?? ''}'
-                                    : (selectedL2['name_ar'] ?? '').toString(),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 11.5,
-                                  color: Color(0xFFA92224),
-                                  fontWeight: FontWeight.w700,
-                                ),
+                            if (selectedMain != null && selectedMerchant != null)
+                              Row(
+                                children: [
+                                  const Icon(Icons.storefront_rounded, size: 13, color: Color(0xFFA92224)),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text(
+                                      (selectedMerchant['business_name_ar'] ?? '').toString(),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 11.5,
+                                        color: Color(0xFFA92224),
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               )
                             else
                               Row(
@@ -488,7 +514,9 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                                   const SizedBox(width: 3),
                                   Expanded(
                                     child: Text(
-                                      'التوصيل إلى ${widget.zoneName.isNotEmpty ? widget.zoneName : 'المنزلة'}',
+                                      selectedMain != null
+                                          ? '${_linkedMerchants.length} متجر · ${widget.zoneName.isNotEmpty ? widget.zoneName : 'المنزلة'}'
+                                          : 'التوصيل إلى ${widget.zoneName.isNotEmpty ? widget.zoneName : 'المنزلة'}',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
@@ -536,203 +564,521 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                   ),
                 ),
 
-                // Horizontal Scrollable Strip 1 — Level 2 Subcategories (Text only, NO squares or icons)
-                if (selectedL1 != null && l2Children.isNotEmpty)
-                  SizedBox(
-                    height: 46,
-                    child: ListView.separated(
-                      controller: _l2ScrollCtrl,
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
-                      itemCount: l2Children.length + 1,
-                      separatorBuilder: (_, __) => const SizedBox(width: 8),
-                      itemBuilder: (_, idx) {
-                        final isAll = idx == 0;
-                        final item = isAll ? null : l2Children[idx - 1];
-                        final itemId = item != null ? _idOf(item) : null;
-                        final isActive = _selectedL2Id == itemId;
-                        final label = isAll ? 'الكل' : (item?['name_ar'] ?? '').toString().trim();
-
-                        return Material(
-                          color: isActive ? const Color(0xFFA92224) : const Color(0xFFF8FAFC),
-                          borderRadius: BorderRadius.circular(10),
-                          child: InkWell(
-                            onTap: () => _selectL2(itemId),
-                            borderRadius: BorderRadius.circular(10),
-                            child: Container(
-                              alignment: Alignment.center,
-                              padding: const EdgeInsets.symmetric(horizontal: 14),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: isActive ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
-                                ),
-                              ),
-                              child: Text(
-                                label,
-                                maxLines: 1,
-                                style: TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w800,
-                                  color: isActive ? Colors.white : const Color(0xFF334155),
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-
-                // Horizontal Scrollable Strip 2 — Level 3 Subcategories directly underneath Strip 1
-                if (selectedL1 != null && selectedL2 != null && l3Children.isNotEmpty)
-                  Container(
-                    height: 44,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFFF8FAFC),
-                      border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
-                    ),
-                    child: ListView.separated(
-                      controller: _l3ScrollCtrl,
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                      itemCount: l3Children.length + 1,
-                      separatorBuilder: (_, __) => const SizedBox(width: 7),
-                      itemBuilder: (_, idx) {
-                        final isAll = idx == 0;
-                        final item = isAll ? null : l3Children[idx - 1];
-                        final itemId = item != null ? _idOf(item) : null;
-                        final isActive = _selectedL3Id == itemId;
-                        final label = isAll ? 'الكل' : (item?['name_ar'] ?? '').toString().trim();
-
-                        return Material(
-                          color: isActive ? const Color(0xFFFEF2F2) : Colors.white,
-                          borderRadius: BorderRadius.circular(9),
-                          child: InkWell(
-                            onTap: () => _selectL3(itemId),
-                            borderRadius: BorderRadius.circular(9),
-                            child: Container(
-                              alignment: Alignment.center,
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(9),
-                                border: Border.all(
-                                  color: isActive ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
-                                  width: isActive ? 1.3 : 1.0,
-                                ),
-                              ),
-                              child: Text(
-                                label,
-                                maxLines: 1,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w800,
-                                  color: isActive ? const Color(0xFFA92224) : const Color(0xFF475569),
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
+                // Multi-level internal category strips when exploring a store (or General)
+                for (final strip in levelStrips) _buildInternalLevelRow(strip),
               ],
             ),
           ),
 
-          // Body: either Level 1 Root Square Cards OR Inline Products directly below the 2 strips
+          // Main Content Body
           Expanded(
-            child: widget.categories.isEmpty
-                ? _buildEmptyCategoriesState()
-                : selectedL1 != null
-                    ? _buildInlineProductsBody(
-                        selectedL1: selectedL1,
-                        activeCategory: selectedL3 ?? selectedL2 ?? selectedL1,
-                      )
-                    : _buildRootSquareGridView(),
+            child: selectedMain != null
+                ? _buildExploreBody(selectedMain, selectedMerchant)
+                : _buildMainCategoriesGrid(),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildEmptyCategoriesState() {
-    return RefreshIndicator(
-      color: const Color(0xFFA92224),
-      onRefresh: () async {
-        if (widget.onRefreshCategories != null) {
-          await widget.onRefreshCategories!();
-        }
-      },
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(14),
-        children: [
-          _buildApprovedStoresStrip(horizontalPadding: 0),
-          const SizedBox(height: 44),
-          Center(
-            child: Container(
-              width: 68,
-              height: 68,
-              decoration: BoxDecoration(
-                color: const Color(0xFFFEF2F2),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Icon(Icons.category_outlined, size: 34, color: Color(0xFFA92224)),
+  Widget _buildInternalLevelRow(_InternalLevelStrip strip) {
+    final isRootLevel = strip.depth == 0;
+    return Container(
+      height: isRootLevel ? 46 : 42,
+      decoration: isRootLevel
+          ? null
+          : const BoxDecoration(
+              color: Color(0xFFF8FAFC),
+              border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
             ),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.fromLTRB(14, isRootLevel ? 0 : 6, 14, isRootLevel ? 10 : 6),
+        itemCount: strip.items.length + 1,
+        separatorBuilder: (_, __) => const SizedBox(width: 7),
+        itemBuilder: (_, idx) {
+          final isAll = idx == 0;
+          final node = isAll ? null : strip.items[idx - 1];
+          final nodeId = node != null ? (node['id'] ?? '').toString() : null;
+          final isActive = strip.selectedId == nodeId;
+          final label = isAll ? 'الكل' : (node?['name_ar'] ?? '').toString().trim();
+
+          return Material(
+            color: isActive
+                ? (isRootLevel ? const Color(0xFFA92224) : const Color(0xFFFEF2F2))
+                : (isRootLevel ? const Color(0xFFF8FAFC) : Colors.white),
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
+              onTap: () => _selectInternalAtDepth(strip.depth, nodeId),
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                alignment: Alignment.center,
+                padding: const EdgeInsets.symmetric(horizontal: 13),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isActive ? const Color(0xFFA92224) : const Color(0xFFE2E8F0),
+                    width: isActive ? 1.25 : 1.0,
+                  ),
+                ),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontSize: isRootLevel ? 12.5 : 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: isActive
+                        ? (isRootLevel ? Colors.white : const Color(0xFFA92224))
+                        : const Color(0xFF334155),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMainCategoriesGrid() {
+    if (_loadingMainCats && _mainCategories.isEmpty) {
+      return GridView.builder(
+        padding: const EdgeInsets.all(14),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          crossAxisSpacing: 11,
+          mainAxisSpacing: 11,
+          childAspectRatio: 1.05,
+        ),
+        itemCount: 8,
+        itemBuilder: (_, __) => Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
           ),
-          const SizedBox(height: 14),
-          const Text(
-            'لا توجد أقسام مضافة في المتجر حاليًا',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'ستظهر الأقسام الرئيسية والفرعية هنا فور إضافتها من لوحة التحكم',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
-          ),
-          if (widget.onRefreshCategories != null) ...[
-            const SizedBox(height: 16),
-            Center(
-              child: ElevatedButton.icon(
-                onPressed: () => widget.onRefreshCategories!(),
+        ),
+      );
+    }
+
+    if (_mainCatsError != null && _mainCategories.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _mainCatsError!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF334155)),
+              ),
+              const SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: _loadMainCategories,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFA92224),
                   foregroundColor: Colors.white,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                icon: const Icon(Icons.refresh_rounded, size: 18),
-                label: const Text('تحديث الأقسام', style: TextStyle(fontWeight: FontWeight.w800)),
+                child: const Text('إعادة المحاولة', style: TextStyle(fontWeight: FontWeight.w800)),
               ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInlineProductsBody({
-    required Map<String, dynamic> selectedL1,
-    required Map<String, dynamic> activeCategory,
-  }) {
-    final activeTitle = (activeCategory['name_ar'] ?? '').toString().trim();
-    final l1Title = (selectedL1['name_ar'] ?? '').toString().trim();
-    final activeId = _activeCategoryId();
+            ],
+          ),
+        ),
+      );
+    }
 
     return RefreshIndicator(
       color: const Color(0xFFA92224),
       onRefresh: () async {
-        if (activeId != null) {
-          await _fetchCategoryProducts(activeId, reset: true);
+        await _loadMainCategories();
+        if (widget.onRefreshCategories != null) {
+          await widget.onRefreshCategories!();
         }
       },
+      child: GridView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 28),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          crossAxisSpacing: 11,
+          mainAxisSpacing: 11,
+          childAspectRatio: 1.02,
+        ),
+        itemCount: _mainCategories.length,
+        itemBuilder: (_, idx) {
+          final mc = _mainCategories[idx];
+          final nameAr = (mc['name_ar'] ?? '').toString();
+          final iconKey = (mc['icon_key'] ?? 'general').toString();
+          final accent = _parseHexColor(mc['accent_color']?.toString());
+          final imgUrl = OtlobhaCustomerApi.resolveMediaUrl(mc['image_url']);
+          final merchantsCount = (mc['merchants_count'] as num?)?.toInt() ?? 0;
+          final productsCount = (mc['products_count'] as num?)?.toInt() ?? 0;
+
+          return Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            child: InkWell(
+              onTap: () => _openMainCategory(mc),
+              borderRadius: BorderRadius.circular(20),
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: const Color(0xFFE2E8F0)),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x0A0F172A),
+                      blurRadius: 10,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      flex: 6,
+                      child: Container(
+                        color: accent.withOpacity(0.10),
+                        child: imgUrl.isNotEmpty
+                            ? Image.network(
+                                imgUrl,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => _mainCatIconBox(iconKey, accent),
+                              )
+                            : _mainCatIconBox(iconKey, accent),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 4,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              nameAr,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w900,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '$merchantsCount متجر · $productsCount منتج',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF64748B),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _mainCatIconBox(String iconKey, Color accent) {
+    return Center(
+      child: Container(
+        width: 54,
+        height: 54,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: accent.withOpacity(0.14),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Icon(_iconForKey(iconKey), size: 28, color: accent),
+      ),
+    );
+  }
+
+  Widget _buildExploreBody(
+    Map<String, dynamic> selectedMain,
+    Map<String, dynamic>? selectedMerchant,
+  ) {
+    final mainName = (selectedMain['name_ar'] ?? '').toString();
+    final merchantName = (selectedMerchant?['business_name_ar'] ?? '').toString();
+
+    return RefreshIndicator(
+      color: const Color(0xFFA92224),
+      onRefresh: () => _fetchExplore(reset: true),
       child: CustomScrollView(
         controller: _productsScrollCtrl,
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-          // Clean unboxed heading line for active category + count
+          // Horizontal Swipeable Strip of ONLY Linked Merchants
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 12, bottom: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.storefront_rounded, size: 17, color: Color(0xFFA92224)),
+                            const SizedBox(width: 6),
+                            Text(
+                              'متاجر $mainName',
+                              style: const TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w900,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFEF2F2),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '${_linkedMerchants.length}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFFA92224),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_selectedMerchantId != null)
+                          InkWell(
+                            onTap: () => _toggleMerchantSelection(null),
+                            child: const Text(
+                              'عرض كل المتاجر',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFFA92224),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  if (_linkedMerchants.isNotEmpty)
+                    SizedBox(
+                      height: 108,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        physics: const BouncingScrollPhysics(),
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        itemCount: _linkedMerchants.length + 1,
+                        separatorBuilder: (_, __) => const SizedBox(width: 9),
+                        itemBuilder: (_, idx) {
+                          if (idx == 0) {
+                            final allSelected = _selectedMerchantId == null;
+                            return Material(
+                              color: allSelected ? const Color(0xFFA92224) : Colors.white,
+                              borderRadius: BorderRadius.circular(18),
+                              child: InkWell(
+                                onTap: () => _toggleMerchantSelection(null),
+                                borderRadius: BorderRadius.circular(18),
+                                child: Container(
+                                  width: 88,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(18),
+                                    border: Border.all(
+                                      color: allSelected
+                                          ? const Color(0xFFA92224)
+                                          : const Color(0xFFE2E8F0),
+                                    ),
+                                  ),
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Container(
+                                        width: 44,
+                                        height: 44,
+                                        decoration: BoxDecoration(
+                                          color: allSelected
+                                              ? Colors.white.withOpacity(0.18)
+                                              : const Color(0xFFFEF2F2),
+                                          borderRadius: BorderRadius.circular(14),
+                                        ),
+                                        child: Icon(
+                                          Icons.grid_view_rounded,
+                                          size: 22,
+                                          color: allSelected
+                                              ? Colors.white
+                                              : const Color(0xFFA92224),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'كل المتاجر',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w800,
+                                          color: allSelected
+                                              ? Colors.white
+                                              : const Color(0xFF0F172A),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          }
+
+                          final m = _linkedMerchants[idx - 1];
+                          final mId = (m['id'] ?? '').toString();
+                          final mName = (m['business_name_ar'] ?? 'متجر').toString();
+                          final logo = OtlobhaCustomerApi.resolveMediaUrl(m['image_url']);
+                          final isSelected = _selectedMerchantId == mId;
+                          final isOpen = m['is_open_now'] == true || m['is_open_now'] == 1;
+                          final pCount = (m['products_count'] as num?)?.toInt() ?? 0;
+
+                          return Material(
+                            color: isSelected ? const Color(0xFFFEF2F2) : Colors.white,
+                            borderRadius: BorderRadius.circular(18),
+                            child: InkWell(
+                              onTap: () => _toggleMerchantSelection(mId),
+                              borderRadius: BorderRadius.circular(18),
+                              child: Container(
+                                width: 104,
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(18),
+                                  border: Border.all(
+                                    color: isSelected
+                                        ? const Color(0xFFA92224)
+                                        : const Color(0xFFE2E8F0),
+                                    width: isSelected ? 1.6 : 1.0,
+                                  ),
+                                ),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Stack(
+                                      clipBehavior: Clip.none,
+                                      children: [
+                                        Container(
+                                          width: 44,
+                                          height: 44,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFFEF2F2),
+                                            borderRadius: BorderRadius.circular(14),
+                                            border: Border.all(color: const Color(0xFFF1F5F9)),
+                                          ),
+                                          clipBehavior: Clip.antiAlias,
+                                          child: logo.isNotEmpty
+                                              ? Image.network(
+                                                  logo,
+                                                  fit: BoxFit.cover,
+                                                  errorBuilder: (_, __, ___) => const Icon(
+                                                    Icons.storefront_rounded,
+                                                    color: Color(0xFFA92224),
+                                                    size: 22,
+                                                  ),
+                                                )
+                                              : const Icon(
+                                                  Icons.storefront_rounded,
+                                                  color: Color(0xFFA92224),
+                                                  size: 22,
+                                                ),
+                                        ),
+                                        Positioned(
+                                          bottom: -1,
+                                          left: -1,
+                                          child: Container(
+                                            width: 11,
+                                            height: 11,
+                                            decoration: BoxDecoration(
+                                              color: isOpen
+                                                  ? const Color(0xFF10B981)
+                                                  : const Color(0xFF94A3B8),
+                                              shape: BoxShape.circle,
+                                              border: Border.all(color: Colors.white, width: 1.8),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      mName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                        color: isSelected
+                                            ? const Color(0xFFA92224)
+                                            : const Color(0xFF0F172A),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '${isOpen ? 'مفتوح' : 'مغلق'} · $pCount',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 9.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: isOpen
+                                            ? const Color(0xFF059669)
+                                            : const Color(0xFF64748B),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    )
+                  else if (!_loadingExplore)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 14),
+                      child: Text(
+                        'لا توجد متاجر مرتبطة بهذا القسم حاليًا',
+                        style: TextStyle(fontSize: 12, color: Color(0xFF64748B), fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+
+          // Context Line: Section Title + Count
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
@@ -743,17 +1089,19 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                       children: [
                         Flexible(
                           child: Text(
-                            activeTitle,
+                            selectedMerchant != null
+                                ? 'منتجات $merchantName في $mainName'
+                                : 'جميع منتجات $mainName',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 14.5,
+                              fontSize: 14,
                               fontWeight: FontWeight.w900,
                               color: Color(0xFF0F172A),
                             ),
                           ),
                         ),
-                        if (!_loadingProducts) ...[
+                        if (!_loadingExplore) ...[
                           const Padding(
                             padding: EdgeInsets.symmetric(horizontal: 6),
                             child: Text('·', style: TextStyle(color: Color(0xFF94A3B8), fontWeight: FontWeight.w900)),
@@ -770,26 +1118,13 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                       ],
                     ),
                   ),
-                  if (_selectedL2Id != null || _selectedL3Id != null)
-                    TextButton(
-                      onPressed: () => _selectL2(null),
-                      style: TextButton.styleFrom(
-                        foregroundColor: const Color(0xFFA92224),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      child: Text(
-                        'كل $l1Title',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
-                      ),
-                    ),
                 ],
               ),
             ),
           ),
 
-          if (_loadingProducts)
+          // Products Grid / Loading / Error / Empty
+          if (_loadingExplore)
             SliverPadding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
               sliver: SliverGrid(
@@ -806,71 +1141,40 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                       borderRadius: BorderRadius.circular(18),
                       border: Border.all(color: const Color(0xFFE2E8F0)),
                     ),
-                    padding: const EdgeInsets.all(10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          flex: 6,
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF1F5F9),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Container(height: 10, width: 70, color: const Color(0xFFF1F5F9)),
-                        const SizedBox(height: 6),
-                        Container(height: 12, width: double.infinity, color: const Color(0xFFF1F5F9)),
-                        const SizedBox(height: 10),
-                        Container(height: 14, width: 55, color: const Color(0xFFE2E8F0)),
-                      ],
-                    ),
                   ),
                   childCount: 6,
                 ),
               ),
             )
-          else if (_error != null)
+          else if (_exploreError != null)
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 20, 14, 24),
-                child: Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: const Color(0xFFE2E8F0)),
-                  ),
-                  child: Column(
-                    children: [
-                      Text(
-                        _error!,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF334155)),
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    Text(
+                      _exploreError!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF334155)),
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton(
+                      onPressed: () => _fetchExplore(reset: true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFA92224),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
-                      const SizedBox(height: 12),
-                      ElevatedButton(
-                        onPressed: () {
-                          if (activeId != null) _fetchCategoryProducts(activeId, reset: true);
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFA92224),
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                        child: const Text('إعادة المحاولة', style: TextStyle(fontWeight: FontWeight.w800)),
-                      ),
-                    ],
-                  ),
+                      child: const Text('إعادة المحاولة', style: TextStyle(fontWeight: FontWeight.w800)),
+                    ),
+                  ],
                 ),
               ),
             )
           else if (_products.isEmpty)
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 20, 14, 24),
+                padding: const EdgeInsets.fromLTRB(14, 16, 14, 24),
                 child: Container(
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
@@ -890,33 +1194,29 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                         child: const Icon(Icons.inventory_2_outlined, size: 28, color: Color(0xFFA92224)),
                       ),
                       const SizedBox(height: 12),
-                      Text(
-                        'لا توجد منتجات متاحة حاليًا في «$activeTitle»',
+                      const Text(
+                        'لا توجد منتجات متاحة حاليًا في هذا القسم',
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w900,
-                          color: Color(0xFF0F172A),
-                        ),
+                        style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
                       ),
-                      const SizedBox(height: 6),
-                      Text(
-                        'اختر قسمًا فرعيًا آخر من الشريط أعلاه أو تصفّح كل منتجات $l1Title',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
-                      ),
-                      if (_selectedL2Id != null || _selectedL3Id != null) ...[
-                        const SizedBox(height: 14),
+                      if (_selectedMerchantId != null || _internalPathIds.isNotEmpty) ...[
+                        const SizedBox(height: 12),
                         ElevatedButton(
-                          onPressed: () => _selectL2(null),
+                          onPressed: () {
+                            setState(() {
+                              _selectedMerchantId = null;
+                              _internalPathIds = [];
+                            });
+                            _fetchExplore(reset: true);
+                          },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFFA92224),
                             foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           ),
                           child: Text(
-                            'عرض كل منتجات $l1Title',
-                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+                            'عرض كل منتجات $mainName',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
                           ),
                         ),
                       ],
@@ -965,11 +1265,7 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
                     : _hasMore
                         ? Center(
                             child: OutlinedButton(
-                              onPressed: () {
-                                if (activeId != null) {
-                                  _fetchCategoryProducts(activeId, reset: false);
-                                }
-                              },
+                              onPressed: () => _fetchExplore(reset: false),
                               style: OutlinedButton.styleFrom(
                                 foregroundColor: const Color(0xFFA92224),
                                 side: const BorderSide(color: Color(0xFFE2E8F0)),
@@ -991,382 +1287,16 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
       ),
     );
   }
+}
 
-  Widget _buildApprovedStoresStrip({double horizontalPadding = 14}) {
-    final activeMerchants = widget.merchants
-        .where((m) => (m['status'] ?? 'active').toString() == 'active')
-        .toList();
-    if (activeMerchants.isEmpty) return const SizedBox.shrink();
+class _InternalLevelStrip {
+  final int depth;
+  final String? selectedId;
+  final List<Map<String, dynamic>> items;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Row(
-                children: [
-                  Icon(Icons.storefront_rounded, size: 18, color: Color(0xFFA92224)),
-                  SizedBox(width: 6),
-                  Text(
-                    'المتاجر المعتمدة',
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF0F172A),
-                    ),
-                  ),
-                ],
-              ),
-              if (widget.onOpenAllStores != null)
-                InkWell(
-                  onTap: widget.onOpenAllStores,
-                  borderRadius: BorderRadius.circular(8),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                    child: Text(
-                      'عرض الكل',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFFA92224),
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 10),
-        SizedBox(
-          height: 88,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-            itemCount: activeMerchants.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
-            itemBuilder: (_, idx) {
-              final m = activeMerchants[idx];
-              final mId = (m['id'] ?? '').toString();
-              final mName = (m['business_name_ar'] ?? m['name_ar'] ?? 'متجر').toString();
-              final logo = OtlobhaCustomerApi.resolveMediaUrl(m['image_url']);
-              final rawOpen = m.containsKey('is_open_now') ? m['is_open_now'] : m['is_open'];
-              final isOpen = rawOpen == true || rawOpen == 1 || rawOpen == '1' || rawOpen == 'true';
-              final ratingAvg = (m['rating_avg'] as num?)?.toDouble() ?? 0;
-              final ratingCount = (m['rating_count'] as num?)?.toInt() ?? 0;
-
-              return Material(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                child: InkWell(
-                  onTap: () => widget.onSelectMerchant(mId, mName),
-                  borderRadius: BorderRadius.circular(18),
-                  child: Container(
-                    width: 204,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(color: const Color(0xFFE2E8F0)),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x0A0F172A),
-                          blurRadius: 10,
-                          offset: Offset(0, 3),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 56,
-                          height: 56,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFEF2F2),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: const Color(0xFFE2E8F0)),
-                          ),
-                          clipBehavior: Clip.antiAlias,
-                          child: logo.isNotEmpty
-                              ? Image.network(
-                                  logo,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => const Icon(
-                                    Icons.storefront_rounded,
-                                    color: Color(0xFFA92224),
-                                    size: 26,
-                                  ),
-                                )
-                              : const Icon(
-                                  Icons.storefront_rounded,
-                                  color: Color(0xFFA92224),
-                                  size: 26,
-                                ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                mName,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: Color(0xFF0F172A),
-                                ),
-                              ),
-                              const SizedBox(height: 5),
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.circle,
-                                    size: 7,
-                                    color: isOpen ? const Color(0xFF10B981) : const Color(0xFFEF4444),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    isOpen ? 'مفتوح' : 'مغلق',
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w700,
-                                      color: isOpen ? const Color(0xFF047857) : const Color(0xFFB91C1C),
-                                    ),
-                                  ),
-                                  if (ratingCount > 0) ...[
-                                    const SizedBox(width: 6),
-                                    const Icon(Icons.star_rounded, size: 13, color: Color(0xFFF5A623)),
-                                    const SizedBox(width: 2),
-                                    Text(
-                                      ratingAvg.toStringAsFixed(1),
-                                      style: const TextStyle(
-                                        fontSize: 10.5,
-                                        fontWeight: FontWeight.w800,
-                                        color: Color(0xFF334155),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildRootSquareGridView() {
-    final roots = _rootCategories();
-    final grouped = <String, List<Map<String, dynamic>>>{};
-    for (final cat in roots) {
-      final k = _resolveGroupKey(cat);
-      grouped.putIfAbsent(k, () => []).add(cat);
-    }
-
-    final activeGroups = _groups.where((g) => (grouped[g.key] ?? []).isNotEmpty).toList();
-    final hasApprovedStores = widget.merchants.any((m) => (m['status'] ?? 'active').toString() == 'active');
-
-    if (activeGroups.isEmpty) {
-      return RefreshIndicator(
-        color: const Color(0xFFA92224),
-        onRefresh: () async {
-          if (widget.onRefreshCategories != null) {
-            await widget.onRefreshCategories!();
-          }
-        },
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(0, 14, 0, 24),
-          children: [
-            if (hasApprovedStores) ...[
-              _buildApprovedStoresStrip(horizontalPadding: 14),
-              const SizedBox(height: 18),
-            ],
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                  childAspectRatio: 0.74,
-                ),
-                itemCount: roots.length,
-                itemBuilder: (_, idx) => _buildRootSquareTile(roots[idx], accent: const Color(0xFFA92224)),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return RefreshIndicator(
-      color: const Color(0xFFA92224),
-      onRefresh: () async {
-        if (widget.onRefreshCategories != null) {
-          await widget.onRefreshCategories!();
-        }
-      },
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(0, 14, 0, 24),
-        children: [
-          if (hasApprovedStores) ...[
-            _buildApprovedStoresStrip(horizontalPadding: 14),
-            const SizedBox(height: 18),
-          ],
-          ...List.generate(activeGroups.length, (idx) {
-            final meta = activeGroups[idx];
-            final cats = grouped[meta.key] ?? [];
-            return Padding(
-              padding: EdgeInsets.fromLTRB(14, 0, 14, idx < activeGroups.length - 1 ? 18 : 0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          meta.title,
-                          style: const TextStyle(
-                            fontSize: 14.5,
-                            fontWeight: FontWeight.w900,
-                            color: Color(0xFF0F172A),
-                          ),
-                        ),
-                      ),
-                      if (widget.onSelectGroup != null)
-                        TextButton(
-                          onPressed: () => widget.onSelectGroup!(meta.key),
-                          style: TextButton.styleFrom(
-                            foregroundColor: const Color(0xFFA92224),
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text('عرض الكل', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
-                              SizedBox(width: 2),
-                              Icon(Icons.chevron_left_rounded, size: 16),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  GridView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                      childAspectRatio: 0.74,
-                    ),
-                    itemCount: cats.length,
-                    itemBuilder: (_, cIdx) => _buildRootSquareTile(
-                      cats[cIdx],
-                      accent: meta.accent,
-                      fallbackBg: meta.bg,
-                      fallbackIcon: meta.icon,
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRootSquareTile(
-    Map<String, dynamic> cat, {
-    required Color accent,
-    Color fallbackBg = const Color(0xFFFEF2F2),
-    IconData fallbackIcon = Icons.category_rounded,
-  }) {
-    final name = (cat['name_ar'] ?? '').toString().trim();
-    final imgUrl = OtlobhaCustomerApi.resolveMediaUrl(cat['image_url']);
-
-    return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(16),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => _selectL1(cat),
-        borderRadius: BorderRadius.circular(16),
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFE2E8F0)),
-            boxShadow: const [
-              BoxShadow(color: Color(0x080F172A), blurRadius: 8, offset: Offset(0, 2)),
-            ],
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Clean full-bleed square image with zero overlaid badge clutter
-              AspectRatio(
-                aspectRatio: 1.0,
-                child: Container(
-                  color: fallbackBg,
-                  child: imgUrl.isNotEmpty
-                      ? Image.network(
-                          imgUrl,
-                          fit: BoxFit.cover,
-                          cacheWidth: 260,
-                          errorBuilder: (_, __, ___) => Center(
-                            child: Icon(fallbackIcon, size: 30, color: accent),
-                          ),
-                        )
-                      : Center(
-                          child: Icon(fallbackIcon, size: 30, color: accent),
-                        ),
-                ),
-              ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-                  child: Center(
-                    child: Text(
-                      name,
-                      maxLines: 2,
-                      textAlign: TextAlign.center,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF0F172A),
-                        height: 1.2,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  const _InternalLevelStrip({
+    required this.depth,
+    required this.selectedId,
+    required this.items,
+  });
 }

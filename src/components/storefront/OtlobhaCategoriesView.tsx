@@ -2,29 +2,32 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Apple,
   ArrowRight,
-  ChevronLeft,
-  Coffee,
-  Cookie,
-  Droplets,
-  Egg,
   Fish,
   Flame,
   Home,
+  LayoutGrid,
   Loader2,
   MapPin,
-  Milk,
   Package,
-  Pill,
   Search,
-  Snowflake,
+  Shirt,
+  ShoppingBasket,
+  Smartphone,
   Sparkles,
   Star,
   Store,
-  Utensils,
-  Wheat,
+  UtensilsCrossed,
+  X,
 } from 'lucide-react';
 import { api } from '../../lib/api';
-import type { MerchantRecord, StorefrontCategoryRecord, StorefrontProductCard } from '../../shared/types';
+import type {
+  MainCategoryExploreMerchant,
+  MainCategoryInternalNode,
+  MerchantRecord,
+  PlatformMainCategory,
+  StorefrontCategoryRecord,
+  StorefrontProductCard,
+} from '../../shared/types';
 import { OtlobhaProductCard } from './OtlobhaProductCard';
 import { useTypewriterPlaceholder } from '../../hooks/useTypewriterPlaceholder';
 
@@ -42,159 +45,120 @@ interface Props {
   onOpenAllStores?: () => void;
 }
 
-const CATEGORY_VISUALS: Record<string, { icon: React.ComponentType<any>; bg: string; fg: string }> = {
-  cat_frozen: { icon: Snowflake, bg: 'bg-sky-50', fg: 'text-sky-700' },
-  cat_rice_grains: { icon: Wheat, bg: 'bg-amber-50', fg: 'text-amber-700' },
-  cat_pasta_canned: { icon: Package, bg: 'bg-orange-50', fg: 'text-orange-700' },
-  cat_sauces: { icon: Flame, bg: 'bg-red-50', fg: 'text-[#A92224]' },
-  cat_fruits_veg: { icon: Apple, bg: 'bg-emerald-50', fg: 'text-emerald-700' },
-  cat_meat_poultry: { icon: Flame, bg: 'bg-rose-50', fg: 'text-rose-700' },
-  cat_seafood_fresh: { icon: Fish, bg: 'bg-cyan-50', fg: 'text-cyan-700' },
-  cat_seafood: { icon: Fish, bg: 'bg-cyan-50', fg: 'text-cyan-700' },
-  cat_dairy_eggs: { icon: Egg, bg: 'bg-yellow-50', fg: 'text-amber-700' },
-  cat_dairy: { icon: Milk, bg: 'bg-yellow-50', fg: 'text-amber-700' },
-  cat_juices_drinks: { icon: Droplets, bg: 'bg-amber-50', fg: 'text-[#D97706]' },
-  cat_snacks_sweets: { icon: Cookie, bg: 'bg-pink-50', fg: 'text-pink-700' },
-  cat_coffee_tea: { icon: Coffee, bg: 'bg-stone-100', fg: 'text-[#5C2E1F]' },
-  cat_detergents: { icon: Sparkles, bg: 'bg-indigo-50', fg: 'text-indigo-700' },
-  cat_home_care: { icon: Home, bg: 'bg-teal-50', fg: 'text-teal-700' },
-  cat_kitchen_supplies: { icon: Utensils, bg: 'bg-slate-100', fg: 'text-slate-700' },
-  cat_pharma_med: { icon: Pill, bg: 'bg-red-50', fg: 'text-[#A92224]' },
-  cat_pharma_care: { icon: Sparkles, bg: 'bg-rose-50', fg: 'text-rose-700' },
+const MAIN_CAT_ICONS: Record<string, React.ComponentType<any>> = {
+  shopping_basket: ShoppingBasket,
+  meat: Flame,
+  produce: Apple,
+  fish: Fish,
+  detergents: Sparkles,
+  electronics: Smartphone,
+  perfumes: Sparkles,
+  restaurants: UtensilsCrossed,
+  home: Home,
+  clothing: Shirt,
+  general: LayoutGrid,
 };
 
-const GROUP_ORDER = [
-  { key: 'groceries', title: 'المقاضي والمواد الغذائية' },
-  { key: 'fresh', title: 'المنتجات الطازجة' },
-  { key: 'drinks', title: 'المشروبات والقهوة والشاي' },
-  { key: 'home_care', title: 'المنظفات والعناية بالمنزل' },
-  { key: 'kitchen', title: 'مستلزمات المطبخ' },
-];
-
 export const OtlobhaCategoriesView: React.FC<Props> = ({
-  categories,
-  merchants = [],
   zoneName,
   cartQtyMap,
   onOpenSearch,
   onOpenProduct,
   onAddProduct,
   onDecrementProduct,
-  onSelectGroup,
-  onSelectStore,
-  onOpenAllStores,
 }) => {
-  // 3-level inline hierarchy state:
-  // Level 1 (Root square cards) -> Level 2 (Horizontal bar 1) -> Level 3 (Horizontal bar 2) -> Inline products
-  const [selectedL1Id, setSelectedL1Id] = useState<string | null>(null);
-  const [selectedL2Id, setSelectedL2Id] = useState<string | null>(null);
-  const [selectedL3Id, setSelectedL3Id] = useState<string | null>(null);
+  // Step 1: Platform Main Categories
+  const [mainCategories, setMainCategories] = useState<PlatformMainCategory[]>([]);
+  const [loadingMainCats, setLoadingMainCats] = useState(true);
+  const [mainCatsError, setMainCatsError] = useState<string | null>(null);
+
+  // Step 2: Active Main Category -> Linked Merchants Strip -> Selected Store -> Internal L1/L2/L3+ Hierarchy -> Products
+  const [selectedMainCat, setSelectedMainCat] = useState<PlatformMainCategory | null>(null);
+  const [linkedMerchants, setLinkedMerchants] = useState<MainCategoryExploreMerchant[]>([]);
+  const [selectedMerchantId, setSelectedMerchantId] = useState<string | null>(null);
+
+  const [internalCategories, setInternalCategories] = useState<MainCategoryInternalNode[]>([]);
+  // Supports unlimited depth via breadcrumb path of selected internal category IDs [L1, L2, L3, ...]
+  const [internalPathIds, setInternalPathIds] = useState<string[]>([]);
 
   const [products, setProducts] = useState<StorefrontProductCard[]>([]);
-  const [productsLoading, setProductsLoading] = useState(false);
+  const [loadingExplore, setLoadingExplore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [productsError, setProductsError] = useState<string | null>(null);
+  const [exploreError, setExploreError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [totalProducts, setTotalProducts] = useState(0);
 
   const fetchSeqRef = useRef(0);
-  const l2StripRef = useRef<HTMLDivElement | null>(null);
-  const l3StripRef = useRef<HTMLDivElement | null>(null);
 
-  const byId = useMemo(() => {
-    const map = new Map<string, StorefrontCategoryRecord>();
-    for (const c of categories) map.set(c.id, c);
-    return map;
-  }, [categories]);
-
-  const childrenByParent = useMemo(() => {
-    const map = new Map<string, StorefrontCategoryRecord[]>();
-    for (const c of categories) {
-      const pid = c.parent_id && byId.has(c.parent_id) ? c.parent_id : '__root__';
-      const arr = map.get(pid) || [];
-      arr.push(c);
-      map.set(pid, arr);
-    }
-    return map;
-  }, [categories, byId]);
-
-  const rootCategories = childrenByParent.get('__root__') || [];
-  const selectedL1 = selectedL1Id ? byId.get(selectedL1Id) || null : null;
-  const l2Children = useMemo(
-    () => (selectedL1 ? childrenByParent.get(selectedL1.id) || [] : []),
-    [selectedL1, childrenByParent]
-  );
-
-  const selectedL2 = selectedL2Id ? byId.get(selectedL2Id) || null : null;
-  const l3Children = useMemo(
-    () => (selectedL2 ? childrenByParent.get(selectedL2.id) || [] : []),
-    [selectedL2, childrenByParent]
-  );
-
-  const selectedL3 = selectedL3Id ? byId.get(selectedL3Id) || null : null;
-
-  // Deepest selected category whose products are displayed inline below the horizontal strips
-  const activeCategory = selectedL3 || selectedL2 || selectedL1;
-  const activeCategoryId = activeCategory?.id || null;
   const { text: searchPlaceholder, isAnimating: isSearchPlaceholderAnimating } = useTypewriterPlaceholder({
-    active: !selectedL1,
+    active: !selectedMainCat,
   });
 
-  // Group root categories when browsing Level 1 squares
-  const grouped = useMemo(() => {
-    const res = GROUP_ORDER.map((grp) => ({
-      ...grp,
-      items: rootCategories.filter((c) => {
-        if (grp.key === 'groceries') return !c.group_key || c.group_key === 'groceries';
-        return c.group_key === grp.key;
-      }),
-    })).filter((g) => g.items.length > 0);
-
-    const usedIds = new Set(res.flatMap((g) => g.items.map((i) => i.id)));
-    const extraCats = rootCategories.filter((c) => !usedIds.has(c.id));
-    if (extraCats.length > 0) {
-      res.push({ key: 'other', title: 'أقسام أخرى والصيدلية', items: extraCats });
+  const loadMainCategories = useCallback(async () => {
+    setLoadingMainCats(true);
+    setMainCatsError(null);
+    try {
+      const res = await api.getMainCategories();
+      setMainCategories(res.main_categories || []);
+    } catch (err: any) {
+      setMainCatsError(err?.message || 'تعذر تحميل الأقسام الرئيسية حاليًا');
+    } finally {
+      setLoadingMainCats(false);
     }
-    return res;
-  }, [rootCategories]);
+  }, []);
 
-  const fetchCategoryProducts = useCallback(
-    async (categoryId: string, targetPage: number, append: boolean) => {
+  useEffect(() => {
+    void loadMainCategories();
+  }, [loadMainCategories]);
+
+  const activeInternalCategoryId =
+    internalPathIds.length > 0 ? internalPathIds[internalPathIds.length - 1] : null;
+
+  const fetchExplore = useCallback(
+    async (
+      mainCatId: string,
+      merchantId: string | null,
+      internalCatId: string | null,
+      targetPage: number,
+      append: boolean
+    ) => {
       const seq = ++fetchSeqRef.current;
       if (append) {
         setLoadingMore(true);
       } else {
-        setProductsLoading(true);
-        setProductsError(null);
+        setLoadingExplore(true);
+        setExploreError(null);
       }
-
       try {
-        const res = await api.getStorefrontHome({
-          category_id: categoryId,
+        const res = await api.exploreMainCategory(mainCatId, {
+          merchant_id: merchantId,
+          internal_category_id: internalCatId,
           page: targetPage,
           limit: 24,
         });
         if (seq !== fetchSeqRef.current) return;
 
-        const nextItems = (res.products || []) as StorefrontProductCard[];
+        setLinkedMerchants(res.merchants || []);
+        setInternalCategories(res.internal_categories || []);
+        const nextProducts = (res.products || []) as StorefrontProductCard[];
         setProducts((prev) => {
-          if (!append) return nextItems;
+          if (!append) return nextProducts;
           const seen = new Set(prev.map((p) => p.id));
-          return [...prev, ...nextItems.filter((p) => !seen.has(p.id))];
+          return [...prev, ...nextProducts.filter((p) => !seen.has(p.id))];
         });
         setPage(targetPage);
         setHasMore(Boolean(res.pagination?.has_more));
-        setTotalProducts(Number(res.pagination?.total ?? nextItems.length));
+        setTotalProducts(Number(res.pagination?.total ?? nextProducts.length));
       } catch (err: any) {
         if (seq !== fetchSeqRef.current) return;
         if (!append) {
-          setProductsError(err?.message || 'تعذر تحميل منتجات القسم حاليًا');
+          setExploreError(err?.message || 'تعذر تحميل محتوى القسم حاليًا');
           setProducts([]);
         }
       } finally {
         if (seq === fetchSeqRef.current) {
-          setProductsLoading(false);
+          setLoadingExplore(false);
           setLoadingMore(false);
         }
       }
@@ -202,96 +166,113 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
     []
   );
 
-  // Trigger inline product fetch whenever the deepest active category changes
   useEffect(() => {
-    if (!activeCategoryId) {
+    if (!selectedMainCat) {
       fetchSeqRef.current += 1;
+      setLinkedMerchants([]);
+      setInternalCategories([]);
       setProducts([]);
-      setProductsLoading(false);
-      setLoadingMore(false);
-      setProductsError(null);
-      setPage(1);
-      setHasMore(false);
       setTotalProducts(0);
+      setHasMore(false);
+      setPage(1);
+      setExploreError(null);
       return;
     }
-    void fetchCategoryProducts(activeCategoryId, 1, false);
-  }, [activeCategoryId, fetchCategoryProducts]);
+    void fetchExplore(selectedMainCat.id, selectedMerchantId, activeInternalCategoryId, 1, false);
+  }, [selectedMainCat, selectedMerchantId, activeInternalCategoryId, fetchExplore]);
 
-  const handleSelectL1 = (cat: StorefrontCategoryRecord) => {
-    setSelectedL1Id(cat.id);
-    setSelectedL2Id(null);
-    setSelectedL3Id(null);
-    if (l2StripRef.current) l2StripRef.current.scrollTo({ left: 0, behavior: 'auto' });
+  // Build parent -> children map for internal categories (preserves L1 -> L2 -> L3+ hierarchy)
+  const internalTree = useMemo(() => {
+    const byId = new Map<string, MainCategoryInternalNode>();
+    const childrenByParent = new Map<string, MainCategoryInternalNode[]>();
+    for (const c of internalCategories) {
+      byId.set(c.id, c);
+    }
+    for (const c of internalCategories) {
+      const pid = c.parent_id && byId.has(c.parent_id) ? c.parent_id : '__root__';
+      const arr = childrenByParent.get(pid) || [];
+      arr.push(c);
+      childrenByParent.set(pid, arr);
+    }
+    return { byId, childrenByParent };
+  }, [internalCategories]);
+
+  // Compute dynamic horizontal strips for each level in the active path:
+  // Level 0 = roots; Level 1 = children of path[0]; Level 2 = children of path[1]; etc.
+  const categoryLevels = useMemo(() => {
+    const levels: Array<{
+      depth: number;
+      parentId: string | null;
+      selectedId: string | null;
+      items: MainCategoryInternalNode[];
+    }> = [];
+    const roots = internalTree.childrenByParent.get('__root__') || [];
+    if (roots.length === 0) return levels;
+
+    levels.push({
+      depth: 0,
+      parentId: null,
+      selectedId: internalPathIds[0] || null,
+      items: roots,
+    });
+
+    for (let i = 0; i < internalPathIds.length; i++) {
+      const curId = internalPathIds[i];
+      const kids = internalTree.childrenByParent.get(curId) || [];
+      if (kids.length > 0) {
+        levels.push({
+          depth: i + 1,
+          parentId: curId,
+          selectedId: internalPathIds[i + 1] || null,
+          items: kids,
+        });
+      }
+    }
+    return levels;
+  }, [internalTree, internalPathIds]);
+
+  const selectedMerchant = useMemo(
+    () => linkedMerchants.find((m) => m.id === selectedMerchantId) || null,
+    [linkedMerchants, selectedMerchantId]
+  );
+
+  const handleOpenMainCat = (mc: PlatformMainCategory) => {
+    setSelectedMainCat(mc);
+    setSelectedMerchantId(null);
+    setInternalPathIds([]);
   };
 
-  const handleSelectL2 = (catId: string | null) => {
-    setSelectedL2Id(catId);
-    setSelectedL3Id(null);
-    if (l3StripRef.current) l3StripRef.current.scrollTo({ left: 0, behavior: 'auto' });
+  const handleBackToMainCats = () => {
+    setSelectedMainCat(null);
+    setSelectedMerchantId(null);
+    setInternalPathIds([]);
   };
 
-  const handleSelectL3 = (catId: string | null) => {
-    setSelectedL3Id(catId);
+  const handleSelectMerchant = (merchantId: string | null) => {
+    setSelectedMerchantId((prev) => (prev === merchantId ? null : merchantId));
+    setInternalPathIds([]);
   };
 
-  const handleBackToRoots = () => {
-    setSelectedL1Id(null);
-    setSelectedL2Id(null);
-    setSelectedL3Id(null);
-  };
-
-  const renderRootSquareCard = (cat: StorefrontCategoryRecord) => {
-    const vis = CATEGORY_VISUALS[cat.id] || {
-      icon: Package,
-      bg: 'bg-[#FEF2F2]',
-      fg: 'text-[#A92224]',
-    };
-    const Icon = vis.icon;
-
-    return (
-      <button
-        key={cat.id}
-        type="button"
-        onClick={() => handleSelectL1(cat)}
-        className="group flex flex-col items-stretch text-center rounded-2xl bg-white border border-slate-200/80 hover:border-[#A92224]/50 shadow-[0_2px_8px_rgba(15,23,42,0.03)] hover:shadow-md transition-all duration-200 overflow-hidden cursor-pointer focus-visible:outline-2 focus-visible:outline-[#A92224]"
-      >
-        <div className={`w-full aspect-square ${vis.bg} flex items-center justify-center overflow-hidden`}>
-          {cat.image_url ? (
-            <img
-              src={cat.image_url}
-              alt={cat.name_ar}
-              loading="lazy"
-              referrerPolicy="no-referrer"
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <Icon className={`w-9 h-9 ${vis.fg} group-hover:scale-110 transition-transform duration-200`} />
-            </div>
-          )}
-        </div>
-        <div className="px-2 py-2.5 flex items-center justify-center min-h-[2.85rem] bg-white">
-          <span className="text-[12px] font-extrabold text-slate-900 leading-snug line-clamp-2">
-            {cat.name_ar}
-          </span>
-        </div>
-      </button>
-    );
+  const handleSelectInternalAtDepth = (depth: number, catId: string | null) => {
+    setInternalPathIds((prev) => {
+      const next = prev.slice(0, depth);
+      if (catId) next.push(catId);
+      return next;
+    });
   };
 
   return (
     <div className="pb-24" dir="rtl">
-      {/* Top Sticky Header: switches cleanly between Root header and Active L1 + Horizontal Strips */}
+      {/* Top Sticky Header */}
       <div className="sticky top-0 z-20 bg-[#F6F7F9]/95 backdrop-blur-md border-b border-slate-200/80">
-        {selectedL1 ? (
+        {selectedMainCat ? (
           <div>
-            {/* Compact L1 Context Header */}
+            {/* Main Category Context Bar */}
             <div className="flex items-center justify-between gap-2 px-1 py-2.5">
               <div className="flex items-center gap-2 min-w-0">
                 <button
                   type="button"
-                  onClick={handleBackToRoots}
+                  onClick={handleBackToMainCats}
                   aria-label="العودة للأقسام الرئيسية"
                   className="inline-flex items-center gap-1 h-10 px-3 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#A92224] hover:text-[#A92224] text-xs font-extrabold transition-colors cursor-pointer shrink-0 whitespace-nowrap"
                 >
@@ -300,13 +281,21 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
                 </button>
                 <div className="min-w-0">
                   <h2 className="text-[15px] font-black text-slate-900 truncate leading-tight">
-                    {selectedL1.name_ar}
+                    {selectedMainCat.name_ar}
                   </h2>
-                  <div className="text-[11px] font-semibold text-slate-500 truncate flex items-center gap-1.5">
-                    {selectedL2 && <span>{selectedL2.name_ar}</span>}
-                    {selectedL2 && selectedL3 && <span aria-hidden="true">/</span>}
-                    {selectedL3 && <span className="text-[#A92224] font-bold">{selectedL3.name_ar}</span>}
-                    {!selectedL2 && <span>{zoneName}</span>}
+                  <div className="text-[11px] font-semibold text-slate-500 truncate flex items-center gap-1">
+                    {selectedMerchant ? (
+                      <>
+                        <Store className="w-3 h-3 text-[#A92224] shrink-0" />
+                        <span className="text-[#A92224] font-bold truncate">
+                          {selectedMerchant.business_name_ar}
+                        </span>
+                      </>
+                    ) : (
+                      <span>
+                        {linkedMerchants.length} متجر · {zoneName}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -321,94 +310,72 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
               </button>
             </div>
 
-            {/* Horizontal Scrollable Bar 1 — Level 2 Subcategories (Text tabs only, NO squares/icons) */}
-            {l2Children.length > 0 && (
+            {/* Multi-level Internal Categories Horizontal Strips (shown when store is selected or General has categories) */}
+            {categoryLevels.map((lvl) => (
               <div
-                ref={l2StripRef}
+                key={`lvl-${lvl.depth}-${lvl.parentId || 'root'}`}
                 role="tablist"
-                aria-label="الأقسام الفرعية"
-                className="flex items-center gap-2 overflow-x-auto no-scrollbar px-1 pb-2.5 pt-0.5"
+                aria-label={lvl.depth === 0 ? 'الأقسام الداخلية للمتجر' : 'الأقسام الفرعية'}
+                className={`flex items-center gap-1.5 overflow-x-auto no-scrollbar px-1 ${
+                  lvl.depth === 0
+                    ? 'pb-2.5 pt-0.5'
+                    : 'py-2 border-t border-slate-200/70 bg-white/80'
+                }`}
               >
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={selectedL2Id === null}
-                  onClick={() => handleSelectL2(null)}
-                  className={`h-9 px-4 rounded-lg text-xs font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                    selectedL2Id === null
-                      ? 'bg-[#A92224] text-white shadow-xs'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:text-slate-900'
+                  aria-selected={lvl.selectedId === null}
+                  onClick={() => handleSelectInternalAtDepth(lvl.depth, null)}
+                  className={`whitespace-nowrap shrink-0 rounded-lg font-extrabold transition-colors cursor-pointer ${
+                    lvl.depth === 0 ? 'h-9 px-3.5 text-xs' : 'h-8 px-3 text-[11.5px]'
+                  } ${
+                    lvl.selectedId === null
+                      ? lvl.depth === 0
+                        ? 'bg-[#A92224] text-white shadow-xs'
+                        : 'bg-[#FEF2F2] text-[#A92224] border border-[#A92224]'
+                      : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
                   }`}
                 >
                   الكل
                 </button>
-                {l2Children.map((l2) => {
-                  const isActive = selectedL2Id === l2.id;
+                {lvl.items.map((node) => {
+                  const isActive = lvl.selectedId === node.id;
                   return (
                     <button
-                      key={l2.id}
+                      key={node.id}
                       type="button"
                       role="tab"
                       aria-selected={isActive}
-                      onClick={() => handleSelectL2(l2.id)}
-                      className={`h-9 px-4 rounded-lg text-xs font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                      onClick={() => handleSelectInternalAtDepth(lvl.depth, node.id)}
+                      className={`whitespace-nowrap shrink-0 rounded-lg font-extrabold transition-colors cursor-pointer inline-flex items-center gap-1.5 ${
+                        lvl.depth === 0 ? 'h-9 px-3.5 text-xs' : 'h-8 px-3 text-[11.5px]'
+                      } ${
                         isActive
-                          ? 'bg-[#A92224] text-white shadow-xs'
-                          : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300 hover:text-slate-900'
+                          ? lvl.depth === 0
+                            ? 'bg-[#A92224] text-white shadow-xs'
+                            : 'bg-[#FEF2F2] text-[#A92224] border border-[#A92224]'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-300'
                       }`}
                     >
-                      {l2.name_ar}
+                      <span>{node.name_ar}</span>
+                      {node.products_count > 0 && (
+                        <span
+                          className={`text-[10px] tabular-nums ${
+                            isActive && lvl.depth === 0 ? 'text-white/80' : 'text-slate-400'
+                          }`}
+                        >
+                          ({node.products_count})
+                        </span>
+                      )}
                     </button>
                   );
                 })}
               </div>
-            )}
-
-            {/* Horizontal Scrollable Bar 2 — Level 3 Subcategories directly underneath Bar 1 */}
-            {selectedL2 && l3Children.length > 0 && (
-              <div
-                ref={l3StripRef}
-                role="tablist"
-                aria-label="أقسام المستوى الثالث"
-                className="flex items-center gap-1.5 overflow-x-auto no-scrollbar px-1 py-2 border-t border-slate-200/70 bg-white/75"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedL3Id === null}
-                  onClick={() => handleSelectL3(null)}
-                  className={`h-8 px-3.5 rounded-lg text-[11.5px] font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                    selectedL3Id === null
-                      ? 'bg-[#FEF2F2] text-[#A92224] border border-[#A92224]'
-                      : 'bg-slate-50 text-slate-600 border border-slate-200/90 hover:text-slate-900'
-                  }`}
-                >
-                  الكل
-                </button>
-                {l3Children.map((l3) => {
-                  const isActive = selectedL3Id === l3.id;
-                  return (
-                    <button
-                      key={l3.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={isActive}
-                      onClick={() => handleSelectL3(l3.id)}
-                      className={`h-8 px-3.5 rounded-lg text-[11.5px] font-extrabold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                        isActive
-                          ? 'bg-[#FEF2F2] text-[#A92224] border border-[#A92224]'
-                          : 'bg-slate-50 text-slate-600 border border-slate-200/90 hover:text-slate-900'
-                      }`}
-                    >
-                      {l3.name_ar}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            ))}
           </div>
         ) : (
-          /* Root Level Sticky Header */
+          /* Root Platform Main Categories Sticky Header */
           <div className="pt-2 pb-3 space-y-2.5">
             <div className="flex items-center justify-between gap-2 px-1">
               <div className="flex items-center gap-2 min-w-0">
@@ -418,7 +385,7 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
                   className="w-8 h-8 rounded-xl object-contain bg-white p-0.5 border border-slate-200 shrink-0"
                 />
                 <div className="min-w-0">
-                  <div className="text-[12px] font-black text-slate-900 truncate">الأقسام الرئيسية</div>
+                  <div className="text-[13px] font-black text-slate-900 truncate">الأقسام الرئيسية</div>
                   <div className="text-[11px] font-semibold text-slate-500 truncate flex items-center gap-1">
                     <MapPin className="w-3 h-3 text-[#A92224] shrink-0" />
                     <span className="truncate">{zoneName}</span>
@@ -426,7 +393,7 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
                 </div>
               </div>
               <span className="text-xs font-bold text-slate-500 tabular-nums shrink-0">
-                {rootCategories.length} قسم رئيسي
+                {mainCategories.length} قسم رئيسي
               </span>
             </div>
 
@@ -450,17 +417,144 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
         )}
       </div>
 
-      {/* Main Content Area */}
-      {selectedL1 ? (
-        /* Inline Products Grid directly underneath the Level 2 & Level 3 Horizontal Strips */
-        <div className="pt-3.5 space-y-3.5">
-          {/* Clean unboxed context line showing active selection & total count */}
+      {/* BODY */}
+      {selectedMainCat ? (
+        <div className="pt-3.5 space-y-4">
+          {/* Horizontal Swipeable Strip of ONLY Merchants Linked to this Main Category */}
+          <section aria-label="المتاجر المرتبطة بالقسم" className="space-y-2.5">
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2">
+                <span className="w-6 h-6 rounded-lg bg-[#FEF2F2] text-[#A92224] flex items-center justify-center shrink-0">
+                  <Store className="w-3.5 h-3.5" />
+                </span>
+                <h3 className="text-[13.5px] font-black text-slate-900">
+                  متاجر {selectedMainCat.name_ar}
+                </h3>
+                <span className="text-[11px] font-extrabold text-[#A92224] bg-[#FEF2F2] px-2 py-0.5 rounded-md tabular-nums">
+                  {linkedMerchants.length}
+                </span>
+              </div>
+              {selectedMerchant && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectMerchant(null)}
+                  className="text-xs font-extrabold text-[#A92224] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>عرض كل المتاجر</span>
+                </button>
+              )}
+            </div>
+
+            {linkedMerchants.length > 0 ? (
+              <div className="flex items-stretch gap-2.5 overflow-x-auto no-scrollbar pb-1 px-0.5">
+                {/* "All Stores" tile */}
+                <button
+                  type="button"
+                  onClick={() => handleSelectMerchant(null)}
+                  className={`shrink-0 w-[96px] rounded-2xl p-2.5 flex flex-col items-center justify-center text-center gap-1.5 border transition-all cursor-pointer ${
+                    selectedMerchantId === null
+                      ? 'bg-[#A92224] text-white border-[#A92224] shadow-md'
+                      : 'bg-white text-slate-800 border-slate-200/80 hover:border-[#A92224]/50'
+                  }`}
+                >
+                  <div
+                    className={`w-12 h-12 rounded-2xl flex items-center justify-center ${
+                      selectedMerchantId === null
+                        ? 'bg-white/15 text-white'
+                        : 'bg-[#FEF2F2] text-[#A92224]'
+                    }`}
+                  >
+                    <LayoutGrid className="w-5 h-5" />
+                  </div>
+                  <span className="text-[11.5px] font-extrabold leading-tight">كل المتاجر</span>
+                  <span
+                    className={`text-[10px] font-bold tabular-nums ${
+                      selectedMerchantId === null ? 'text-white/80' : 'text-slate-400'
+                    }`}
+                  >
+                    {linkedMerchants.length} متجر
+                  </span>
+                </button>
+
+                {linkedMerchants.map((store) => {
+                  const isSelected = selectedMerchantId === store.id;
+                  const isOpen = Boolean(store.is_open_now);
+                  return (
+                    <button
+                      key={store.id}
+                      type="button"
+                      onClick={() => handleSelectMerchant(store.id)}
+                      className={`group shrink-0 w-[112px] rounded-2xl p-2.5 flex flex-col items-center text-center gap-1.5 border transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#FEF2F2] border-[#A92224] ring-2 ring-[#A92224]/20 shadow-md'
+                          : 'bg-white border-slate-200/80 hover:border-[#A92224]/50 shadow-[0_2px_8px_rgba(15,23,42,0.03)]'
+                      }`}
+                    >
+                      <div className="relative">
+                        <div className="w-12 h-12 rounded-2xl bg-[#FEF2F2] border border-slate-100 overflow-hidden flex items-center justify-center">
+                          {store.image_url ? (
+                            <img
+                              src={store.image_url}
+                              alt={store.business_name_ar}
+                              loading="lazy"
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                            />
+                          ) : (
+                            <Store className="w-5 h-5 text-[#A92224]" />
+                          )}
+                        </div>
+                        <span
+                          title={isOpen ? 'مفتوح الآن' : 'مغلق حاليًا'}
+                          className={`absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                            isOpen ? 'bg-emerald-500' : 'bg-slate-400'
+                          }`}
+                        />
+                      </div>
+
+                      <span
+                        className={`text-[11.5px] font-extrabold leading-tight line-clamp-2 min-h-[2rem] flex items-center ${
+                          isSelected ? 'text-[#A92224]' : 'text-slate-900'
+                        }`}
+                      >
+                        {store.business_name_ar}
+                      </span>
+
+                      <div className="flex items-center justify-center gap-1 text-[10px] font-bold">
+                        {store.rating_avg > 0 ? (
+                          <span className="inline-flex items-center gap-0.5 text-amber-600 tabular-nums">
+                            <Star className="w-3 h-3 fill-amber-400 text-amber-500" />
+                            {store.rating_avg.toFixed(1)}
+                          </span>
+                        ) : (
+                          <span className={isOpen ? 'text-emerald-600' : 'text-slate-400'}>
+                            {isOpen ? 'مفتوح' : 'مغلق'}
+                          </span>
+                        )}
+                        <span className="text-slate-300">·</span>
+                        <span className="text-slate-500 tabular-nums">{store.products_count}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : !loadingExplore ? (
+              <div className="rounded-xl bg-white border border-slate-200/80 px-4 py-3 text-xs font-semibold text-slate-500">
+                لا توجد متاجر مرتبطة بقسم «{selectedMainCat.name_ar}» حاليًا.
+              </div>
+            ) : null}
+          </section>
+
+          {/* Products Section Heading */}
           <div className="flex items-center justify-between gap-2 px-1">
             <div className="flex items-center gap-2 min-w-0">
               <h3 className="text-sm font-black text-slate-900 truncate">
-                {activeCategory?.name_ar}
+                {selectedMerchant
+                  ? `منتجات ${selectedMerchant.business_name_ar} في ${selectedMainCat.name_ar}`
+                  : `جميع منتجات ${selectedMainCat.name_ar}`}
               </h3>
-              {!productsLoading && (
+              {!loadingExplore && (
                 <>
                   <span className="text-slate-300" aria-hidden="true">·</span>
                   <span className="text-xs font-bold text-slate-500 tabular-nums shrink-0">
@@ -469,19 +563,19 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
                 </>
               )}
             </div>
-            {(selectedL2Id || selectedL3Id) && (
+            {internalPathIds.length > 0 && (
               <button
                 type="button"
-                onClick={() => handleSelectL2(null)}
+                onClick={() => setInternalPathIds([])}
                 className="text-xs font-bold text-[#A92224] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
               >
-                كل {selectedL1.name_ar}
+                كل الأقسام الداخلية
               </button>
             )}
           </div>
 
-          {/* Loading Skeleton */}
-          {productsLoading ? (
+          {/* Products Grid */}
+          {loadingExplore ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
               {Array.from({ length: 6 }).map((_, idx) => (
                 <div
@@ -497,12 +591,20 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
                 </div>
               ))}
             </div>
-          ) : productsError ? (
+          ) : exploreError ? (
             <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center space-y-3">
-              <p className="text-sm font-bold text-slate-700">{productsError}</p>
+              <p className="text-sm font-bold text-slate-700">{exploreError}</p>
               <button
                 type="button"
-                onClick={() => activeCategoryId && void fetchCategoryProducts(activeCategoryId, 1, false)}
+                onClick={() =>
+                  void fetchExplore(
+                    selectedMainCat.id,
+                    selectedMerchantId,
+                    activeInternalCategoryId,
+                    1,
+                    false
+                  )
+                }
                 className="px-4 py-2 rounded-xl bg-[#A92224] text-white text-xs font-extrabold cursor-pointer"
               >
                 إعادة المحاولة
@@ -515,19 +617,24 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
               </div>
               <div className="space-y-1">
                 <p className="text-sm font-black text-slate-900">
-                  لا توجد منتجات متاحة حاليًا في «{activeCategory?.name_ar}»
+                  لا توجد منتجات متاحة حاليًا في هذا الاختيار
                 </p>
                 <p className="text-xs text-slate-500">
-                  يمكنك اختيار قسم فرعي آخر من الشريط أعلاه أو عرض كل منتجات {selectedL1.name_ar}
+                  {selectedMerchant
+                    ? `جرب اختيار قسم داخلي آخر أو عرض كل متاجر ${selectedMainCat.name_ar}`
+                    : `سيتم عرض منتجات ${selectedMainCat.name_ar} فور ربطها من لوحة الإدارة`}
                 </p>
               </div>
-              {(selectedL2Id || selectedL3Id) && (
+              {(selectedMerchantId || internalPathIds.length > 0) && (
                 <button
                   type="button"
-                  onClick={() => handleSelectL2(null)}
+                  onClick={() => {
+                    setSelectedMerchantId(null);
+                    setInternalPathIds([]);
+                  }}
                   className="px-4 py-2 rounded-xl bg-[#A92224] text-white text-xs font-extrabold cursor-pointer"
                 >
-                  عرض كل منتجات {selectedL1.name_ar}
+                  عرض كل منتجات {selectedMainCat.name_ar}
                 </button>
               )}
             </div>
@@ -552,7 +659,13 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
                     type="button"
                     disabled={loadingMore}
                     onClick={() =>
-                      activeCategoryId && void fetchCategoryProducts(activeCategoryId, page + 1, true)
+                      void fetchExplore(
+                        selectedMainCat.id,
+                        selectedMerchantId,
+                        activeInternalCategoryId,
+                        page + 1,
+                        true
+                      )
                     }
                     className="h-11 px-6 rounded-xl bg-white border border-slate-200 hover:border-[#A92224] text-slate-800 hover:text-[#A92224] text-xs font-extrabold inline-flex items-center gap-2 shadow-xs transition cursor-pointer disabled:opacity-60"
                   >
@@ -571,116 +684,80 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
           )}
         </div>
       ) : (
-        /* Level 1 Root Categories: Approved Stores Scrollable Strip Above Root Category Cards */
-        <div className="pt-4 space-y-6">
-          {merchants.length > 0 && (
-            <section className="space-y-3" aria-label="المتاجر المعتمدة">
-              <div className="flex items-center justify-between px-1">
-                <div className="flex items-center gap-2">
-                  <span className="w-7 h-7 rounded-lg bg-[#FEF2F2] text-[#A92224] flex items-center justify-center shrink-0">
-                    <Store className="w-4 h-4" />
-                  </span>
-                  <h3 className="text-[15px] font-black text-slate-900">المتاجر المعتمدة</h3>
-                  <span className="text-[11px] font-extrabold text-[#A92224] bg-[#FEF2F2] px-2 py-0.5 rounded-md tabular-nums">
-                    {merchants.length}
-                  </span>
+        /* Step 1: Platform Main Categories Grid */
+        <div className="pt-4 space-y-4">
+          {loadingMainCats ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="rounded-2xl bg-white border border-slate-200/80 p-4 animate-pulse space-y-3"
+                >
+                  <div className="w-12 h-12 rounded-2xl bg-slate-100 mx-auto" />
+                  <div className="h-3.5 w-2/3 bg-slate-100 rounded mx-auto" />
+                  <div className="h-2.5 w-1/2 bg-slate-100 rounded mx-auto" />
                 </div>
-                {onOpenAllStores && (
+              ))}
+            </div>
+          ) : mainCatsError ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center space-y-3">
+              <p className="text-sm font-bold text-slate-700">{mainCatsError}</p>
+              <button
+                type="button"
+                onClick={() => void loadMainCategories()}
+                className="px-4 py-2 rounded-xl bg-[#A92224] text-white text-xs font-extrabold cursor-pointer"
+              >
+                إعادة المحاولة
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              {mainCategories.map((mc) => {
+                const Icon = MAIN_CAT_ICONS[mc.icon_key] || LayoutGrid;
+                const accent = mc.accent_color || '#A92224';
+                return (
                   <button
+                    key={mc.id}
                     type="button"
-                    onClick={onOpenAllStores}
-                    className="text-xs font-extrabold text-[#A92224] hover:text-[#86191B] flex items-center gap-0.5 cursor-pointer"
+                    onClick={() => handleOpenMainCat(mc)}
+                    className="group flex flex-col items-stretch text-center rounded-2xl bg-white border border-slate-200/85 hover:border-[#A92224]/60 shadow-[0_2px_10px_rgba(15,23,42,0.035)] hover:shadow-md transition-all duration-200 overflow-hidden cursor-pointer focus-visible:outline-2 focus-visible:outline-[#A92224]"
                   >
-                    <span>عرض الكل</span>
-                    <ChevronLeft className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-
-              <div className="flex items-stretch gap-2.5 overflow-x-auto no-scrollbar pb-1 px-0.5">
-                {merchants.map((store) => {
-                  const ratingVal = Number(store.rating_avg ?? 0);
-                  const rawOpen = store.is_open_now !== undefined ? store.is_open_now : store.is_open;
-                  const isOpen = rawOpen === true || Number(rawOpen) === 1;
-                  return (
-                    <button
-                      key={store.id}
-                      type="button"
-                      onClick={() => {
-                        if (onSelectStore) {
-                          onSelectStore(store.id, store.business_name_ar);
-                        } else if (typeof window !== 'undefined') {
-                          window.location.assign(`/store/${encodeURIComponent(store.id)}`);
-                        }
-                      }}
-                      className="group shrink-0 w-[108px] rounded-2xl bg-white border border-slate-200/80 hover:border-[#A92224]/50 shadow-[0_2px_8px_rgba(15,23,42,0.03)] hover:shadow-md p-2.5 flex flex-col items-center text-center gap-1.5 transition-all cursor-pointer"
+                    <div
+                      className="w-full h-24 flex items-center justify-center overflow-hidden relative"
+                      style={{ backgroundColor: `${accent}12` }}
                     >
-                      <div className="relative">
-                        <div className="w-12 h-12 rounded-2xl bg-[#FEF2F2] border border-slate-100 overflow-hidden flex items-center justify-center">
-                          {store.image_url ? (
-                            <img
-                              src={store.image_url}
-                              alt={store.business_name_ar}
-                              loading="lazy"
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                            />
-                          ) : (
-                            <Store className="w-5 h-5 text-[#A92224]" />
-                          )}
-                        </div>
-                        <span
-                          title={isOpen ? 'مفتوح الآن' : 'مغلق حاليًا'}
-                          className={`absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full border-2 border-white ${
-                            isOpen ? 'bg-emerald-500' : 'bg-slate-400'
-                          }`}
+                      {mc.image_url ? (
+                        <img
+                          src={mc.image_url}
+                          alt={mc.name_ar}
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                         />
-                      </div>
-
-                      <span className="text-[11.5px] font-extrabold text-slate-900 leading-tight line-clamp-2 min-h-[2rem] flex items-center">
-                        {store.business_name_ar}
+                      ) : (
+                        <div
+                          className="w-13 h-13 rounded-2xl bg-white shadow-xs flex items-center justify-center group-hover:scale-110 transition-transform duration-200"
+                          style={{ color: accent }}
+                        >
+                          <Icon className="w-7 h-7" />
+                        </div>
+                      )}
+                    </div>
+                    <div className="px-2.5 py-3 flex-1 flex flex-col items-center justify-between gap-1 bg-white">
+                      <span className="text-[13.5px] font-black text-slate-900 leading-snug line-clamp-1">
+                        {mc.name_ar}
                       </span>
-
-                      <div className="flex items-center justify-center gap-1 text-[10px] font-bold">
-                        {ratingVal > 0 ? (
-                          <span className="inline-flex items-center gap-0.5 text-amber-600 tabular-nums">
-                            <Star className="w-3 h-3 fill-amber-400 text-amber-500" />
-                            {ratingVal.toFixed(1)}
-                          </span>
-                        ) : (
-                          <span className={isOpen ? 'text-emerald-600' : 'text-slate-400'}>
-                            {isOpen ? 'مفتوح' : 'مغلق'}
-                          </span>
-                        )}
+                      <div className="flex items-center justify-center gap-1.5 text-[10.5px] font-bold text-slate-500 tabular-nums">
+                        <span>{mc.merchants_count} متجر</span>
+                        <span className="text-slate-300">·</span>
+                        <span>{mc.products_count.toLocaleString('ar-EG')} منتج</span>
                       </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-          )}
-
-          {grouped.map((group) => (
-            <section key={group.key} className="space-y-3">
-              <div className="flex items-center justify-between px-1">
-                <h3 className="text-[15px] font-black text-slate-900">{group.title}</h3>
-                {onSelectGroup && (
-                  <button
-                    type="button"
-                    onClick={() => onSelectGroup(group.key)}
-                    className="text-xs font-extrabold text-[#A92224] hover:text-[#86191B] flex items-center gap-0.5 cursor-pointer"
-                  >
-                    <span>عرض الكل</span>
-                    <ChevronLeft className="w-4 h-4" />
+                    </div>
                   </button>
-                )}
-              </div>
-
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
-                {group.items.map((cat) => renderRootSquareCard(cat))}
-              </div>
-            </section>
-          ))}
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

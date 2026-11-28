@@ -59,6 +59,7 @@ import { CloudDatabaseSection } from './components/CloudDatabaseSection.tsx';
 import { PublicStoreWebPage } from './components/PublicStoreWebPage.tsx';
 import { StoreReviewsAdminSection } from './components/StoreReviewsAdminSection.tsx';
 import { AdminRecipesSection } from './components/AdminRecipesSection.tsx';
+import { AdminMainCategoriesSection } from './components/AdminMainCategoriesSection.tsx';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton.tsx';
 import type { User as FirebaseUser } from 'firebase/auth';
 import {
@@ -524,6 +525,7 @@ export default function App() {
           {
             groupLabel: isAr ? 'الكتالوج والمتجر' : 'Catalog & Storefront',
             items: [
+              { id: 'main_categories', label: isAr ? 'الأقسام الرئيسية وربط المتاجر' : 'Main Categories & Store Links', icon: Layers },
               { id: 'master_catalog', label: isAr ? 'الكتالوج المركزي والمقارنة' : 'Master Catalog', icon: Layers },
               { id: 'catalog', label: isAr ? 'منتجات المتاجر والأقسام' : 'Store Products & Categories', icon: Package },
               { id: 'recipes', label: isAr ? 'الوصفات الذكية' : 'Smart Recipes', icon: ChefHat },
@@ -1085,6 +1087,14 @@ export default function App() {
                 <ServicesZonesSection lang={lang} services={services} zones={zones} onRefresh={refreshCore} onNotify={notify} />
               )}
               {activeTab === 'pricing' && portalMode === 'admin' && <PricingDispatchSection lang={lang} zones={zones} onNotify={notify} />}
+              {activeTab === 'main_categories' && portalMode === 'admin' && (
+                <AdminMainCategoriesSection
+                  lang={lang}
+                  merchants={merchants}
+                  categories={categories}
+                  onNotify={notify}
+                />
+              )}
               {activeTab === 'master_catalog' && portalMode === 'admin' && (
                 <MasterCatalogAdminSection
                   categories={categories}
