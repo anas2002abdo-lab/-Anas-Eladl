@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otlobha_customer/core/api_client.dart';
 import 'package:otlobha_customer/main.dart';
+import 'package:otlobha_customer/screens/home_screen.dart';
 import 'package:otlobha_customer/screens/splash_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -17,6 +18,7 @@ void main() {
     expect(find.text('كل حاجة أقرب ليك'), findsOneWidget);
 
     // After ~2.1s animation finishes, splash dismisses automatically to Login/Register
+    await tester.pump(const Duration(milliseconds: 2200));
     await tester.pumpAndSettle();
     expect(find.byType(OtlobhaSplashScreen), findsNothing);
     expect(find.byType(OtlobhaCustomerApp), findsOneWidget);
@@ -48,6 +50,9 @@ void main() {
     final forgotUri = api.forgotPasswordExternalUri(email: 'Test@Gmail.com');
     expect(forgotUri.path, '/portal/customer/forgot-password');
     expect(forgotUri.queryParameters['email'], 'test@gmail.com');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
   });
 
   testWidgets('Cold launch routes returning guest session directly to Home without showing Login', (WidgetTester tester) async {
@@ -60,8 +65,12 @@ void main() {
     expect(find.text('كل حاجة أقرب ليك'), findsOneWidget);
 
     await tester.pump(const Duration(milliseconds: 2200));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(find.byType(OtlobhaSplashScreen), findsNothing);
+    expect(find.byType(HomeScreen), findsOneWidget);
     expect(find.text('المتابعة باستخدام حساب جوجل'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
   });
 }

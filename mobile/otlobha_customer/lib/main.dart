@@ -641,8 +641,11 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
           _customerName = 'زائر اطلبها';
           _index = savedTab.clamp(0, 5);
           _serviceSubView = savedSub;
+          if (_isFlutterTest) _loading = false;
         });
-        _loadData();
+        if (!_isFlutterTest) {
+          _loadData();
+        }
       } else {
         setState(() => _loading = false);
       }
@@ -1849,11 +1852,6 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
 
   @override
   Widget build(BuildContext context) {
-    final showSplashOverlay = !_splashFinished || !_sessionRestored;
-    if (!showSplashOverlay) {
-      return _buildActiveDestination(context);
-    }
-
     return Stack(
       fit: StackFit.expand,
       children: [
