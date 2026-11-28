@@ -907,6 +907,25 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return request<{
       query: string;
+      stores?: Array<{
+        id: string;
+        business_name_ar: string;
+        name_ar?: string;
+        branch_name?: string;
+        description_ar?: string;
+        image_url?: string;
+        cover_image_url?: string;
+        merchant_type?: string;
+        is_open: boolean;
+        is_open_now?: boolean;
+        rating_avg: number;
+        rating_count: number;
+        followers_count?: number;
+        working_hours?: string;
+        zone_name?: string;
+        products_count: number;
+        offers_count?: number;
+      }>;
       items: any[];
       top_offers: any[];
       trending_queries: string[];
@@ -1570,6 +1589,174 @@ export const api = {
     request<{ ok: boolean; settings: any }>('/api/admin/store-reviews/settings', {
       method: 'PATCH',
       body: JSON.stringify(body),
+    }),
+
+  // =========================================================================
+  // Merchant Self-Onboarding, Admin Review, Activity Workspace & Team RBAC
+  // =========================================================================
+  getMerchantOnboardingConfig: () =>
+    request<{ activities: any[]; statuses: Record<string, any>; staff_roles: any[]; zones: any[] }>(
+      '/api/merchant-onboarding/config',
+      { cache: 'no-store' }
+    ),
+  createMerchantOnboardingDraft: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; application_number: string; applicant_secret: string; application: any }>(
+      '/api/merchant-onboarding/drafts',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+  getMerchantOnboardingApplication: (appNumber: string, secret?: string) =>
+    request<{ ok: boolean; application: any }>(
+      `/api/merchant-onboarding/applications/${encodeURIComponent(appNumber)}`,
+      {
+        cache: 'no-store',
+        headers: secret ? { 'X-Application-Secret': secret } : undefined,
+      }
+    ),
+  updateMerchantOnboardingApplication: (appNumber: string, body: Record<string, unknown>, secret?: string) =>
+    request<{ ok: boolean; application: any }>(
+      `/api/merchant-onboarding/applications/${encodeURIComponent(appNumber)}`,
+      {
+        method: 'PATCH',
+        headers: secret ? { 'X-Application-Secret': secret } : undefined,
+        body: JSON.stringify(body),
+      }
+    ),
+  uploadMerchantOnboardingDocument: (
+    appNumber: string,
+    body: { doc_type: string; doc_label_ar?: string; file_name?: string; data_url: string },
+    secret?: string
+  ) =>
+    request<{ ok: boolean; document: any }>(
+      `/api/merchant-onboarding/applications/${encodeURIComponent(appNumber)}/documents`,
+      {
+        method: 'POST',
+        headers: secret ? { 'X-Application-Secret': secret } : undefined,
+        body: JSON.stringify(body),
+      }
+    ),
+  deleteMerchantOnboardingDocument: (appNumber: string, docId: string, secret?: string) =>
+    request<{ ok: boolean }>(
+      `/api/merchant-onboarding/applications/${encodeURIComponent(appNumber)}/documents/${encodeURIComponent(docId)}`,
+      {
+        method: 'DELETE',
+        headers: secret ? { 'X-Application-Secret': secret } : undefined,
+      }
+    ),
+  getMerchantOnboardingDocument: (docId: string, secret?: string) =>
+    request<{ ok: boolean; document: any }>(
+      `/api/merchant-onboarding/documents/${encodeURIComponent(docId)}`,
+      {
+        cache: 'no-store',
+        headers: secret ? { 'X-Application-Secret': secret } : undefined,
+      }
+    ),
+  submitMerchantOnboardingApplication: (appNumber: string, secret?: string) =>
+    request<{ ok: boolean; message: string; application: any }>(
+      `/api/merchant-onboarding/applications/${encodeURIComponent(appNumber)}/submit`,
+      {
+        method: 'POST',
+        headers: secret ? { 'X-Application-Secret': secret } : undefined,
+      }
+    ),
+  checkMerchantOnboardingStatus: (body: { application_number: string; phone?: string; email?: string }) =>
+    request<{ ok: boolean; application: any }>('/api/merchant-onboarding/status', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // Admin Onboarding Review Queue
+  getAdminOnboardingApplications: (params?: { status?: string; activity_category?: string; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.activity_category) qs.set('activity_category', params.activity_category);
+    if (params?.q && params.q.trim()) qs.set('q', params.q.trim());
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ ok: boolean; counts: Record<string, number>; applications: any[] }>(
+      `/api/admin/merchant-onboarding/applications${suffix}`,
+      { cache: 'no-store' }
+    );
+  },
+  decideAdminOnboardingApplication: (
+    id: string,
+    body: {
+      action: 'approve' | 'request_completion' | 'reject';
+      review_note?: string;
+      rejection_reason?: string;
+      requested_changes?: string[];
+      commission_rate?: number;
+      link_existing_merchant_id?: string;
+    }
+  ) =>
+    request<{
+      ok: boolean;
+      mode?: 'linked_existing' | 'created_new';
+      linked_merchant_id?: string;
+      merchant?: any;
+      message: string;
+      application: any;
+    }>(`/api/admin/merchant-onboarding/applications/${encodeURIComponent(id)}/decision`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // Merchant Activity Workspace, Restaurant Menu & Staff RBAC
+  getMerchantWorkspaceProfile: (merchantId?: string) => {
+    const qs = merchantId ? `?merchant_id=${encodeURIComponent(merchantId)}` : '';
+    return request<{
+      ok: boolean;
+      merchant: any;
+      activity_profile: any;
+      staff_roles_catalog: any[];
+      staff: any[];
+      stats: Record<string, number>;
+    }>(`/api/merchant/workspace/profile${qs}`, { cache: 'no-store' });
+  },
+  getMerchantMenuItems: (merchantId?: string) => {
+    const qs = merchantId ? `?merchant_id=${encodeURIComponent(merchantId)}` : '';
+    return request<{ ok: boolean; items: any[] }>(`/api/merchant/menu-items${qs}`, { cache: 'no-store' });
+  },
+  createMerchantMenuItem: (body: Record<string, unknown>) =>
+    request<{ ok: boolean; item: any }>('/api/merchant/menu-items', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateMerchantMenuItem: (productId: string, body: Record<string, unknown>) =>
+    request<{ ok: boolean; item: any }>(`/api/merchant/menu-items/${encodeURIComponent(productId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  getMerchantStaff: (merchantId?: string) => {
+    const qs = merchantId ? `?merchant_id=${encodeURIComponent(merchantId)}` : '';
+    return request<{ ok: boolean; roles_catalog: any[]; staff: any[] }>(`/api/merchant/staff${qs}`, {
+      cache: 'no-store',
+    });
+  },
+  addMerchantStaffMember: (body: {
+    merchant_id?: string;
+    full_name: string;
+    email?: string;
+    phone?: string;
+    password?: string;
+    staff_role: string;
+  }) =>
+    request<{ ok: boolean; member: any }>('/api/merchant/staff', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateMerchantStaffMember: (
+    staffId: string,
+    body: { full_name?: string; phone?: string; staff_role?: string; is_active?: boolean }
+  ) =>
+    request<{ ok: boolean; member: any }>(`/api/merchant/staff/${encodeURIComponent(staffId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteMerchantStaffMember: (staffId: string) =>
+    request<{ ok: boolean }>(`/api/merchant/staff/${encodeURIComponent(staffId)}`, {
+      method: 'DELETE',
     }),
 };
 

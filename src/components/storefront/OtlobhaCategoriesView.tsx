@@ -18,15 +18,18 @@ import {
   Search,
   Snowflake,
   Sparkles,
+  Star,
+  Store,
   Utensils,
   Wheat,
 } from 'lucide-react';
 import { api } from '../../lib/api';
-import type { StorefrontCategoryRecord, StorefrontProductCard } from '../../shared/types';
+import type { MerchantRecord, StorefrontCategoryRecord, StorefrontProductCard } from '../../shared/types';
 import { OtlobhaProductCard } from './OtlobhaProductCard';
 
 interface Props {
   categories: StorefrontCategoryRecord[];
+  merchants?: Array<MerchantRecord & { rating_avg?: number; is_open?: boolean }>;
   zoneName: string;
   cartQtyMap: Record<string, number>;
   onOpenSearch: () => void;
@@ -34,6 +37,8 @@ interface Props {
   onAddProduct: (product: StorefrontProductCard) => void;
   onDecrementProduct: (productId: string) => void;
   onSelectGroup?: (groupKey: string) => void;
+  onSelectStore?: (merchantId: string, merchantName: string) => void;
+  onOpenAllStores?: () => void;
 }
 
 const CATEGORY_VISUALS: Record<string, { icon: React.ComponentType<any>; bg: string; fg: string }> = {
@@ -67,6 +72,7 @@ const GROUP_ORDER = [
 
 export const OtlobhaCategoriesView: React.FC<Props> = ({
   categories,
+  merchants = [],
   zoneName,
   cartQtyMap,
   onOpenSearch,
@@ -74,6 +80,8 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
   onAddProduct,
   onDecrementProduct,
   onSelectGroup,
+  onSelectStore,
+  onOpenAllStores,
 }) => {
   // 3-level inline hierarchy state:
   // Level 1 (Root square cards) -> Level 2 (Horizontal bar 1) -> Level 3 (Horizontal bar 2) -> Inline products
@@ -424,7 +432,7 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
               className="w-full h-11 rounded-2xl bg-white border border-slate-200/90 px-3.5 flex items-center gap-2.5 text-slate-400 text-sm shadow-xs hover:border-[#A92224]/40 transition cursor-pointer"
             >
               <Search className="w-4 h-4 text-[#A92224] shrink-0" />
-              <span className="truncate">ابحث في جميع الأقسام والمنتجات...</span>
+              <span className="truncate">ابحث عن متجر معتمد، قسم، أو منتج...</span>
             </button>
           </div>
         )}
@@ -551,8 +559,94 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
           )}
         </div>
       ) : (
-        /* Level 1 Root Categories: Square Image Cards with Category Name */
+        /* Level 1 Root Categories: Approved Stores Scrollable Strip Above Root Category Cards */
         <div className="pt-4 space-y-6">
+          {merchants.length > 0 && (
+            <section className="space-y-3" aria-label="المتاجر المعتمدة">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-7 h-7 rounded-lg bg-[#FEF2F2] text-[#A92224] flex items-center justify-center shrink-0">
+                    <Store className="w-4 h-4" />
+                  </span>
+                  <h3 className="text-[15px] font-black text-slate-900">المتاجر المعتمدة</h3>
+                  <span className="text-[11px] font-extrabold text-[#A92224] bg-[#FEF2F2] px-2 py-0.5 rounded-md tabular-nums">
+                    {merchants.length}
+                  </span>
+                </div>
+                {onOpenAllStores && (
+                  <button
+                    type="button"
+                    onClick={onOpenAllStores}
+                    className="text-xs font-extrabold text-[#A92224] hover:text-[#86191B] flex items-center gap-0.5 cursor-pointer"
+                  >
+                    <span>عرض الكل</span>
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-stretch gap-2.5 overflow-x-auto no-scrollbar pb-1 px-0.5">
+                {merchants.map((store) => {
+                  const ratingVal = Number(store.rating_avg ?? 0);
+                  const isOpen = store.is_open !== false;
+                  return (
+                    <button
+                      key={store.id}
+                      type="button"
+                      onClick={() => {
+                        if (onSelectStore) {
+                          onSelectStore(store.id, store.business_name_ar);
+                        } else if (typeof window !== 'undefined') {
+                          window.location.assign(`/store/${encodeURIComponent(store.id)}`);
+                        }
+                      }}
+                      className="group shrink-0 w-[108px] rounded-2xl bg-white border border-slate-200/80 hover:border-[#A92224]/50 shadow-[0_2px_8px_rgba(15,23,42,0.03)] hover:shadow-md p-2.5 flex flex-col items-center text-center gap-1.5 transition-all cursor-pointer"
+                    >
+                      <div className="relative">
+                        <div className="w-12 h-12 rounded-2xl bg-[#FEF2F2] border border-slate-100 overflow-hidden flex items-center justify-center">
+                          {store.image_url ? (
+                            <img
+                              src={store.image_url}
+                              alt={store.business_name_ar}
+                              loading="lazy"
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                            />
+                          ) : (
+                            <Store className="w-5 h-5 text-[#A92224]" />
+                          )}
+                        </div>
+                        <span
+                          title={isOpen ? 'مفتوح الآن' : 'مغلق حاليًا'}
+                          className={`absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                            isOpen ? 'bg-emerald-500' : 'bg-slate-400'
+                          }`}
+                        />
+                      </div>
+
+                      <span className="text-[11.5px] font-extrabold text-slate-900 leading-tight line-clamp-2 min-h-[2rem] flex items-center">
+                        {store.business_name_ar}
+                      </span>
+
+                      <div className="flex items-center justify-center gap-1 text-[10px] font-bold">
+                        {ratingVal > 0 ? (
+                          <span className="inline-flex items-center gap-0.5 text-amber-600 tabular-nums">
+                            <Star className="w-3 h-3 fill-amber-400 text-amber-500" />
+                            {ratingVal.toFixed(1)}
+                          </span>
+                        ) : (
+                          <span className={isOpen ? 'text-emerald-600' : 'text-slate-400'}>
+                            {isOpen ? 'مفتوح' : 'مغلق'}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           {grouped.map((group) => (
             <section key={group.key} className="space-y-3">
               <div className="flex items-center justify-between px-1">

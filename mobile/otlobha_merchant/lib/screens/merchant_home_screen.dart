@@ -52,6 +52,10 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
   List<Map<String, dynamic>> _categories = [];
   List<Map<String, dynamic>> _approvalRequests = [];
   List<Map<String, dynamic>> _notifications = [];
+  List<Map<String, dynamic>> _menuItems = [];
+  List<Map<String, dynamic>> _staffMembers = [];
+  bool _loadingMenu = false;
+  bool _loadingStaff = false;
   final Set<String> _knownOrderIds = {};
   final Map<String, TextEditingController> _quoteControllers = {};
 
@@ -69,7 +73,27 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
 
   String get _merchantId => widget.merchant['id']?.toString() ?? '';
   String get _businessName => widget.merchant['business_name_ar']?.toString() ?? 'متجري';
-  bool get _isPharmacy => widget.merchant['merchant_type']?.toString() == 'pharmacy';
+  String get _activityCategory {
+    final explicit = (widget.merchant['activity_category'] ?? '').toString().trim().toLowerCase();
+    if (explicit == 'store' || explicit == 'restaurant_cafe' || explicit == 'pharmacy' || explicit == 'other') {
+      return explicit;
+    }
+    final mt = (widget.merchant['merchant_type'] ?? '').toString().trim().toLowerCase();
+    if (mt == 'pharmacy') return 'pharmacy';
+    if (mt == 'restaurant' || mt == 'cafe' || mt == 'fish_grill' || mt == 'fast_food' || mt == 'restaurant_cafe') {
+      return 'restaurant_cafe';
+    }
+    if (mt == 'other') return 'other';
+    return 'store';
+  }
+  bool get _isPharmacy => _activityCategory == 'pharmacy';
+  bool get _isRestaurantOrCafe => _activityCategory == 'restaurant_cafe';
+  String get _activitySubtitle {
+    if (_isRestaurantOrCafe) return 'بوابة المطعم والكافيه · قائمة الطعام والطلبات';
+    if (_isPharmacy) return 'بوابة الصيدلية المعتمدة · الروشتات والتراخيص';
+    if (_activityCategory == 'other') return 'بوابة النشاط التجاري · اطلبها للتجار';
+    return 'بوابة المتجر والسوبر ماركت · المنتجات والمخزون';
+  }
   int get _unreadCount => _notifications.where((n) => n['is_read'] != true && n['is_read'] != 1).length;
 
   static const Map<String, String> _statusAr = {
@@ -118,8 +142,38 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
     _refreshProducts(page: 1);
     _loadCategories();
     _refreshApprovalRequests();
+    if (_isRestaurantOrCafe) {
+      _refreshMenuItems();
+    }
+    _refreshStaffMembers();
     _connectWs();
     _startPollingTimer();
+  }
+
+  Future<void> _refreshMenuItems() async {
+    if (_merchantId.isEmpty) return;
+    if (mounted) setState(() => _loadingMenu = true);
+    try {
+      final list = await widget.api.fetchMenuItems();
+      if (mounted) setState(() => _menuItems = list);
+    } catch (_) {
+      // ignore transient errors
+    } finally {
+      if (mounted) setState(() => _loadingMenu = false);
+    }
+  }
+
+  Future<void> _refreshStaffMembers() async {
+    if (_merchantId.isEmpty) return;
+    if (mounted) setState(() => _loadingStaff = true);
+    try {
+      final list = await widget.api.fetchStaffMembers();
+      if (mounted) setState(() => _staffMembers = list);
+    } catch (_) {
+      // ignore transient errors
+    } finally {
+      if (mounted) setState(() => _loadingStaff = false);
+    }
   }
 
   @override
@@ -2015,6 +2069,8 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
             ),
           ),
         ),
+        const SizedBox(height: 12),
+        _buildStaffRolesCard(),
         const SizedBox(height: 16),
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
@@ -2026,6 +2082,484 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
           onPressed: widget.onLogout,
           icon: const Icon(Icons.logout),
           label: const Text('تسجيل الخروج من تطبيق التاجر', style: TextStyle(fontWeight: FontWeight.w800)),
+        ),
+      ],
+    );
+  }
+
+  static const Map<String, String> _staffRoleLabels = {
+    'owner': 'المالك (صلاحيات كاملة)',
+    'manager': 'مدير الفرع',
+    'orders_staff': 'موظف الطلبات',
+    'catalog_staff': 'مسؤول المنتجات والمنيو',
+  };
+
+  Widget _buildStaffRolesCard() {
+    return Card(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.groups_2_outlined, color: MerchantAppConfig.brandRed, size: 20),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'فريق العمل والصلاحيات',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: _openAddStaffDialog,
+                  icon: const Icon(Icons.person_add_alt_1, size: 17),
+                  label: const Text('إضافة عضو'),
+                ),
+              ],
+            ),
+            const Text(
+              'إدارة صلاحيات المالك، المدير، موظف الطلبات، ومسؤول المنتجات.',
+              style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+            ),
+            const Divider(height: 16),
+            if (_loadingStaff)
+              const Padding(
+                padding: EdgeInsets.all(12),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else if (_staffMembers.isEmpty)
+              const Text(
+                'لم تتم إضافة أعضاء إضافيين بعد — يمكنك إضافة مدير أو موظف طلبات بسهولة.',
+                style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+              )
+            else
+              ..._staffMembers.map((member) {
+                final role = (member['role'] ?? 'orders_staff').toString();
+                final isOwner = role == 'owner';
+                final staffId = (member['id'] ?? '').toString();
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: CircleAvatar(
+                    radius: 17,
+                    backgroundColor: const Color(0xFFF1F5F9),
+                    child: Icon(
+                      isOwner ? Icons.verified_user_outlined : Icons.person_outline,
+                      size: 18,
+                      color: MerchantAppConfig.brandSlate,
+                    ),
+                  ),
+                  title: Text(
+                    member['full_name']?.toString() ?? 'عضو فريق',
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                  ),
+                  subtitle: Text(
+                    '${_staffRoleLabels[role] ?? role}${member['phone'] != null && member['phone'].toString().isNotEmpty ? ' · ${member['phone']}' : ''}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  trailing: isOwner
+                      ? const Chip(label: Text('المالك', style: TextStyle(fontSize: 10)))
+                      : IconButton(
+                          icon: const Icon(Icons.delete_outline, color: Color(0xFFBE123C), size: 19),
+                          onPressed: () async {
+                            try {
+                              await widget.api.deleteStaffMember(staffId);
+                              await _refreshStaffMembers();
+                              _snack('تم حذف العضو من فريق العمل');
+                            } catch (e) {
+                              _snack(e.toString(), isError: true);
+                            }
+                          },
+                        ),
+                );
+              }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openAddStaffDialog() async {
+    final nameCtrl = TextEditingController();
+    final phoneCtrl = TextEditingController();
+    String selectedRole = 'orders_staff';
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          title: const Text('إضافة عضو لفريق العمل', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(labelText: 'الاسم الكامل *', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                textDirection: TextDirection.ltr,
+                decoration: const InputDecoration(labelText: 'رقم الهاتف', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                value: selectedRole,
+                decoration: const InputDecoration(labelText: 'الدور والصلاحية', border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: 'manager', child: Text('مدير الفرع')),
+                  DropdownMenuItem(value: 'orders_staff', child: Text('موظف الطلبات')),
+                  DropdownMenuItem(value: 'catalog_staff', child: Text('مسؤول المنتجات والمنيو')),
+                ],
+                onChanged: (v) {
+                  if (v != null) setDlgState(() => selectedRole = v);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: MerchantAppConfig.brandRed),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('إضافة'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok == true && nameCtrl.text.trim().isNotEmpty) {
+      try {
+        await widget.api.addStaffMember(
+          fullName: nameCtrl.text.trim(),
+          phone: phoneCtrl.text.trim(),
+          role: selectedRole,
+        );
+        await _refreshStaffMembers();
+        _snack('تمت إضافة عضو الفريق بنجاح ✓');
+      } catch (e) {
+        _snack(e.toString(), isError: true);
+      }
+    }
+    nameCtrl.dispose();
+    phoneCtrl.dispose();
+  }
+
+  Widget _buildRestaurantMenuTab() {
+    return RefreshIndicator(
+      onRefresh: _refreshMenuItems,
+      child: ListView(
+        padding: const EdgeInsets.all(14),
+        children: [
+          Card(
+            color: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const CircleAvatar(
+                    backgroundColor: Color(0xFFFFF1F2),
+                    child: Icon(Icons.restaurant_menu_rounded, color: MerchantAppConfig.brandRed),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('قائمة الطعام والوجبات (المنيو)', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                        Text(
+                          'إدارة الوجبات والأحجام والإضافات ووقت التحضير والإيقاف المؤقت بضغطة واحدة.',
+                          style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(backgroundColor: MerchantAppConfig.brandRed),
+                    onPressed: _openAddMenuItemDialog,
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('وجبة جديدة'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (_loadingMenu)
+            const Padding(
+              padding: EdgeInsets.all(28),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_menuItems.isEmpty)
+            const Card(
+              color: Colors.white,
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  'لا توجد وجبات مضافة في المنيو بعد — اضغط "وجبة جديدة" لإضافة أول صنف مع الأحجام والإضافات ووقت التحضير.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12.5, color: Color(0xFF64748B)),
+                ),
+              ),
+            )
+          else
+            ..._menuItems.map((item) {
+              final id = item['id']?.toString() ?? '';
+              final isAvailable = item['is_available'] == true || item['is_available'] == 1;
+              final prepMin = item['prep_time_minutes'] ?? 15;
+              final sizes = (item['sizes'] as List? ?? const []);
+              final addons = (item['addons'] as List? ?? const []);
+              return Card(
+                color: Colors.white,
+                margin: const EdgeInsets.only(bottom: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              item['name_ar']?.toString() ?? 'صنف',
+                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+                            ),
+                          ),
+                          Text(
+                            '${item['base_price'] ?? 0} ج.م',
+                            style: const TextStyle(fontWeight: FontWeight.w800, color: MerchantAppConfig.brandRed),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          Chip(
+                            visualDensity: VisualDensity.compact,
+                            label: Text('تحضير: $prepMin د', style: const TextStyle(fontSize: 11)),
+                          ),
+                          if (sizes.isNotEmpty)
+                            Chip(
+                              visualDensity: VisualDensity.compact,
+                              label: Text('الأحجام: ${sizes.length}', style: const TextStyle(fontSize: 11)),
+                            ),
+                          if (addons.isNotEmpty)
+                            Chip(
+                              visualDensity: VisualDensity.compact,
+                              label: Text('الإضافات: ${addons.length}', style: const TextStyle(fontSize: 11)),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            isAvailable ? 'متاح للطلب الآن ✓' : 'متوقف مؤقتًا',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              color: isAvailable ? MerchantAppConfig.brandTeal : const Color(0xFFB45309),
+                            ),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () async {
+                              try {
+                                await widget.api.updateMenuItem(
+                                  itemId: id,
+                                  isAvailable: !isAvailable,
+                                  isPaused: isAvailable,
+                                );
+                                await _refreshMenuItems();
+                                _snack(isAvailable ? 'تم إيقاف الصنف مؤقتًا' : 'تم إعادة تفعيل الصنف ✓');
+                              } catch (e) {
+                                _snack(e.toString(), isError: true);
+                              }
+                            },
+                            icon: Icon(isAvailable ? Icons.pause_circle_outline : Icons.play_circle_outline, size: 17),
+                            label: Text(isAvailable ? 'إيقاف مؤقت' : 'تفعيل الآن'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openAddMenuItemDialog() async {
+    final nameCtrl = TextEditingController();
+    final priceCtrl = TextEditingController();
+    final prepCtrl = TextEditingController(text: '20');
+    final sizesCtrl = TextEditingController(text: 'وسط:0, كبير:25');
+    final addonsCtrl = TextEditingController(text: 'جبنة إضافية:15, صوص خاص:10');
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('إضافة وجبة / مشروب للمنيو', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(labelText: 'اسم الوجبة / المشروب *', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: priceCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'السعر الأساسي (ج.م) *', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: prepCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'وقت التحضير (دقيقة)', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: sizesCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'الأحجام (الاسم:فارق السعر، مفصولة بفاصلة)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: addonsCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'الإضافات (الاسم:السعر، مفصولة بفاصلة)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: MerchantAppConfig.brandRed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('حفظ في المنيو'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true && nameCtrl.text.trim().isNotEmpty) {
+      final price = double.tryParse(priceCtrl.text.trim()) ?? 0;
+      final prep = int.tryParse(prepCtrl.text.trim()) ?? 15;
+      List<Map<String, dynamic>> parsePairs(String raw, String priceKey) {
+        return raw
+            .split(',')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .map((entry) {
+              final parts = entry.split(':');
+              final label = parts[0].trim();
+              final val = parts.length > 1 ? (double.tryParse(parts[1].trim()) ?? 0) : 0;
+              return {'name_ar': label, priceKey: val};
+            })
+            .where((m) => (m['name_ar'] as String).isNotEmpty)
+            .toList();
+      }
+      try {
+        await widget.api.createMenuItem(
+          nameAr: nameCtrl.text.trim(),
+          basePrice: price,
+          prepTimeMinutes: prep,
+          sizes: parsePairs(sizesCtrl.text, 'price_delta'),
+          addons: parsePairs(addonsCtrl.text, 'price'),
+        );
+        await _refreshMenuItems();
+        _snack('تمت إضافة الوجبة لقائمة الطعام بنجاح ✓');
+      } catch (e) {
+        _snack(e.toString(), isError: true);
+      }
+    }
+    nameCtrl.dispose();
+    priceCtrl.dispose();
+    prepCtrl.dispose();
+    sizesCtrl.dispose();
+    addonsCtrl.dispose();
+  }
+
+  Widget _buildPharmacyComplianceTab() {
+    final licenseNo = widget.merchant['pharmacy_license_no']?.toString() ?? 'غير مسجل';
+    final pharmacistName = widget.merchant['pharmacist_name']?.toString() ?? 'غير مسجل';
+    final syndicateNo = widget.merchant['syndicate_no']?.toString() ?? 'غير مسجل';
+    final rxOrders = _orders.where((o) {
+      final hasRx = (o['prescription_image_url'] ?? '').toString().trim().isNotEmpty;
+      final status = (o['status'] ?? '').toString();
+      return hasRx || status == 'awaiting_quote';
+    }).length;
+
+    return ListView(
+      padding: const EdgeInsets.all(14),
+      children: [
+        Card(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.local_pharmacy_rounded, color: MerchantAppConfig.brandTeal, size: 22),
+                    SizedBox(width: 8),
+                    Text('المتطلبات النظامية والروشتات', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+                  ],
+                ),
+                const Divider(height: 20),
+                Text('رقم ترخيص الصيدلية: $licenseNo', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 6),
+                Text('الصيدلي المسؤول: $pharmacistName', style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 6),
+                Text('رقم قيد النقابة: $syndicateNo', style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0FDFA),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF99F6E4)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.medical_services_outlined, color: MerchantAppConfig.brandTeal),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'طلبات الروشتات والتسعير النشطة حاليًا: $rxOrders طلب',
+                          style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: Color(0xFF115E59)),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => setState(() => _tabIndex = 0),
+                        child: const Text('فتح الطلبات'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ],
     );
@@ -2168,10 +2702,16 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
 
   @override
   Widget build(BuildContext context) {
+    final thirdTab = _isRestaurantOrCafe
+        ? _buildRestaurantMenuTab()
+        : _isPharmacy
+            ? _buildPharmacyComplianceTab()
+            : _buildExcelAndApprovalsTab();
+
     final pages = [
       _buildOrdersTab(),
       _buildProductsTab(),
-      _buildExcelAndApprovalsTab(),
+      thirdTab,
       _buildStoreProfileTab(),
     ];
 
@@ -2184,7 +2724,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(_businessName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
-            const Text('تطبيق اطلبها للتجار', style: TextStyle(fontSize: 11, color: Color(0xFFCBD5E1))),
+            Text(_activitySubtitle, style: const TextStyle(fontSize: 11, color: Color(0xFFCBD5E1))),
           ],
         ),
         actions: [
@@ -2226,6 +2766,8 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
               _refreshNotifications();
               _refreshProducts();
               _refreshApprovalRequests();
+              if (_isRestaurantOrCafe) _refreshMenuItems();
+              _refreshStaffMembers();
             },
           ),
         ],
@@ -2291,26 +2833,43 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (idx) => setState(() => _tabIndex = idx),
-        destinations: const [
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.receipt_long_outlined),
-            selectedIcon: Icon(Icons.receipt_long, color: MerchantAppConfig.brandRed),
-            label: 'الطلبات',
+            icon: const Icon(Icons.receipt_long_outlined),
+            selectedIcon: const Icon(Icons.receipt_long, color: MerchantAppConfig.brandRed),
+            label: _isPharmacy ? 'الروشتات' : 'الطلبات',
           ),
           NavigationDestination(
-            icon: Icon(Icons.inventory_2_outlined),
-            selectedIcon: Icon(Icons.inventory_2, color: MerchantAppConfig.brandRed),
-            label: 'منتجاتي',
+            icon: const Icon(Icons.inventory_2_outlined),
+            selectedIcon: const Icon(Icons.inventory_2, color: MerchantAppConfig.brandRed),
+            label: _isRestaurantOrCafe ? 'الأصناف' : 'منتجاتي',
           ),
           NavigationDestination(
-            icon: Icon(Icons.table_view_outlined),
-            selectedIcon: Icon(Icons.table_view, color: MerchantAppConfig.brandRed),
-            label: 'Excel والاعتماد',
+            icon: Icon(
+              _isRestaurantOrCafe
+                  ? Icons.restaurant_menu_outlined
+                  : _isPharmacy
+                      ? Icons.local_pharmacy_outlined
+                      : Icons.table_view_outlined,
+            ),
+            selectedIcon: Icon(
+              _isRestaurantOrCafe
+                  ? Icons.restaurant_menu
+                  : _isPharmacy
+                      ? Icons.local_pharmacy
+                      : Icons.table_view,
+              color: MerchantAppConfig.brandRed,
+            ),
+            label: _isRestaurantOrCafe
+                ? 'المنيو'
+                : _isPharmacy
+                    ? 'التراخيص'
+                    : 'Excel والاعتماد',
           ),
           NavigationDestination(
-            icon: Icon(Icons.store_outlined),
-            selectedIcon: Icon(Icons.store, color: MerchantAppConfig.brandRed),
-            label: 'متجري',
+            icon: const Icon(Icons.store_outlined),
+            selectedIcon: const Icon(Icons.store, color: MerchantAppConfig.brandRed),
+            label: _isRestaurantOrCafe ? 'مطعمي' : _isPharmacy ? 'صيدليتي' : 'متجري',
           ),
         ],
       ),

@@ -46,6 +46,7 @@ import {
   registerStoresReviewsRoutes,
   notifyStoreFollowers,
 } from './src/server/storesReviewsSystem.ts';
+import { registerMerchantOnboardingRoutes } from './src/server/merchantOnboarding.ts';
 import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
@@ -13561,6 +13562,25 @@ registerRidesRoutes(app, {
 registerStoresReviewsRoutes(app, {
   enqueueSystemPushNotification,
   broadcastToRooms,
+});
+
+// Register Otlobha Merchant Self-Onboarding, Admin Review/Smart Linking, Activity Workspace & Team RBAC APIs
+registerMerchantOnboardingRoutes(app, {
+  enqueueSystemPushNotification: (payload) => {
+    enqueueSystemPushNotification({
+      targetApp: payload.app_target,
+      recipientId: payload.target_user_id ?? null,
+      titleAr: payload.title_ar,
+      bodyAr: payload.body_ar,
+      category: 'operational',
+      extraData: payload.data
+        ? Object.fromEntries(Object.entries(payload.data).map(([k, v]) => [k, String(v ?? '')]))
+        : undefined,
+    });
+  },
+  broadcastToRooms,
+  checkRateLimit,
+  getClientIp,
 });
 
 async function startServer() {

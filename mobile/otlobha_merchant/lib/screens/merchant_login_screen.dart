@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/api_client.dart';
 import '../core/config.dart';
+import 'merchant_join_screen.dart';
 
 class MerchantLoginScreen extends StatefulWidget {
   final MerchantApiClient api;
@@ -218,6 +219,62 @@ class _MerchantLoginScreenState extends State<MerchantLoginScreen> {
                           label: Text(
                             _loading ? 'جاري تسجيل الدخول...' : 'دخول إلى متجري',
                             style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        const Divider(height: 20),
+                        const Text(
+                          'لديك متجر، مطعم، كافيه، أو صيدلية جديدة؟',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: MerchantAppConfig.brandSlate,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        OutlinedButton.icon(
+                          onPressed: _loading
+                              ? null
+                              : () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => MerchantJoinScreen(api: widget.api),
+                                    ),
+                                  );
+                                },
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: MerchantAppConfig.brandRed,
+                            side: const BorderSide(color: MerchantAppConfig.brandRed, width: 1.4),
+                            padding: const EdgeInsets.symmetric(vertical: 13),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          icon: const Icon(Icons.add_business_rounded),
+                          label: const Text(
+                            'انضم إلى اطلبها',
+                            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        TextButton.icon(
+                          onPressed: _loading
+                              ? null
+                              : () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => MerchantJoinScreen(
+                                        api: widget.api,
+                                        startInTrackMode: true,
+                                      ),
+                                    ),
+                                  );
+                                },
+                          icon: const Icon(Icons.fact_check_outlined, size: 18),
+                          label: const Text(
+                            'متابعة حالة طلب انضمام سابق أو استكمال مسودة',
+                            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
                           ),
                         ),
                       ],

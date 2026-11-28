@@ -66,6 +66,7 @@ import {
   type SwipeProductPreview,
 } from './storefront/OtlobhaProductDetailSheet.tsx';
 import { OtlobhaSmartAssistantModal } from './storefront/OtlobhaSmartAssistantModal.tsx';
+import { PublicStoreWebPage } from './PublicStoreWebPage.tsx';
 import { CustomerRidesView } from './rides/CustomerRidesView.tsx';
 import type {
   CaptainRatingRecord,
@@ -267,6 +268,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   const [storefrontBrand, setStorefrontBrand] = useState('');
   const [storefrontMerchantId, setStorefrontMerchantId] = useState('');
   const [searchOverlayOpen, setSearchOverlayOpen] = useState(false);
+  const [activeStorePageId, setActiveStorePageId] = useState<string | null>(null);
   const [detailProductId, setDetailProductId] = useState<string | null>(null);
   const [detailProductList, setDetailProductList] = useState<SwipeProductPreview[]>([]);
   const [detailFromStorefrontHome, setDetailFromStorefrontHome] = useState<boolean>(false);
@@ -2851,6 +2853,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         {tab === 'categories' && (
           <OtlobhaCategoriesView
             categories={storefrontCategories}
+            merchants={merchants}
             zoneName={zones.find((z) => z.id === selectedZoneId)?.name_ar || 'المنزلة - الدقهلية'}
             cartQtyMap={cart}
             onOpenSearch={() => setSearchOverlayOpen(true)}
@@ -2861,6 +2864,8 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
             }}
             onAddProduct={handleAddStorefrontCard}
             onDecrementProduct={handleDecrementStorefrontProduct}
+            onSelectStore={(mid) => setActiveStorePageId(mid)}
+            onOpenAllStores={() => handleOpenOtlobhaService('stores')}
             onSelectGroup={(groupKey) => {
               setStorefrontCategoryId('');
               setStorefrontBrand('');
@@ -5185,7 +5190,64 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         }}
         onAddProduct={handleAddStorefrontCard}
         onDecrementProduct={handleDecrementStorefrontProduct}
+        onSelectStore={(mid) => {
+          setSearchOverlayOpen(false);
+          setActiveStorePageId(mid);
+        }}
       />
+
+      {activeStorePageId && (
+        <div className="fixed inset-0 z-50 bg-[#F6F7F9] overflow-y-auto">
+          <PublicStoreWebPage
+            merchantId={activeStorePageId}
+            embedded
+            cart={cart}
+            onAddProduct={(prod, delta) => {
+              if (delta > 0) {
+                const basePrice = Number(prod.base_price ?? prod.price ?? 0);
+                const salePrice = prod.sale_price != null ? Number(prod.sale_price) : null;
+                const effPrice = Number(prod.effective_price ?? salePrice ?? basePrice);
+                const merchantObj = merchants.find((m) => m.id === String(prod.merchant_id || activeStorePageId));
+                handleAddStorefrontCard({
+                  id: String(prod.id),
+                  merchant_id: String(prod.merchant_id || activeStorePageId),
+                  merchant_name: String(prod.merchant_name || merchantObj?.business_name_ar || ''),
+                  category_id: String(prod.category_id || ''),
+                  name_ar: String(prod.name_ar || ''),
+                  name_en: String(prod.name_en || prod.name_ar || ''),
+                  description: String(prod.description || ''),
+                  image_url: String(prod.image_url || ''),
+                  base_price: basePrice,
+                  sale_price: salePrice,
+                  effective_price: effPrice,
+                  discount_percent: Number(prod.discount_percent ?? prod.discount_pct ?? 0),
+                  is_offer: Boolean(prod.is_offer || (salePrice != null && salePrice < basePrice)),
+                  is_weighted: Boolean(prod.is_weighted),
+                  weight_step: Number(prod.weight_step || 0.25),
+                  weight_unit: String(prod.weight_unit || 'كجم'),
+                  stock_quantity: Number(prod.stock_quantity ?? 99),
+                  min_order_qty: Number(prod.min_order_qty ?? 1),
+                  is_available: prod.is_available !== false,
+                  requires_prescription: Boolean(prod.requires_prescription),
+                  brand: String(prod.brand || ''),
+                  size_label: String(prod.size_label || ''),
+                  stores_count: Number(prod.stores_count ?? 1),
+                  lowest_store_price: Number(prod.lowest_store_price ?? effPrice),
+                  max_store_savings: Number(prod.max_store_savings ?? 0),
+                });
+              } else {
+                handleDecrementStorefrontProduct(String(prod.id));
+              }
+            }}
+            onOpenCart={() => {
+              setActiveStorePageId(null);
+              setTab('cart');
+            }}
+            onBack={() => setActiveStorePageId(null)}
+            onNotify={onNotify}
+          />
+        </div>
+      )}
 
       <OtlobhaProductDetailSheet
         productId={detailProductId}

@@ -668,6 +668,297 @@ class MerchantApiClient {
         .timeout(const Duration(seconds: 15)));
     _decode(res);
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Self-Onboarding («انضم إلى اطلبها») & Application Tracking
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  Future<Map<String, dynamic>> fetchOnboardingConfig() async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/config');
+    final res = await _sendWithRetry(() => http.get(uri, headers: const {'Accept': 'application/json'}));
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> createOnboardingDraft(Map<String, dynamic> payload) async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/drafts');
+    final res = await _sendWithRetry(
+      () => http.post(
+        uri,
+        headers: const {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        body: jsonEncode(payload),
+      ),
+    );
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> fetchOnboardingApplication({
+    required String applicationNumber,
+    required String secret,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/applications/${Uri.encodeComponent(applicationNumber)}',
+    );
+    final res = await _sendWithRetry(
+      () => http.get(
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          'X-Application-Secret': secret,
+        },
+      ),
+    );
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> updateOnboardingApplication({
+    required String applicationNumber,
+    required String secret,
+    required Map<String, dynamic> payload,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/applications/${Uri.encodeComponent(applicationNumber)}',
+    );
+    final res = await _sendWithRetry(
+      () => http.patch(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Application-Secret': secret,
+        },
+        body: jsonEncode(payload),
+      ),
+    );
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> uploadOnboardingDocument({
+    required String applicationNumber,
+    required String secret,
+    required String docType,
+    required String docLabel,
+    required String fileName,
+    required String mimeType,
+    required String fileData,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/applications/${Uri.encodeComponent(applicationNumber)}/documents',
+    );
+    final res = await _sendWithRetry(
+      () => http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Application-Secret': secret,
+        },
+        body: jsonEncode({
+          'doc_type': docType,
+          'doc_label': docLabel,
+          'file_name': fileName,
+          'mime_type': mimeType,
+          'file_data': fileData,
+        }),
+      ),
+    );
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<void> deleteOnboardingDocument({
+    required String applicationNumber,
+    required String secret,
+    required String docId,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/applications/${Uri.encodeComponent(applicationNumber)}/documents/${Uri.encodeComponent(docId)}',
+    );
+    final res = await _sendWithRetry(
+      () => http.delete(
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          'X-Application-Secret': secret,
+        },
+      ),
+    );
+    _decode(res);
+  }
+
+  Future<Map<String, dynamic>> submitOnboardingApplication({
+    required String applicationNumber,
+    required String secret,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/applications/${Uri.encodeComponent(applicationNumber)}/submit',
+    );
+    final res = await _sendWithRetry(
+      () => http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Application-Secret': secret,
+        },
+        body: jsonEncode({}),
+      ),
+    );
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> checkOnboardingStatus({
+    required String applicationNumber,
+    required String contact,
+  }) async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant-onboarding/status');
+    final res = await _sendWithRetry(
+      () => http.post(
+        uri,
+        headers: const {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        body: jsonEncode({
+          'application_number': applicationNumber.trim(),
+          'contact': contact.trim(),
+        }),
+      ),
+    );
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Activity-Tailored Workspace (Profile, Restaurant Menu, Staff RBAC)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  Future<Map<String, dynamic>> fetchWorkspaceProfile() async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant/workspace/profile');
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 15)));
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchMenuItems() async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant/menu-items');
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 20)));
+    final data = _decode(res);
+    if (data is Map && data['items'] is List) {
+      return (data['items'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+    if (data is List) {
+      return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+    return [];
+  }
+
+  Future<Map<String, dynamic>> createMenuItem({
+    required String nameAr,
+    String? description,
+    required double basePrice,
+    double? salePrice,
+    int prepTimeMinutes = 15,
+    List<Map<String, dynamic>> sizes = const [],
+    List<Map<String, dynamic>> addons = const [],
+    bool isAvailable = true,
+  }) async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant/menu-items');
+    final res = await _authedRequest(() => http
+        .post(
+          uri,
+          headers: _headers(),
+          body: jsonEncode({
+            'name_ar': nameAr.trim(),
+            if (description != null && description.trim().isNotEmpty) 'description': description.trim(),
+            'base_price': basePrice,
+            if (salePrice != null && salePrice > 0) 'sale_price': salePrice,
+            'prep_time_minutes': prepTimeMinutes,
+            'sizes': sizes,
+            'addons': addons,
+            'is_available': isAvailable,
+          }),
+        )
+        .timeout(const Duration(seconds: 20)));
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<Map<String, dynamic>> updateMenuItem({
+    required String itemId,
+    String? nameAr,
+    double? basePrice,
+    int? prepTimeMinutes,
+    bool? isAvailable,
+    bool? isPaused,
+    List<Map<String, dynamic>>? sizes,
+    List<Map<String, dynamic>>? addons,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant/menu-items/${Uri.encodeComponent(itemId)}',
+    );
+    final payload = <String, dynamic>{};
+    if (nameAr != null) payload['name_ar'] = nameAr.trim();
+    if (basePrice != null) payload['base_price'] = basePrice;
+    if (prepTimeMinutes != null) payload['prep_time_minutes'] = prepTimeMinutes;
+    if (isAvailable != null) payload['is_available'] = isAvailable;
+    if (isPaused != null) payload['is_paused'] = isPaused;
+    if (sizes != null) payload['sizes'] = sizes;
+    if (addons != null) payload['addons'] = addons;
+    final res = await _authedRequest(() => http
+        .patch(uri, headers: _headers(), body: jsonEncode(payload))
+        .timeout(const Duration(seconds: 20)));
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchStaffMembers() async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant/staff');
+    final res = await _authedRequest(() => http.get(uri, headers: _headers()).timeout(const Duration(seconds: 15)));
+    final data = _decode(res);
+    if (data is Map && data['items'] is List) {
+      return (data['items'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+    return [];
+  }
+
+  Future<Map<String, dynamic>> addStaffMember({
+    required String fullName,
+    String? phone,
+    String? email,
+    required String role,
+  }) async {
+    final uri = Uri.parse('${MerchantAppConfig.normalizedBaseUrl}/api/merchant/staff');
+    final res = await _authedRequest(() => http
+        .post(
+          uri,
+          headers: _headers(),
+          body: jsonEncode({
+            'full_name': fullName.trim(),
+            if (phone != null && phone.trim().isNotEmpty) 'phone': phone.trim(),
+            if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+            'role': role,
+          }),
+        )
+        .timeout(const Duration(seconds: 15)));
+    return Map<String, dynamic>.from(_decode(res) as Map);
+  }
+
+  Future<void> updateStaffMember({
+    required String staffId,
+    String? role,
+    bool? isActive,
+  }) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant/staff/${Uri.encodeComponent(staffId)}',
+    );
+    final payload = <String, dynamic>{};
+    if (role != null) payload['role'] = role;
+    if (isActive != null) payload['is_active'] = isActive;
+    final res = await _authedRequest(() => http
+        .patch(uri, headers: _headers(), body: jsonEncode(payload))
+        .timeout(const Duration(seconds: 15)));
+    _decode(res);
+  }
+
+  Future<void> deleteStaffMember(String staffId) async {
+    final uri = Uri.parse(
+      '${MerchantAppConfig.normalizedBaseUrl}/api/merchant/staff/${Uri.encodeComponent(staffId)}',
+    );
+    final res = await _authedRequest(() => http.delete(uri, headers: _headers()).timeout(const Duration(seconds: 15)));
+    _decode(res);
+  }
 }
 
 class MerchantProductsPageResult {

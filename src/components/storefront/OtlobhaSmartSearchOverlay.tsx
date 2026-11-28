@@ -1,16 +1,36 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
+  ChevronLeft,
   Flame,
   Search,
   SlidersHorizontal,
   Sparkles,
+  Star,
+  Store,
   TrendingUp,
   X,
 } from 'lucide-react';
 import { api } from '../../lib/api';
 import type { StorefrontProductCard } from '../../shared/types';
 import { OtlobhaProductCard } from './OtlobhaProductCard';
+
+type MatchedStoreRecord = {
+  id: string;
+  business_name_ar: string;
+  business_name_en?: string;
+  merchant_type?: string;
+  description?: string;
+  image_url?: string;
+  cover_image_url?: string;
+  address?: string;
+  zone_name?: string;
+  rating_avg?: number;
+  rating_count?: number;
+  is_open?: boolean;
+  products_count: number;
+  offers_count?: number;
+};
 
 interface Props {
   open: boolean;
@@ -20,6 +40,7 @@ interface Props {
   onOpenProduct: (productId: string, orderedList?: StorefrontProductCard[]) => void;
   onAddProduct: (product: StorefrontProductCard) => void;
   onDecrementProduct: (productId: string) => void;
+  onSelectStore?: (merchantId: string, merchantName: string) => void;
 }
 
 export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
@@ -30,6 +51,7 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
   onOpenProduct,
   onAddProduct,
   onDecrementProduct,
+  onSelectStore,
 }) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [query, setQuery] = useState(initialQuery);
@@ -42,6 +64,7 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
 
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<StorefrontProductCard[]>([]);
+  const [matchedStores, setMatchedStores] = useState<MatchedStoreRecord[]>([]);
   const [topOffers, setTopOffers] = useState<StorefrontProductCard[]>([]);
   const [trending, setTrending] = useState<string[]>([]);
   const [brands, setBrands] = useState<string[]>([]);
@@ -69,6 +92,7 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
           limit: 30,
         });
         setItems(res.items || []);
+        setMatchedStores(res.stores || []);
         setTopOffers(res.top_offers || []);
         setTrending(res.trending_queries || []);
         setBrands(res.facets?.brands || []);
@@ -107,7 +131,7 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="ابحث عن منتج، علامة تجارية، أو باركود..."
+              placeholder="ابحث عن متجر معتمد، منتج، علامة تجارية، أو باركود..."
               className="w-full h-11 pr-10 pl-9 rounded-2xl bg-[#F6F7F9] border border-slate-200 focus:border-[#A92224] focus:bg-white focus:outline-none text-sm font-semibold text-slate-900"
             />
             {query && (
@@ -212,6 +236,69 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
         <div className="max-w-3xl mx-auto space-y-6 pb-10">
           {!showingResults ? (
             <>
+              {/* Approved Stores Horizontal Discovery Strip */}
+              {matchedStores.length > 0 && (
+                <section className="space-y-2.5">
+                  <h3 className="text-sm font-black text-slate-900 flex items-center gap-1.5">
+                    <Store className="w-4 h-4 text-[#A92224]" />
+                    المتاجر المعتمدة
+                  </h3>
+                  <div className="flex items-stretch gap-2.5 overflow-x-auto no-scrollbar pb-1">
+                    {matchedStores.map((st) => {
+                      const ratingVal = Number(st.rating_avg || 0);
+                      const isOpen = st.is_open !== false;
+                      return (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => {
+                            if (onSelectStore) {
+                              onSelectStore(st.id, st.business_name_ar);
+                            } else if (typeof window !== 'undefined') {
+                              window.location.assign(`/store/${encodeURIComponent(st.id)}`);
+                            }
+                          }}
+                          className="shrink-0 w-[108px] rounded-2xl bg-white border border-slate-200 hover:border-[#A92224]/50 p-2.5 flex flex-col items-center text-center gap-1.5 shadow-xs transition cursor-pointer"
+                        >
+                          <div className="relative">
+                            <div className="w-11 h-11 rounded-xl bg-[#FEF2F2] border border-slate-100 overflow-hidden flex items-center justify-center">
+                              {st.image_url ? (
+                                <img
+                                  src={st.image_url}
+                                  alt={st.business_name_ar}
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <Store className="w-5 h-5 text-[#A92224]" />
+                              )}
+                            </div>
+                            <span
+                              className={`absolute -bottom-0.5 -left-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
+                                isOpen ? 'bg-emerald-500' : 'bg-slate-400'
+                              }`}
+                            />
+                          </div>
+                          <span className="text-[11px] font-extrabold text-slate-900 line-clamp-2 leading-tight">
+                            {st.business_name_ar}
+                          </span>
+                          {ratingVal > 0 ? (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-amber-600 tabular-nums">
+                              <Star className="w-3 h-3 fill-amber-400 text-amber-500" />
+                              {ratingVal.toFixed(1)}
+                            </span>
+                          ) : (
+                            <span className={`text-[10px] font-bold ${isOpen ? 'text-emerald-600' : 'text-slate-400'}`}>
+                              {isOpen ? 'مفتوح' : 'مغلق'}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
               {/* Trending Searches */}
               <section className="space-y-2.5">
                 <h3 className="text-sm font-black text-slate-900 flex items-center gap-1.5">
@@ -275,32 +362,123 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
               )}
             </>
           ) : (
-            <section className="space-y-3">
+            <section className="space-y-4">
               <div className="flex items-center justify-between text-xs font-bold text-slate-500">
                 <span>
-                  {loading ? 'جاري البحث الفوري...' : `تم العثور على ${items.length} منتج`}
+                  {loading
+                    ? 'جاري البحث الفوري...'
+                    : matchedStores.length > 0 && items.length > 0
+                    ? `تم العثور على ${matchedStores.length} متجر و ${items.length} منتج`
+                    : matchedStores.length > 0
+                    ? `تم العثور على ${matchedStores.length} متجر مطابق`
+                    : `تم العثور على ${items.length} منتج`}
                 </span>
                 {query.trim() && <span className="text-[#A92224]">«{query.trim()}»</span>}
               </div>
 
-              {!loading && items.length === 0 ? (
+              {!loading && items.length === 0 && matchedStores.length === 0 ? (
                 <div className="bg-white rounded-3xl border border-slate-200 p-8 text-center space-y-2">
                   <Search className="w-10 h-10 mx-auto text-slate-300" />
-                  <p className="font-black text-slate-800">لم نعثر على منتجات مطابقة</p>
-                  <p className="text-xs text-slate-500">جرّب كتابة اسم أقصر أو مسح الفلاتر المحددة.</p>
+                  <p className="font-black text-slate-800">لم نعثر على متاجر أو منتجات مطابقة</p>
+                  <p className="text-xs text-slate-500">جرّب كتابة اسم متجر أو منتج أقصر أو مسح الفلاتر المحددة.</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  {items.map((p) => (
-                    <OtlobhaProductCard
-                      key={p.id}
-                      product={p}
-                      cartQty={cartQtyMap[p.id] || 0}
-                      onOpenDetails={(id) => onOpenProduct(id, items)}
-                      onAdd={onAddProduct}
-                      onDecrement={onDecrementProduct}
-                    />
-                  ))}
+                <div className="space-y-5">
+                  {/* Matched Approved Stores */}
+                  {matchedStores.length > 0 && (
+                    <div className="space-y-2.5">
+                      <h3 className="text-sm font-black text-slate-900 flex items-center gap-1.5">
+                        <Store className="w-4 h-4 text-[#A92224]" />
+                        المتاجر المعتمدة ({matchedStores.length})
+                      </h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {matchedStores.map((st) => {
+                          const ratingVal = Number(st.rating_avg || 0);
+                          const isOpen = st.is_open !== false;
+                          return (
+                            <button
+                              key={st.id}
+                              type="button"
+                              onClick={() => {
+                                if (onSelectStore) {
+                                  onSelectStore(st.id, st.business_name_ar);
+                                } else if (typeof window !== 'undefined') {
+                                  window.location.assign(`/store/${encodeURIComponent(st.id)}`);
+                                }
+                              }}
+                              className="w-full text-start rounded-2xl bg-white border border-slate-200 hover:border-[#A92224]/50 p-3 flex items-center gap-3 shadow-xs transition cursor-pointer"
+                            >
+                              <div className="relative shrink-0">
+                                <div className="w-12 h-12 rounded-xl bg-[#FEF2F2] border border-slate-100 overflow-hidden flex items-center justify-center">
+                                  {st.image_url ? (
+                                    <img
+                                      src={st.image_url}
+                                      alt={st.business_name_ar}
+                                      referrerPolicy="no-referrer"
+                                      className="w-full h-full object-cover"
+                                    />
+                                  ) : (
+                                    <Store className="w-5 h-5 text-[#A92224]" />
+                                  )}
+                                </div>
+                                <span
+                                  className={`absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                                    isOpen ? 'bg-emerald-500' : 'bg-slate-400'
+                                  }`}
+                                />
+                              </div>
+
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm font-black text-slate-900 truncate">
+                                  {st.business_name_ar}
+                                </div>
+                                <div className="flex items-center gap-2 text-[11px] font-bold text-slate-500 mt-0.5 flex-wrap">
+                                  <span className={isOpen ? 'text-emerald-600' : 'text-slate-400'}>
+                                    {isOpen ? 'مفتوح الآن' : 'مغلق'}
+                                  </span>
+                                  {ratingVal > 0 && (
+                                    <span className="inline-flex items-center gap-0.5 text-amber-600 tabular-nums">
+                                      <Star className="w-3 h-3 fill-amber-400 text-amber-500" />
+                                      {ratingVal.toFixed(1)}
+                                    </span>
+                                  )}
+                                  {st.products_count > 0 && (
+                                    <span className="tabular-nums">{st.products_count} منتج</span>
+                                  )}
+                                  {st.zone_name && <span className="truncate">{st.zone_name}</span>}
+                                </div>
+                              </div>
+
+                              <ChevronLeft className="w-4 h-4 text-slate-400 shrink-0" />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Matched Products */}
+                  {items.length > 0 && (
+                    <div className="space-y-2.5">
+                      {matchedStores.length > 0 && (
+                        <h3 className="text-sm font-black text-slate-900">
+                          المنتجات ({items.length})
+                        </h3>
+                      )}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {items.map((p) => (
+                          <OtlobhaProductCard
+                            key={p.id}
+                            product={p}
+                            cartQty={cartQtyMap[p.id] || 0}
+                            onOpenDetails={(id) => onOpenProduct(id, items)}
+                            onAdd={onAddProduct}
+                            onDecrement={onDecrementProduct}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </section>

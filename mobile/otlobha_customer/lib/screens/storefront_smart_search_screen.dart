@@ -53,6 +53,7 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
   String _selectedBrand = '';
 
   List<Map<String, dynamic>> _items = [];
+  List<Map<String, dynamic>> _matchedStores = [];
   List<Map<String, dynamic>> _topOffers = [];
   List<String> _trendingQueries = [];
   List<String> _facetBrands = [];
@@ -113,6 +114,7 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
       if (!mounted) return;
 
       final rawItems = (res['items'] as List?) ?? [];
+      final rawMatchedStores = (res['stores'] as List?) ?? [];
       final rawOffers = (res['top_offers'] as List?) ?? [];
       final rawTrending = (res['trending_queries'] as List?) ?? [];
       final facets = res['facets'] is Map
@@ -123,6 +125,10 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
 
       setState(() {
         _items = rawItems
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        _matchedStores = rawMatchedStores
             .whereType<Map>()
             .map((e) => Map<String, dynamic>.from(e))
             .toList();
@@ -235,7 +241,7 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
                               onSubmitted: (_) => _runSearch(),
                               style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
                               decoration: InputDecoration(
-                                hintText: 'ابحث عن منتج، ماركة، أو متجر...',
+                                hintText: 'ابحث عن متجر معتمد، منتج، أو ماركة...',
                                 hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
                                 prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFFA92224), size: 20),
                                 suffixIcon: _queryCtrl.text.isNotEmpty
@@ -576,10 +582,174 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
     );
   }
 
+  Widget _buildStoreSearchCard(Map<String, dynamic> store, {bool compact = false}) {
+    final mId = (store['id'] ?? '').toString();
+    final mName = (store['business_name_ar'] ?? store['name_ar'] ?? 'متجر').toString();
+    final logo = OtlobhaCustomerApi.resolveMediaUrl(store['image_url']);
+    final isOpen = store['is_open'] == true || store['is_open'] == 1 || store['is_open_now'] == true;
+    final ratingAvg = (store['rating_avg'] as num?)?.toDouble() ?? 0.0;
+    final ratingCount = (store['rating_count'] as num?)?.toInt() ?? 0;
+    final productsCount = (store['products_count'] as num?)?.toInt() ?? 0;
+    final offersCount = (store['offers_count'] as num?)?.toInt() ?? 0;
+    final zoneName = (store['zone_name'] ?? store['branch_name'] ?? '').toString().trim();
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: () {
+          Navigator.of(context).pop();
+          widget.onSelectStore(mId, mName);
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          width: compact ? 206 : double.infinity,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x080F172A),
+                blurRadius: 8,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: compact ? 52 : 56,
+                height: compact ? 52 : 56,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFE2E8F0)),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: logo.isNotEmpty
+                    ? Image.network(
+                        logo,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const Icon(
+                          Icons.storefront_rounded,
+                          color: Color(0xFFA92224),
+                          size: 26,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.storefront_rounded,
+                        color: Color(0xFFA92224),
+                        size: 26,
+                      ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      mName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.circle,
+                          size: 7,
+                          color: isOpen ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          isOpen ? 'مفتوح' : 'مغلق',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                            color: isOpen ? const Color(0xFF047857) : const Color(0xFFB91C1C),
+                          ),
+                        ),
+                        if (ratingCount > 0) ...[
+                          const SizedBox(width: 6),
+                          const Icon(Icons.star_rounded, size: 13, color: Color(0xFFF5A623)),
+                          const SizedBox(width: 2),
+                          Text(
+                            ratingAvg.toStringAsFixed(1),
+                            style: const TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF334155),
+                            ),
+                          ),
+                        ],
+                        if (!compact && productsCount > 0) ...[
+                          const SizedBox(width: 6),
+                          Text(
+                            '· $productsCount منتج',
+                            style: const TextStyle(fontSize: 10.5, color: Color(0xFF64748B)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    if (!compact && (zoneName.isNotEmpty || offersCount > 0)) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        [
+                          if (zoneName.isNotEmpty) zoneName,
+                          if (offersCount > 0) '$offersCount عرض فعال',
+                        ].join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 10.5, color: Color(0xFF64748B)),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (!compact)
+                const Icon(Icons.chevron_left_rounded, size: 20, color: Color(0xFFA92224)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildDiscoveryView() {
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
       children: [
+        if (_matchedStores.isNotEmpty) ...[
+          const Row(
+            children: [
+              Icon(Icons.storefront_rounded, size: 18, color: Color(0xFFA92224)),
+              SizedBox(width: 6),
+              Text(
+                'المتاجر المعتمدة',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 82,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              itemCount: _matchedStores.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              itemBuilder: (_, idx) => _buildStoreSearchCard(_matchedStores[idx], compact: true),
+            ),
+          ),
+          const SizedBox(height: 18),
+        ],
         if (_trendingQueries.isNotEmpty) ...[
           const Row(
             children: [
@@ -713,7 +883,7 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
   }
 
   Widget _buildSearchResultsView() {
-    if (_items.isEmpty) {
+    if (_items.isEmpty && _matchedStores.isEmpty) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -731,7 +901,7 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
               ),
               const SizedBox(height: 12),
               const Text(
-                'لم نجد منتجات مطابقة لبحثك',
+                'لم نجد متاجر أو منتجات مطابقة لبحثك',
                 style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
               ),
               const SizedBox(height: 6),
@@ -760,49 +930,71 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 24),
       children: [
-        Row(
-          children: [
-            Text(
-              'تم العثور على ${_items.length} منتج',
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
-            ),
-            const Spacer(),
-            if (_activeFiltersCount > 0)
-              TextButton(
-                onPressed: _clearFilters,
-                style: TextButton.styleFrom(
-                  foregroundColor: const Color(0xFFA92224),
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: const Text('إعادة ضبط الفلاتر', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+        if (_matchedStores.isNotEmpty) ...[
+          Row(
+            children: [
+              const Icon(Icons.storefront_rounded, size: 18, color: Color(0xFFA92224)),
+              const SizedBox(width: 6),
+              Text(
+                'المتاجر المعتمدة (${_matchedStores.length})',
+                style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
               ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
-            childAspectRatio: 0.62,
+            ],
           ),
-          itemCount: _items.length,
-          itemBuilder: (_, idx) {
-            final prod = _items[idx];
-            final pid = (prod['id'] ?? '').toString();
-            return StorefrontProductCardWidget(
-              product: prod,
-              cartQty: widget.cart[pid] ?? 0,
-              onTapDetails: () => _openPager(_items, idx),
-              onAdd: () => _handleProductDelta(prod, 1),
-              onDecrement: () => _handleProductDelta(prod, -1),
-            );
-          },
-        ),
+          const SizedBox(height: 8),
+          ..._matchedStores.map(
+            (s) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _buildStoreSearchCard(s),
+            ),
+          ),
+          if (_items.isNotEmpty) const SizedBox(height: 10),
+        ],
+        if (_items.isNotEmpty) ...[
+          Row(
+            children: [
+              Text(
+                'المنتجات (${_items.length})',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Color(0xFF0F172A)),
+              ),
+              const Spacer(),
+              if (_activeFiltersCount > 0)
+                TextButton(
+                  onPressed: _clearFilters,
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFA92224),
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('إعادة ضبط الفلاتر', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 10,
+              mainAxisSpacing: 10,
+              childAspectRatio: 0.62,
+            ),
+            itemCount: _items.length,
+            itemBuilder: (_, idx) {
+              final prod = _items[idx];
+              final pid = (prod['id'] ?? '').toString();
+              return StorefrontProductCardWidget(
+                product: prod,
+                cartQty: widget.cart[pid] ?? 0,
+                onTapDetails: () => _openPager(_items, idx),
+                onAdd: () => _handleProductDelta(prod, 1),
+                onDecrement: () => _handleProductDelta(prod, -1),
+              );
+            },
+          ),
+        ],
       ],
     );
   }

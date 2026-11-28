@@ -13,6 +13,7 @@ import {
   Menu,
   MessageSquare,
   Package,
+  Pill,
   Receipt,
   RefreshCw,
   Settings,
@@ -23,12 +24,17 @@ import {
   Star,
   Store,
   Truck,
+  UserPlus,
   Users,
+  UtensilsCrossed,
   Wallet,
   X,
 } from 'lucide-react';
 import { api } from './lib/api.ts';
+import { resolveActivityProfile } from './shared/merchantActivities.ts';
 import { AdminLoginPortal } from './components/AdminLoginPortal.tsx';
+import { AdminOnboardingReviewSection } from './components/AdminOnboardingReviewSection.tsx';
+import { MerchantActivityWorkspace } from './components/MerchantActivityWorkspace.tsx';
 import { MerchantAuthPortal } from './components/MerchantAuthPortal.tsx';
 import { MerchantMasterLinkPanel } from './components/MerchantMasterLinkPanel.tsx';
 import { MerchantStoreOrdersView } from './components/MerchantStoreOrdersView.tsx';
@@ -430,6 +436,80 @@ export default function App() {
     else setActiveTab(mode);
   };
 
+  const merchantActivityProfile = merchantSession
+    ? resolveActivityProfile(merchantSession.merchant_type, (merchantSession as any).activity_category)
+    : null;
+
+  const merchantPortalNavItems = (() => {
+    if (!merchantSession || !merchantActivityProfile) return [];
+    const cat = merchantActivityProfile.category;
+    const ordersLabel =
+      cat === 'restaurant_cafe'
+        ? isAr
+          ? 'طلبات المطبخ والوجبات'
+          : 'Kitchen Orders'
+        : cat === 'pharmacy'
+        ? isAr
+          ? 'الطلبات والروشتات'
+          : 'Orders & Rx'
+        : isAr
+        ? 'طلبات متجري والفواتير'
+        : 'Store Orders';
+
+    const items = [
+      { id: 'orders', label: ordersLabel, shortLabel: isAr ? 'الطلبات' : 'Orders', icon: Store },
+    ];
+
+    if (cat === 'restaurant_cafe') {
+      items.push({
+        id: 'merchant_menu',
+        label: isAr ? 'قائمة الطعام والوجبات' : 'Menu & Meals',
+        shortLabel: isAr ? 'المنيو' : 'Menu',
+        icon: UtensilsCrossed,
+      });
+      items.push({
+        id: 'catalog',
+        label: isAr ? 'الأصناف والعروض' : 'Catalog & Offers',
+        shortLabel: isAr ? 'الأصناف' : 'Catalog',
+        icon: Package,
+      });
+    } else if (cat === 'pharmacy') {
+      items.push({
+        id: 'catalog',
+        label: isAr ? 'الأدوية والمنتجات' : 'Pharmacy Products',
+        shortLabel: isAr ? 'المنتجات' : 'Products',
+        icon: Package,
+      });
+      items.push({
+        id: 'merchant_regulatory',
+        label: isAr ? 'التراخيص والروشتات' : 'Pharmacy Compliance',
+        shortLabel: isAr ? 'التراخيص' : 'Compliance',
+        icon: Pill,
+      });
+    } else {
+      items.push({
+        id: 'merchant_excel',
+        label: isAr ? 'رفع Excel للإدارة للاعتماد' : 'Upload Excel for Approval',
+        shortLabel: isAr ? 'Excel' : 'Excel',
+        icon: FileSpreadsheet,
+      });
+      items.push({
+        id: 'catalog',
+        label: isAr ? 'المنتجات والمخزون والعروض' : 'Products & Inventory',
+        shortLabel: isAr ? 'المنتجات' : 'Products',
+        icon: Package,
+      });
+    }
+
+    items.push({
+      id: 'merchant_staff',
+      label: isAr ? 'فريق العمل والصلاحيات' : 'Team & Roles',
+      shortLabel: isAr ? 'الفريق' : 'Team',
+      icon: Users,
+    });
+    return items;
+  })();
+
   const navGroups =
     portalMode === 'admin' && adminUser
       ? [
@@ -450,6 +530,7 @@ export default function App() {
           {
             groupLabel: isAr ? 'التشغيل والعملاء' : 'Operations & Users',
             items: [
+              { id: 'merchant_onboarding', label: isAr ? 'طلبات انضمام التجار' : 'Merchant Onboarding', icon: UserPlus },
               { id: 'orders', label: isAr ? 'التجار والصيدليات والطلبات' : 'Merchants & Orders', icon: Store },
               { id: 'store_reviews', label: isAr ? 'تقييمات المتاجر والرقابة' : 'Store Reviews & Moderation', icon: Star },
               { id: 'rides_management', label: isAr ? 'إدارة المشاوير' : 'Rides Management', icon: Car },
@@ -474,16 +555,13 @@ export default function App() {
       : portalMode === 'merchant' && merchantSession
       ? [
           {
-            groupLabel: isAr ? 'بوابة التاجر' : 'Merchant Portal',
-            items: [
-              { id: 'orders', label: isAr ? 'طلبات متجري الواردة' : 'Store Orders', icon: Store },
-              {
-                id: 'merchant_excel',
-                label: isAr ? 'رفع Excel للإدارة للاعتماد' : 'Upload Excel for Approval',
-                icon: FileSpreadsheet,
-              },
-              { id: 'catalog', label: isAr ? 'المنتجات والأقسام' : 'Products & Categories', icon: Package },
-            ],
+            groupLabel:
+              merchantActivityProfile
+                ? `بوابة ${merchantActivityProfile.title_ar}`
+                : isAr
+                ? 'بوابة التاجر'
+                : 'Merchant Portal',
+            items: merchantPortalNavItems.map(({ id, label, icon }) => ({ id, label, icon })),
           },
         ]
       : [];
@@ -990,6 +1068,9 @@ export default function App() {
               {activeTab === 'rides_management' && portalMode === 'admin' && (
                 <RidesManagementSection lang={lang} captains={captains} onRefreshCore={refreshCore} notify={notify} />
               )}
+              {activeTab === 'merchant_onboarding' && portalMode === 'admin' && (
+                <AdminOnboardingReviewSection lang={lang} onRefreshCore={refreshCore} onNotify={notify} />
+              )}
               {activeTab === 'store_reviews' && portalMode === 'admin' && (
                 <StoreReviewsAdminSection lang={lang} onNotify={notify} />
               )}
@@ -1002,6 +1083,15 @@ export default function App() {
                   onRefresh={() => void refreshCore()}
                   onToast={notify}
                 />
+              )}
+              {activeTab === 'merchant_menu' && portalMode === 'merchant' && merchantSession && (
+                <MerchantActivityWorkspace lang={lang} merchant={merchantSession} mode="menu" onNotify={notify} />
+              )}
+              {activeTab === 'merchant_regulatory' && portalMode === 'merchant' && merchantSession && (
+                <MerchantActivityWorkspace lang={lang} merchant={merchantSession} mode="regulatory" onNotify={notify} />
+              )}
+              {activeTab === 'merchant_staff' && portalMode === 'merchant' && merchantSession && (
+                <MerchantActivityWorkspace lang={lang} merchant={merchantSession} mode="staff" onNotify={notify} />
               )}
               {activeTab === 'orders' &&
                 (portalMode === 'merchant' && merchantSession ? (
@@ -1064,11 +1154,7 @@ export default function App() {
             aria-label={isAr ? 'تنقل تطبيق التاجر' : 'Merchant App Navigation'}
             className={`${standalone ? 'flex' : 'flex md:hidden'} sticky bottom-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200 px-2 py-2 items-center justify-around shadow-[0_-4px_16px_rgba(15,23,42,0.06)]`}
           >
-            {[
-              { id: 'orders', label: isAr ? 'الطلبات' : 'Orders', icon: ShoppingBag },
-              { id: 'merchant_excel', label: isAr ? 'رفع Excel' : 'Excel', icon: FileSpreadsheet },
-              { id: 'catalog', label: isAr ? 'المنتجات' : 'Products', icon: Package },
-            ].map((item) => {
+            {merchantPortalNavItems.map((item) => {
               const Icon = item.icon;
               const isSelected = activeTab === item.id;
               return (
@@ -1076,12 +1162,12 @@ export default function App() {
                   key={item.id}
                   type="button"
                   onClick={() => setActiveTab(item.id)}
-                  className={`flex flex-col items-center justify-center gap-1 px-4 py-1.5 rounded-xl text-[11px] font-bold transition-colors ${
+                  className={`flex flex-col items-center justify-center gap-1 px-3 py-1.5 rounded-xl text-[11px] font-bold transition-colors ${
                     isSelected ? 'text-[#A92224] bg-rose-50' : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
                   <Icon className="w-5 h-5" />
-                  <span>{item.label}</span>
+                  <span>{item.shortLabel}</span>
                 </button>
               );
             })}

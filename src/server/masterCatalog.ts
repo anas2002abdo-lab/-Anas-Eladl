@@ -22,6 +22,7 @@ import {
   type AssistantHistoryTurn,
 } from './geminiAssistant.ts';
 import { notifyStoreFollowers } from './storesReviewsSystem.ts';
+import { normalizeArabicText } from './geoService.ts';
 
 // ============================================================================
 // 1. Text, Brand & Size Normalization Engine (Arabic + English + Units)
@@ -2919,16 +2920,120 @@ export function registerMasterCatalogRoutes(app: Express): void {
       `)
       .all() as Array<{ b: string }>;
 
-    const availableStores = db
+    const allActiveStores = db
       .prepare(`
-        SELECT m.id, m.business_name_ar, COUNT(p.id) AS products_count
+        SELECT
+          m.id,
+          m.business_name_ar,
+          COALESCE(m.business_name_en, '') AS business_name_en,
+          COALESCE(m.branch_name, '') AS branch_name,
+          COALESCE(m.description_ar, '') AS description_ar,
+          COALESCE(m.image_url, '') AS image_url,
+          COALESCE(m.cover_image_url, '') AS cover_image_url,
+          COALESCE(m.merchant_type, 'supermarket') AS merchant_type,
+          COALESCE(m.is_open_now, 1) AS is_open,
+          COALESCE((SELECT ROUND(AVG(sr.rating), 1) FROM store_reviews sr WHERE sr.merchant_id = m.id AND sr.status = 'visible'), 0) AS rating_avg,
+          COALESCE((SELECT COUNT(*) FROM store_reviews sr WHERE sr.merchant_id = m.id AND sr.status = 'visible'), 0) AS rating_count,
+          COALESCE((SELECT COUNT(*) FROM store_follows sf WHERE sf.merchant_id = m.id), 0) AS followers_count,
+          COALESCE(m.working_hours, '') AS working_hours,
+          COALESCE(m.address_detail, '') AS address_detail,
+          COALESCE(m.zone_name, '') AS zone_name,
+          (SELECT COUNT(*) FROM products p WHERE p.merchant_id = m.id AND p.is_available = 1) AS products_count,
+          (SELECT COUNT(*) FROM products p WHERE p.merchant_id = m.id AND p.is_available = 1 AND (p.is_offer = 1 OR (p.sale_price IS NOT NULL AND p.sale_price < p.base_price))) AS offers_count
         FROM merchants m
-        JOIN products p ON p.merchant_id = m.id AND p.is_available = 1
-        GROUP BY m.id
-        ORDER BY products_count DESC
-        LIMIT 20
+        WHERE COALESCE(m.verification_status, 'approved') IN ('approved', 'pending')
+        ORDER BY COALESCE(m.is_open_now, 1) DESC, rating_avg DESC, products_count DESC
       `)
-      .all() as Array<{ id: string; business_name_ar: string; products_count: number }>;
+      .all() as Array<Record<string, any>>;
+
+    const storeTypeArabic = (t: string): string => {
+      switch ((t || '').toLowerCase()) {
+        case 'pharmacy':
+          return 'صيدلية صيدليات ادوية أدوية';
+        case 'restaurant':
+          return 'مطعم مطاعم اكل أكل وجبات';
+        case 'bakery':
+          return 'مخبز فرن مخبوزات حلواني';
+        case 'grocery':
+        case 'supermarket':
+          return 'سوبر ماركت بقالة مقاضي ماركت';
+        default:
+          return 'متجر محل';
+      }
+    };
+
+    const formatStoreCard = (m: Record<string, any>) => ({
+      id: m.id,
+      business_name_ar: m.business_name_ar,
+      name_ar: m.business_name_ar,
+      branch_name: m.branch_name || '',
+      description_ar: m.description_ar || '',
+      image_url: m.image_url || '',
+      cover_image_url: m.cover_image_url || '',
+      merchant_type: m.merchant_type || 'supermarket',
+      is_open: Boolean(m.is_open),
+      is_open_now: Boolean(m.is_open),
+      rating_avg: Number(m.rating_avg || 0),
+      rating_count: Number(m.rating_count || 0),
+      followers_count: Number(m.followers_count || 0),
+      working_hours: m.working_hours || '',
+      address_detail: m.address_detail || '',
+      zone_name: m.zone_name || '',
+      products_count: Number(m.products_count || 0),
+      offers_count: Number(m.offers_count || 0),
+    });
+
+    const normQ = normalizeArabicText(q);
+    const qTokens = normQ ? normQ.split(/\s+/).filter(Boolean) : [];
+
+    const matchedStores = normQ
+      ? allActiveStores
+          .map((m) => {
+            const normName = normalizeArabicText(String(m.business_name_ar || ''));
+            const normBranch = normalizeArabicText(String(m.branch_name || ''));
+            const normDesc = normalizeArabicText(String(m.description_ar || ''));
+            const normZone = normalizeArabicText(String(m.zone_name || ''));
+            const normAddr = normalizeArabicText(String(m.address_detail || ''));
+            const normType = normalizeArabicText(`${m.merchant_type || ''} ${storeTypeArabic(String(m.merchant_type || ''))}`);
+            const fullHaystack = `${normName} ${normBranch} ${normDesc} ${normZone} ${normAddr} ${normType}`;
+
+            let score = 0;
+            if (normName === normQ) score += 120;
+            else if (normName.startsWith(normQ)) score += 90;
+            else if (normName.includes(normQ)) score += 70;
+            else if (normBranch.includes(normQ) || normDesc.includes(normQ)) score += 45;
+            else if (fullHaystack.includes(normQ)) score += 30;
+
+            if (score === 0 && qTokens.length > 0) {
+              const matchedCount = qTokens.filter((tok) => fullHaystack.includes(tok)).length;
+              if (matchedCount === qTokens.length) {
+                score += 55;
+              } else if (qTokens.length >= 2 && matchedCount >= Math.ceil(qTokens.length * 0.6)) {
+                score += 20;
+              }
+            }
+
+            if (score > 0 && m.is_open) score += 5;
+            return { m, score };
+          })
+          .filter((entry) => entry.score > 0)
+          .sort((a, b) => b.score - a.score || Number(b.m.rating_avg || 0) - Number(a.m.rating_avg || 0))
+          .slice(0, 16)
+          .map((entry) => formatStoreCard(entry.m))
+      : allActiveStores.slice(0, 16).map(formatStoreCard);
+
+    const availableStores = allActiveStores
+      .filter((m) => Number(m.products_count || 0) > 0)
+      .slice(0, 20)
+      .map((m) => ({
+        id: String(m.id),
+        business_name_ar: String(m.business_name_ar || ''),
+        products_count: Number(m.products_count || 0),
+        image_url: String(m.image_url || ''),
+        is_open: Boolean(m.is_open),
+        rating_avg: Number(m.rating_avg || 0),
+        rating_count: Number(m.rating_count || 0),
+      }));
 
     const dedupedSearchItems = merchantId
       ? rawItems
@@ -2964,6 +3069,7 @@ export function registerMasterCatalogRoutes(app: Express): void {
 
     res.json({
       query: q,
+      stores: matchedStores,
       items: enrichStorefrontProducts(dedupedSearchItems),
       top_offers: enrichStorefrontProducts(topOffers),
       trending_queries: trendingQueries,

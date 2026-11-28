@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { GpsMapPicker } from './GpsMapPicker.tsx';
+import { MerchantJoinWizard } from './MerchantJoinWizard.tsx';
 import type { Language, MerchantRecord, ServiceZone } from '../shared/types.ts';
 
 interface Props {
@@ -36,7 +37,7 @@ interface Props {
   onNotify: (msg: string) => void;
 }
 
-type AuthTab = 'login' | 'register';
+type AuthTab = 'login' | 'join' | 'track' | 'register';
 type LoginMethod = 'password' | 'otp';
 
 export const MerchantAuthPortal: React.FC<Props> = ({
@@ -401,18 +402,22 @@ export const MerchantAuthPortal: React.FC<Props> = ({
                 ? isAr
                   ? 'تسجيل دخول التاجر والصيدلي'
                   : 'Merchant & Pharmacy Sign In'
+                : authTab === 'track'
+                ? isAr
+                  ? 'متابعة حالة طلب الانضمام'
+                  : 'Track Onboarding Application'
                 : isAr
-                ? 'تسجيل وانضمام تاجر أو صيدلية جديدة'
-                : 'New Merchant & Pharmacy Registration'}
+                ? 'انضم إلى اطلبها — تسجيل متجر أو مطعم أو صيدلية'
+                : 'Join Otlobha — Self Onboarding'}
             </h2>
           </div>
         </div>
 
-        <div className="flex bg-black/20 p-1 rounded-xl gap-1">
+        <div className="flex flex-wrap bg-black/20 p-1 rounded-xl gap-1">
           <button
             type="button"
             onClick={() => setAuthTab('login')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
+            className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors ${
               authTab === 'login' ? 'bg-white text-[#A92224]' : 'text-white hover:bg-white/10'
             }`}
           >
@@ -420,15 +425,35 @@ export const MerchantAuthPortal: React.FC<Props> = ({
           </button>
           <button
             type="button"
-            onClick={() => setAuthTab('register')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
-              authTab === 'register' ? 'bg-[#F5A623] text-slate-950' : 'text-white hover:bg-white/10'
+            onClick={() => setAuthTab('join')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors ${
+              authTab === 'join' ? 'bg-[#F5A623] text-slate-950' : 'text-white hover:bg-white/10'
             }`}
           >
-            {isAr ? 'تسجيل حساب جديد' : 'Register Business'}
+            {isAr ? 'انضم إلى اطلبها' : 'Join Otlobha'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAuthTab('track')}
+            className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors ${
+              authTab === 'track' ? 'bg-white/95 text-slate-900' : 'text-white hover:bg-white/10'
+            }`}
+          >
+            {isAr ? 'متابعة طلب' : 'Track Status'}
           </button>
         </div>
       </div>
+
+      {/* NEW SELF-ONBOARDING WIZARD & STATUS TRACKER */}
+      {(authTab === 'join' || authTab === 'track') && (
+        <MerchantJoinWizard
+          lang={lang}
+          zones={zones}
+          initialMode={authTab === 'track' ? 'track' : 'apply'}
+          onBackToLogin={() => setAuthTab('login')}
+          onNotify={onNotify}
+        />
+      )}
 
       {/* LOGIN VIEW */}
       {authTab === 'login' && (
@@ -599,18 +624,31 @@ export const MerchantAuthPortal: React.FC<Props> = ({
 
           <div className="bg-orange-50 border border-orange-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-orange-950">
-              <p className="font-bold">{isAr ? 'لديك متجر أو صيدلية جديدة في المنزلة؟' : 'New store or pharmacy?'}</p>
+              <p className="font-bold">
+                {isAr ? 'لديك متجر، مطعم، كافيه، أو صيدلية؟' : 'Own a store, restaurant, cafe, or pharmacy?'}
+              </p>
               <p className="text-orange-800">
-                {isAr ? 'سجّل بيانات نشاطك بالكامل وانضم لشبكة اطلبها الآن.' : 'Register your business to join Otlobha.'}
+                {isAr
+                  ? 'انضم إلى اطلبها ذاتيًا، احفظ مسودتك في أي وقت، وتابع حالة اعتماد الإدارة خطوة بخطوة.'
+                  : 'Apply online, save drafts anytime, and track admin review status.'}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setAuthTab('register')}
-              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white rounded-xl text-xs font-bold whitespace-nowrap"
-            >
-              {isAr ? 'إنشاء حساب تاجر / صيدلي' : 'Register Now'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAuthTab('join')}
+                className="px-4 py-2 bg-[#A92224] hover:bg-[#8E1B1D] text-white rounded-xl text-xs font-bold whitespace-nowrap"
+              >
+                {isAr ? 'انضم إلى اطلبها' : 'Join Otlobha'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setAuthTab('track')}
+                className="px-3 py-2 bg-white hover:bg-orange-100 text-orange-900 border border-orange-300 rounded-xl text-xs font-bold whitespace-nowrap"
+              >
+                {isAr ? 'متابعة طلب' : 'Track'}
+              </button>
+            </div>
           </div>
         </div>
       )}

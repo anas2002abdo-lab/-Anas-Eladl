@@ -1836,6 +1836,10 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         key: _categoriesKey,
         api: api,
         categories: _storefrontCategories,
+        merchants: ((_bootstrap['merchants'] as List?) ?? [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(),
         zoneName: _currentZoneName(),
         cart: _quickCart,
         onOpenSearch: () => _openSmartSearch(),
@@ -1844,6 +1848,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onSelectBrand: _selectStorefrontBrand,
         onSelectMerchant: _selectStorefrontMerchant,
         onRefreshCategories: _refreshStorefrontCategories,
+        onOpenAllStores: () => _switchTab(2, serviceSubView: 'stores'),
         onSelectGroup: (groupKey) {
           setState(() {
             _clearStorefrontFilters();

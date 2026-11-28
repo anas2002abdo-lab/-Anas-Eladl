@@ -6,6 +6,7 @@ import 'storefront_product_pager_sheet.dart';
 class StorefrontCategoriesScreen extends StatefulWidget {
   final OtlobhaCustomerApi api;
   final List<Map<String, dynamic>> categories;
+  final List<Map<String, dynamic>> merchants;
   final String zoneName;
   final Map<String, int> cart;
   final VoidCallback onOpenSearch;
@@ -15,11 +16,13 @@ class StorefrontCategoriesScreen extends StatefulWidget {
   final void Function(String merchantId, String merchantName) onSelectMerchant;
   final void Function(String groupKey)? onSelectGroup;
   final Future<void> Function()? onRefreshCategories;
+  final VoidCallback? onOpenAllStores;
 
   const StorefrontCategoriesScreen({
     super.key,
     required this.api,
     required this.categories,
+    this.merchants = const [],
     required this.zoneName,
     required this.cart,
     required this.onOpenSearch,
@@ -29,6 +32,7 @@ class StorefrontCategoriesScreen extends StatefulWidget {
     required this.onSelectMerchant,
     this.onSelectGroup,
     this.onRefreshCategories,
+    this.onOpenAllStores,
   });
 
   @override
@@ -662,9 +666,10 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
       },
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(14),
         children: [
-          const SizedBox(height: 60),
+          _buildApprovedStoresStrip(horizontalPadding: 0),
+          const SizedBox(height: 44),
           Center(
             child: Container(
               width: 68,
@@ -987,6 +992,181 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
     );
   }
 
+  Widget _buildApprovedStoresStrip({double horizontalPadding = 14}) {
+    final activeMerchants = widget.merchants
+        .where((m) => (m['status'] ?? 'active').toString() == 'active')
+        .toList();
+    if (activeMerchants.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.storefront_rounded, size: 18, color: Color(0xFFA92224)),
+                  SizedBox(width: 6),
+                  Text(
+                    'المتاجر المعتمدة',
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF0F172A),
+                    ),
+                  ),
+                ],
+              ),
+              if (widget.onOpenAllStores != null)
+                InkWell(
+                  onTap: widget.onOpenAllStores,
+                  borderRadius: BorderRadius.circular(8),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Text(
+                      'عرض الكل',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFFA92224),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 88,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
+            padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+            itemCount: activeMerchants.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (_, idx) {
+              final m = activeMerchants[idx];
+              final mId = (m['id'] ?? '').toString();
+              final mName = (m['business_name_ar'] ?? m['name_ar'] ?? 'متجر').toString();
+              final logo = OtlobhaCustomerApi.resolveMediaUrl(m['image_url']);
+              final isOpen = m['is_open'] == true || m['is_open'] == 1 || m['is_open_now'] == true;
+              final ratingAvg = (m['rating_avg'] as num?)?.toDouble() ?? 0;
+              final ratingCount = (m['rating_count'] as num?)?.toInt() ?? 0;
+
+              return Material(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                child: InkWell(
+                  onTap: () => widget.onSelectMerchant(mId, mName),
+                  borderRadius: BorderRadius.circular(18),
+                  child: Container(
+                    width: 204,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x0A0F172A),
+                          blurRadius: 10,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 56,
+                          height: 56,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF2F2),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: const Color(0xFFE2E8F0)),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: logo.isNotEmpty
+                              ? Image.network(
+                                  logo,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => const Icon(
+                                    Icons.storefront_rounded,
+                                    color: Color(0xFFA92224),
+                                    size: 26,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.storefront_rounded,
+                                  color: Color(0xFFA92224),
+                                  size: 26,
+                                ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                mName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFF0F172A),
+                                ),
+                              ),
+                              const SizedBox(height: 5),
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.circle,
+                                    size: 7,
+                                    color: isOpen ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    isOpen ? 'مفتوح' : 'مغلق',
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: isOpen ? const Color(0xFF047857) : const Color(0xFFB91C1C),
+                                    ),
+                                  ),
+                                  if (ratingCount > 0) ...[
+                                    const SizedBox(width: 6),
+                                    const Icon(Icons.star_rounded, size: 13, color: Color(0xFFF5A623)),
+                                    const SizedBox(width: 2),
+                                    Text(
+                                      ratingAvg.toStringAsFixed(1),
+                                      style: const TextStyle(
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w800,
+                                        color: Color(0xFF334155),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildRootSquareGridView() {
     final roots = _rootCategories();
     final grouped = <String, List<Map<String, dynamic>>>{};
@@ -996,6 +1176,8 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
     }
 
     final activeGroups = _groups.where((g) => (grouped[g.key] ?? []).isNotEmpty).toList();
+    final hasApprovedStores = widget.merchants.any((m) => (m['status'] ?? 'active').toString() == 'active');
+
     if (activeGroups.isEmpty) {
       return RefreshIndicator(
         color: const Color(0xFFA92224),
@@ -1004,17 +1186,30 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
             await widget.onRefreshCategories!();
           }
         },
-        child: GridView.builder(
+        child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
-            childAspectRatio: 0.74,
-          ),
-          itemCount: roots.length,
-          itemBuilder: (_, idx) => _buildRootSquareTile(roots[idx], accent: const Color(0xFFA92224)),
+          padding: const EdgeInsets.fromLTRB(0, 14, 0, 24),
+          children: [
+            if (hasApprovedStores) ...[
+              _buildApprovedStoresStrip(horizontalPadding: 14),
+              const SizedBox(height: 18),
+            ],
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 0.74,
+                ),
+                itemCount: roots.length,
+                itemBuilder: (_, idx) => _buildRootSquareTile(roots[idx], accent: const Color(0xFFA92224)),
+              ),
+            ),
+          ],
         ),
       );
     }
@@ -1026,70 +1221,77 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
           await widget.onRefreshCategories!();
         }
       },
-      child: ListView.separated(
+      child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
-        itemCount: activeGroups.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 18),
-        itemBuilder: (_, idx) {
-          final meta = activeGroups[idx];
-          final cats = grouped[meta.key] ?? [];
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        padding: const EdgeInsets.fromLTRB(0, 14, 0, 24),
+        children: [
+          if (hasApprovedStores) ...[
+            _buildApprovedStoresStrip(horizontalPadding: 14),
+            const SizedBox(height: 18),
+          ],
+          ...List.generate(activeGroups.length, (idx) {
+            final meta = activeGroups[idx];
+            final cats = grouped[meta.key] ?? [];
+            return Padding(
+              padding: EdgeInsets.fromLTRB(14, 0, 14, idx < activeGroups.length - 1 ? 18 : 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Text(
-                      meta.title,
-                      style: const TextStyle(
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF0F172A),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          meta.title,
+                          style: const TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF0F172A),
+                          ),
+                        ),
                       ),
+                      if (widget.onSelectGroup != null)
+                        TextButton(
+                          onPressed: () => widget.onSelectGroup!(meta.key),
+                          style: TextButton.styleFrom(
+                            foregroundColor: const Color(0xFFA92224),
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('عرض الكل', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                              SizedBox(width: 2),
+                              Icon(Icons.chevron_left_rounded, size: 16),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: 0.74,
+                    ),
+                    itemCount: cats.length,
+                    itemBuilder: (_, cIdx) => _buildRootSquareTile(
+                      cats[cIdx],
+                      accent: meta.accent,
+                      fallbackBg: meta.bg,
+                      fallbackIcon: meta.icon,
                     ),
                   ),
-                  if (widget.onSelectGroup != null)
-                    TextButton(
-                      onPressed: () => widget.onSelectGroup!(meta.key),
-                      style: TextButton.styleFrom(
-                        foregroundColor: const Color(0xFFA92224),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('عرض الكل', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
-                          SizedBox(width: 2),
-                          Icon(Icons.chevron_left_rounded, size: 16),
-                        ],
-                      ),
-                    ),
                 ],
               ),
-              const SizedBox(height: 10),
-              GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                  childAspectRatio: 0.74,
-                ),
-                itemCount: cats.length,
-                itemBuilder: (_, cIdx) => _buildRootSquareTile(
-                  cats[cIdx],
-                  accent: meta.accent,
-                  fallbackBg: meta.bg,
-                  fallbackIcon: meta.icon,
-                ),
-              ),
-            ],
-          );
-        },
+            );
+          }),
+        ],
       ),
     );
   }
