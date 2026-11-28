@@ -4,6 +4,7 @@ import {
   Bell,
   Car,
   CheckCircle2,
+  ChefHat,
   Cloud,
   FileSpreadsheet,
   Languages,
@@ -57,6 +58,7 @@ import { RidesManagementSection } from './components/RidesManagementSection.tsx'
 import { CloudDatabaseSection } from './components/CloudDatabaseSection.tsx';
 import { PublicStoreWebPage } from './components/PublicStoreWebPage.tsx';
 import { StoreReviewsAdminSection } from './components/StoreReviewsAdminSection.tsx';
+import { AdminRecipesSection } from './components/AdminRecipesSection.tsx';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstallButton.tsx';
 import type { User as FirebaseUser } from 'firebase/auth';
 import {
@@ -524,6 +526,7 @@ export default function App() {
             items: [
               { id: 'master_catalog', label: isAr ? 'الكتالوج المركزي والمقارنة' : 'Master Catalog', icon: Layers },
               { id: 'catalog', label: isAr ? 'منتجات المتاجر والأقسام' : 'Store Products & Categories', icon: Package },
+              { id: 'recipes', label: isAr ? 'الوصفات الذكية' : 'Smart Recipes', icon: ChefHat },
               { id: 'invoice_design', label: isAr ? 'تصميم فاتورة العميل' : 'Invoice Design', icon: Receipt },
             ],
           },
@@ -968,24 +971,78 @@ export default function App() {
                         </p>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        api.logoutSession().catch(() => {});
-                        setMerchantSession(null);
-                        setOrders([]);
-                        try {
-                          localStorage.removeItem(MERCHANT_SESSION_KEY);
-                        } catch {
-                          // ignore
-                        }
-                        notify(isAr ? 'تم تسجيل خروج التاجر' : 'Merchant signed out');
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900 border border-rose-800/70 rounded-lg text-xs font-semibold text-rose-100"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      <span>{isAr ? 'تسجيل الخروج' : 'Sign Out'}</span>
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const nextOpen = !Boolean(merchantSession.is_open_now);
+                          try {
+                            const updatedRes = (await api.updateMerchant(merchantSession.id, {
+                              is_open_now: nextOpen,
+                            })) as { merchant?: Partial<MerchantRecord> } | null;
+                            const merged: MerchantRecord = {
+                              ...merchantSession,
+                              ...(updatedRes?.merchant || {}),
+                              is_open_now: nextOpen,
+                            };
+                            setMerchantSession(merged);
+                            setMerchants((prev) =>
+                              prev.map((m) => (m.id === merchantSession.id ? { ...m, is_open_now: nextOpen } : m))
+                            );
+                            try {
+                              localStorage.setItem(MERCHANT_SESSION_KEY, JSON.stringify(merged));
+                            } catch {
+                              // ignore
+                            }
+                            notify(
+                              nextOpen
+                                ? isAr
+                                  ? 'تم فتح المتجر لاستقبال الطلبات الآن'
+                                  : 'Store is now open for orders'
+                                : isAr
+                                  ? 'تم إغلاق المتجر مؤقتًا ولن يظهر كمفتوح للعملاء'
+                                  : 'Store is now closed'
+                            );
+                          } catch (err) {
+                            notify(err instanceof Error ? err.message : isAr ? 'تعذر تحديث حالة المتجر' : 'Failed to update store status');
+                          }
+                        }}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ${
+                          merchantSession.is_open_now
+                            ? 'bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-400/50 text-emerald-200'
+                            : 'bg-amber-500/20 hover:bg-amber-500/30 border-amber-400/50 text-amber-200'
+                        }`}
+                      >
+                        <span
+                          className={`w-2 h-2 rounded-full ${
+                            merchantSession.is_open_now ? 'bg-emerald-400' : 'bg-rose-400'
+                          }`}
+                        />
+                        <span>
+                          {merchantSession.is_open_now
+                            ? isAr ? 'المتجر مفتوح · اضغط للإغلاق' : 'Open · Close'
+                            : isAr ? 'المتجر مغلق · اضغط للفتح' : 'Closed · Open'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          api.logoutSession().catch(() => {});
+                          setMerchantSession(null);
+                          setOrders([]);
+                          try {
+                            localStorage.removeItem(MERCHANT_SESSION_KEY);
+                          } catch {
+                            // ignore
+                          }
+                          notify(isAr ? 'تم تسجيل خروج التاجر' : 'Merchant signed out');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900 border border-rose-800/70 rounded-lg text-xs font-semibold text-rose-100 cursor-pointer"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>{isAr ? 'تسجيل الخروج' : 'Sign Out'}</span>
+                      </button>
+                    </div>
                   </div>
                   {merchantSession.verification_status !== 'approved' && (
                     <div className="bg-amber-50 border border-amber-300 text-amber-950 rounded-xl px-4 py-2.5 text-xs font-medium">
@@ -1073,6 +1130,9 @@ export default function App() {
               )}
               {activeTab === 'store_reviews' && portalMode === 'admin' && (
                 <StoreReviewsAdminSection lang={lang} onNotify={notify} />
+              )}
+              {activeTab === 'recipes' && portalMode === 'admin' && (
+                <AdminRecipesSection lang={lang} onNotify={notify} />
               )}
               {activeTab === 'merchant_excel' && portalMode === 'merchant' && merchantSession && (
                 <MerchantMasterLinkPanel

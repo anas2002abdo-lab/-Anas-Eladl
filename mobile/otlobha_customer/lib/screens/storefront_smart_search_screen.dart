@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../core/api_client.dart';
 import '../widgets/storefront_product_card.dart';
+import '../widgets/animated_typewriter_placeholder.dart';
 import 'storefront_product_pager_sheet.dart';
 
 class StorefrontSmartSearchScreen extends StatefulWidget {
@@ -42,6 +43,8 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
   late final TextEditingController _queryCtrl;
   late final TextEditingController _minPriceCtrl;
   late final TextEditingController _maxPriceCtrl;
+  late final FocusNode _searchFocusNode;
+  late final TypewriterPlaceholderController _placeholderCtrl;
   Timer? _debounce;
 
   bool _loading = true;
@@ -65,12 +68,19 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
     _queryCtrl = TextEditingController(text: widget.initialQuery);
     _minPriceCtrl = TextEditingController();
     _maxPriceCtrl = TextEditingController();
+    _searchFocusNode = FocusNode();
+    _placeholderCtrl = TypewriterPlaceholderController(
+      focusNode: _searchFocusNode,
+      textController: _queryCtrl,
+    );
     _runSearch();
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _placeholderCtrl.dispose();
+    _searchFocusNode.dispose();
     _queryCtrl.dispose();
     _minPriceCtrl.dispose();
     _maxPriceCtrl.dispose();
@@ -233,29 +243,44 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
                               borderRadius: BorderRadius.circular(14),
                               border: Border.all(color: const Color(0xFFE2E8F0)),
                             ),
-                            child: TextField(
-                              controller: _queryCtrl,
-                              autofocus: widget.initialQuery.isEmpty,
-                              textInputAction: TextInputAction.search,
-                              onChanged: (_) => _scheduleSearch(),
-                              onSubmitted: (_) => _runSearch(),
-                              style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
-                              decoration: InputDecoration(
-                                hintText: 'ابحث عن متجر معتمد، منتج، أو ماركة...',
-                                hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
-                                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFFA92224), size: 20),
-                                suffixIcon: _queryCtrl.text.isNotEmpty
-                                    ? IconButton(
-                                        onPressed: () {
-                                          _queryCtrl.clear();
-                                          _runSearch();
-                                        },
-                                        icon: const Icon(Icons.close_rounded, size: 18, color: Color(0xFF64748B)),
-                                      )
-                                    : null,
-                                border: InputBorder.none,
-                                contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                              ),
+                            child: AnimatedBuilder(
+                              animation: _placeholderCtrl,
+                              builder: (context, _) {
+                                final hintText = _placeholderCtrl.isAnimating
+                                    ? (_placeholderCtrl.displayText.isEmpty
+                                        ? '|'
+                                        : '${_placeholderCtrl.displayText}|')
+                                    : _placeholderCtrl.displayText;
+                                return TextField(
+                                  controller: _queryCtrl,
+                                  focusNode: _searchFocusNode,
+                                  autofocus: widget.initialQuery.isEmpty,
+                                  textDirection: TextDirection.rtl,
+                                  textInputAction: TextInputAction.search,
+                                  onTapOutside: (_) => _searchFocusNode.unfocus(),
+                                  onChanged: (_) => _scheduleSearch(),
+                                  onSubmitted: (_) => _runSearch(),
+                                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+                                  decoration: InputDecoration(
+                                    hintText: hintText,
+                                    hintTextDirection: TextDirection.rtl,
+                                    hintMaxLines: 1,
+                                    hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
+                                    prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFFA92224), size: 20),
+                                    suffixIcon: _queryCtrl.text.isNotEmpty
+                                        ? IconButton(
+                                            onPressed: () {
+                                              _queryCtrl.clear();
+                                              _runSearch();
+                                            },
+                                            icon: const Icon(Icons.close_rounded, size: 18, color: Color(0xFF64748B)),
+                                          )
+                                        : null,
+                                    border: InputBorder.none,
+                                    contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                                  ),
+                                );
+                              },
                             ),
                           ),
                         ),
@@ -586,7 +611,8 @@ class _StorefrontSmartSearchScreenState extends State<StorefrontSmartSearchScree
     final mId = (store['id'] ?? '').toString();
     final mName = (store['business_name_ar'] ?? store['name_ar'] ?? 'متجر').toString();
     final logo = OtlobhaCustomerApi.resolveMediaUrl(store['image_url']);
-    final isOpen = store['is_open'] == true || store['is_open'] == 1 || store['is_open_now'] == true;
+    final rawOpen = store.containsKey('is_open_now') ? store['is_open_now'] : store['is_open'];
+    final isOpen = rawOpen == true || rawOpen == 1 || rawOpen == '1' || rawOpen == 'true';
     final ratingAvg = (store['rating_avg'] as num?)?.toDouble() ?? 0.0;
     final ratingCount = (store['rating_count'] as num?)?.toInt() ?? 0;
     final productsCount = (store['products_count'] as num?)?.toInt() ?? 0;

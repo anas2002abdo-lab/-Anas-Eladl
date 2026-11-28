@@ -3031,6 +3031,7 @@ export function registerMasterCatalogRoutes(app: Express): void {
         products_count: Number(m.products_count || 0),
         image_url: String(m.image_url || ''),
         is_open: Boolean(m.is_open),
+        is_open_now: Boolean(m.is_open),
         rating_avg: Number(m.rating_avg || 0),
         rating_count: Number(m.rating_count || 0),
       }));

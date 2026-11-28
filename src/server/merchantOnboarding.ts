@@ -1465,6 +1465,7 @@ export function registerMerchantOnboardingRoutes(app: Express, deps: MerchantOnb
       merchant: {
         ...safeMerchant,
         is_open_now: Boolean(merchant.is_open_now),
+        is_open: Boolean(merchant.is_open_now),
         supports_free_order: Boolean(merchant.supports_free_order),
         activity_category: activityProfile.category,
       },

@@ -47,6 +47,7 @@ import {
   notifyStoreFollowers,
 } from './src/server/storesReviewsSystem.ts';
 import { registerMerchantOnboardingRoutes } from './src/server/merchantOnboarding.ts';
+import { registerRecipesRoutes } from './src/server/recipesSystem.ts';
 import {
   createCategoryPathResolver,
   enrichAndOrderCategories,
@@ -2009,16 +2010,19 @@ app.patch('/api/captain-docs/:docId', requireAuth, requirePermission('docs.verif
 // 7. Merchants, Pharmacies & Orders
 function sanitizeMerchantRow(m: Record<string, unknown>) {
   const { password_hash: _pw, ...rest } = m;
+  const openFlag = Boolean(m.is_open_now);
   return {
     ...rest,
     is_email_verified: Boolean(m.is_email_verified),
     terms_accepted: Boolean(m.terms_accepted),
     supports_free_order: Boolean(m.supports_free_order),
-    is_open_now: Boolean(m.is_open_now),
+    is_open_now: openFlag,
+    is_open: openFlag,
   };
 }
 
 function sanitizePublicMerchantRow(m: Record<string, unknown>) {
+  const openFlag = Boolean(m.is_open_now);
   return {
     id: m.id,
     business_name_ar: m.business_name_ar,
@@ -2036,7 +2040,8 @@ function sanitizePublicMerchantRow(m: Record<string, unknown>) {
     share_slug: m.share_slug || '',
     verification_status: m.verification_status,
     supports_free_order: Boolean(m.supports_free_order),
-    is_open_now: Boolean(m.is_open_now),
+    is_open_now: openFlag,
+    is_open: openFlag,
     lat: m.lat,
     lng: m.lng,
     orders_count: m.orders_count,
@@ -2195,6 +2200,7 @@ app.patch(
       verification_status,
       commission_rate,
       is_open_now,
+      is_open,
       image_url,
       cover_image_url,
       description_ar,
@@ -2212,6 +2218,15 @@ app.patch(
     }
     const existing = db.prepare('SELECT * FROM merchants WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (!existing) return res.status(404).json({ error: 'التاجر غير موجود' });
+
+    const rawIncomingOpen = is_open_now !== undefined ? is_open_now : is_open;
+    const nextIsOpen =
+      rawIncomingOpen !== undefined
+        ? rawIncomingOpen === true || rawIncomingOpen === 1 || rawIncomingOpen === '1' || rawIncomingOpen === 'true'
+          ? 1
+          : 0
+        : Number(existing.is_open_now ? 1 : 0);
+    const prevIsOpen = Number(existing.is_open_now ? 1 : 0);
 
     db.prepare(`
       UPDATE merchants SET
@@ -2232,7 +2247,7 @@ app.patch(
     `).run(
       isAdminActor && verification_status !== undefined ? verification_status : existing.verification_status,
       isAdminActor && commission_rate !== undefined ? Number(commission_rate) : existing.commission_rate,
-      is_open_now !== undefined ? (is_open_now ? 1 : 0) : existing.is_open_now,
+      nextIsOpen,
       image_url !== undefined ? String(image_url || '') : String(existing.image_url || ''),
       cover_image_url !== undefined ? String(cover_image_url || '') : String(existing.cover_image_url || ''),
       description_ar !== undefined ? String(description_ar || '').trim().slice(0, 600) : String(existing.description_ar || ''),
@@ -2246,13 +2261,23 @@ app.patch(
       id
     );
     const updated = db.prepare('SELECT * FROM merchants WHERE id = ?').get(id) as Record<string, unknown>;
+    if (nextIsOpen !== prevIsOpen) {
+      const liveCustomerRooms = Array.from(chatRooms.keys()).filter((k) => k.startsWith('customer:'));
+      broadcastToRooms(['admin:all', `merchant:${id}`, ...liveCustomerRooms], {
+        type: 'merchant:status_changed',
+        merchant_id: id,
+        is_open_now: Boolean(nextIsOpen),
+        is_open: Boolean(nextIsOpen),
+        updated_at: new Date().toISOString(),
+      });
+    }
     recordAuditLog({
       actor_name: req.auth!.fullName,
       actor_role: req.auth!.role,
       action: 'MERCHANT_UPDATED',
       entity_type: 'merchants',
       entity_id: id,
-      details: `تحديث التاجر (${String(updated.business_name_ar)}): الحالة ${String(updated.verification_status)}، العمولة ${String(updated.commission_rate)}%`,
+      details: `تحديث التاجر (${String(updated.business_name_ar)}): الحالة ${String(updated.verification_status)}، التشغيل ${nextIsOpen ? 'مفتوح' : 'مغلق'}، العمولة ${String(updated.commission_rate)}%`,
     });
     res.json({
       ok: true,
@@ -6809,6 +6834,17 @@ function buildBootstrapStaticCatalogSnapshot() {
   };
 }
 
+function getMerchantOpenStatesSnapshot() {
+  const rows = db
+    .prepare("SELECT id, is_open_now FROM merchants WHERE verification_status IN ('approved', 'pending')")
+    .all() as Array<{ id: string; is_open_now: number }>;
+  return rows.map((r) => ({
+    id: String(r.id),
+    is_open_now: Boolean(r.is_open_now),
+    is_open: Boolean(r.is_open_now),
+  }));
+}
+
 app.get('/api/mobile/customer/guest-bootstrap', (req, res) => {
   const isLite = req.query.lite === '1' || req.query.lite === 'true';
   if (isLite) {
@@ -6816,6 +6852,7 @@ app.get('/api/mobile/customer/guest-bootstrap', (req, res) => {
       is_guest: true,
       lite: true,
       customer: null,
+      merchant_open_states: getMerchantOpenStatesSnapshot(),
       orders: [],
       trips: [],
       parcels: [],
@@ -7018,6 +7055,7 @@ app.get('/api/mobile/customer/bootstrap', (req, res) => {
   if (isLite) {
     return res.json({
       lite: true,
+      merchant_open_states: getMerchantOpenStatesSnapshot(),
       ...dynamicPayload,
     });
   }
@@ -13582,6 +13620,15 @@ registerMerchantOnboardingRoutes(app, {
   checkRateLimit,
   getClientIp,
 });
+
+// Serve generated culinary recipe photography across Web dev, Web prod, and Flutter mobile apps
+app.use('/recipe-assets', express.static(path.join(process.cwd(), 'src', 'assets', 'images'), { maxAge: '7d' }));
+
+// Serve the official Otlobha brand logo directly from project assets without duplicating files
+app.use('/brand-assets', express.static(path.join(process.cwd(), 'mobile', 'otlobha_customer', 'assets', 'images'), { maxAge: '7d' }));
+
+// Register Otlobha Smart Recipes & Shop-by-Ingredients System
+registerRecipesRoutes(app);
 
 async function startServer() {
   const PORT = Number(process.env.PORT || 3000);

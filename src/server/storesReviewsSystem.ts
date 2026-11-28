@@ -625,6 +625,7 @@ export function registerStoresReviewsRoutes(app: Express, deps: StoresReviewsDep
         lat: merchant.lat != null ? Number(merchant.lat) : null,
         lng: merchant.lng != null ? Number(merchant.lng) : null,
         is_open_now: Boolean(merchant.is_open_now),
+        is_open: Boolean(merchant.is_open_now),
         supports_free_order: Boolean(merchant.supports_free_order),
         verification_status: String(merchant.verification_status || 'approved'),
         orders_count: Number(merchant.orders_count || 0),
@@ -1415,6 +1416,7 @@ export function registerStoresReviewsRoutes(app: Express, deps: StoresReviewsDep
         image_url: String(r.image_url || ''),
         cover_image_url: String(r.cover_image_url || ''),
         is_open_now: Boolean(r.is_open_now),
+        is_open: Boolean(r.is_open_now),
         followers_count: Number(r.followers_count || 0),
         rating_avg: r.rating_avg != null ? Number(r.rating_avg) : 0,
         rating_count: Number(r.rating_count || 0),
@@ -1509,6 +1511,7 @@ export function registerStoresReviewsRoutes(app: Express, deps: StoresReviewsDep
         stores: storeRankings.map((s) => ({
           ...s,
           is_open_now: Boolean(s.is_open_now),
+          is_open: Boolean(s.is_open_now),
           rating_avg: Number(s.rating_avg || 0),
           rating_count: Number(s.rating_count || 0),
           hidden_reviews_count: Number(s.hidden_reviews_count || 0),

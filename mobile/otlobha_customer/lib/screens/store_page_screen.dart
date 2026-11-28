@@ -629,7 +629,8 @@ class _StorePageScreenState extends State<StorePageScreen> with SingleTickerProv
     final storeName = (_store['business_name_ar'] ?? widget.initialStoreName ?? 'صفحة المتجر').toString();
     final logoUrl = OtlobhaCustomerApi.resolveMediaUrl(_store['image_url']);
     final coverUrl = OtlobhaCustomerApi.resolveMediaUrl(_store['cover_image_url']);
-    final isOpen = _store['is_open_now'] != false;
+    final rawOpen = _store.containsKey('is_open_now') ? _store['is_open_now'] : _store['is_open'];
+    final isOpen = rawOpen == true || rawOpen == 1 || rawOpen == '1' || rawOpen == 'true';
     final ratingAvg = (_store['rating_avg'] as num?)?.toDouble() ?? 0.0;
     final ratingCount = (_store['rating_count'] as num?)?.toInt() ?? 0;
     final followersCount = (_store['followers_count'] as num?)?.toInt() ?? 0;

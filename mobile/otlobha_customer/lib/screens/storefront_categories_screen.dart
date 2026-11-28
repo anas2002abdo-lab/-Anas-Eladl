@@ -1053,7 +1053,8 @@ class StorefrontCategoriesScreenState extends State<StorefrontCategoriesScreen> 
               final mId = (m['id'] ?? '').toString();
               final mName = (m['business_name_ar'] ?? m['name_ar'] ?? 'متجر').toString();
               final logo = OtlobhaCustomerApi.resolveMediaUrl(m['image_url']);
-              final isOpen = m['is_open'] == true || m['is_open'] == 1 || m['is_open_now'] == true;
+              final rawOpen = m.containsKey('is_open_now') ? m['is_open_now'] : m['is_open'];
+              final isOpen = rawOpen == true || rawOpen == 1 || rawOpen == '1' || rawOpen == 'true';
               final ratingAvg = (m['rating_avg'] as num?)?.toDouble() ?? 0;
               final ratingCount = (m['rating_count'] as num?)?.toInt() ?? 0;
 

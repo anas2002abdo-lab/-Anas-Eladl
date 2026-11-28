@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../core/api_client.dart';
 import '../widgets/storefront_product_card.dart';
+import '../widgets/animated_typewriter_placeholder.dart';
 import 'storefront_product_pager_sheet.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -37,6 +38,7 @@ class HomeScreen extends StatefulWidget {
   final VoidCallback? onOpenLiveTracking;
   final VoidCallback? onOpenNotifications;
   final VoidCallback? onOpenDrawer;
+  final VoidCallback? onOpenRecipes;
 
   const HomeScreen({
     super.key,
@@ -70,6 +72,7 @@ class HomeScreen extends StatefulWidget {
     this.onOpenLiveTracking,
     this.onOpenNotifications,
     this.onOpenDrawer,
+    this.onOpenRecipes,
   });
 
   @override
@@ -660,15 +663,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 child: const Icon(Icons.search_rounded, color: Colors.white, size: 21),
               ),
               const SizedBox(width: 11),
-              const Expanded(
+              Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'ابحث عن منتج، ماركة، أو قارن الأسعار...',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                  children: const [
+                    AnimatedTypewriterPlaceholderText(
                       style: TextStyle(
                         fontSize: 13,
                         color: Color(0xFF334155),
@@ -1152,6 +1152,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Widget _buildServicesStrip() {
     final services = [
+      if (widget.onOpenRecipes != null)
+        (
+          label: 'الوصفات الذكية',
+          subtitle: 'تسوق واطبخ',
+          icon: Icons.restaurant_menu_rounded,
+          color: const Color(0xFFA92224),
+          onTap: widget.onOpenRecipes!,
+        ),
       (
         label: 'طلب نصي حر',
         subtitle: 'اكتب طلبك براحتك',
@@ -1267,172 +1275,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               );
             },
           ),
-    );
-  }
-
-  Widget _buildStoresStrip() {
-    final merchants = ((widget.bootstrap['merchants'] as List?) ?? [])
-        .whereType<Map>()
-        .map((e) => Map<String, dynamic>.from(e))
-        .where((m) => (m['status'] ?? 'active').toString() == 'active')
-        .toList();
-    if (merchants.isEmpty) return const SizedBox.shrink();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'المتاجر المعتمدة',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF0F172A),
-                ),
-              ),
-              InkWell(
-                onTap: () => widget.onOpenService('stores'),
-                child: const Text(
-                  'عرض الكل',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFFA92224),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 8),
-        SizedBox(
-          height: 86,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: merchants.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
-            itemBuilder: (_, idx) {
-              final m = merchants[idx];
-              final mId = (m['id'] ?? '').toString();
-              final mName = (m['business_name_ar'] ?? m['name_ar'] ?? 'متجر').toString();
-              final logo = OtlobhaCustomerApi.resolveMediaUrl(m['image_url']);
-              final isOpen = m['is_open'] == true || m['is_open'] == 1;
-              final ratingAvg = (m['rating_avg'] as num?)?.toDouble() ?? 0;
-              final ratingCount = (m['rating_count'] as num?)?.toInt() ?? 0;
-
-              return Material(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                child: InkWell(
-                  onTap: () => widget.onSelectMerchant(mId, mName),
-                  borderRadius: BorderRadius.circular(18),
-                  child: Container(
-                    width: 196,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(color: const Color(0xFFEAECEF)),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x080F172A),
-                          blurRadius: 10,
-                          offset: Offset(0, 3),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 54,
-                          height: 54,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFEF2F2),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: const Color(0xFFE2E8F0)),
-                          ),
-                          clipBehavior: Clip.antiAlias,
-                          child: logo.isNotEmpty
-                              ? Image.network(
-                                  logo,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => const Icon(
-                                    Icons.storefront_rounded,
-                                    color: Color(0xFFA92224),
-                                    size: 26,
-                                  ),
-                                )
-                              : const Icon(
-                                  Icons.storefront_rounded,
-                                  color: Color(0xFFA92224),
-                                  size: 26,
-                                ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                mName,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: Color(0xFF0F172A),
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.circle,
-                                    size: 7,
-                                    color: isOpen ? const Color(0xFF10B981) : const Color(0xFFEF4444),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    isOpen ? 'مفتوح' : 'مغلق',
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w700,
-                                      color: isOpen ? const Color(0xFF047857) : const Color(0xFFB91C1C),
-                                    ),
-                                  ),
-                                  if (ratingCount > 0) ...[
-                                    const SizedBox(width: 6),
-                                    const Icon(Icons.star_rounded, size: 13, color: Color(0xFFF5A623)),
-                                    const SizedBox(width: 2),
-                                    Text(
-                                      ratingAvg.toStringAsFixed(1),
-                                      style: const TextStyle(
-                                        fontSize: 10.5,
-                                        fontWeight: FontWeight.w800,
-                                        color: Color(0xFF334155),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ],
     );
   }
 
@@ -1762,14 +1604,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   child: Padding(
                     padding: const EdgeInsets.only(top: 12),
                     child: _buildServicesStrip(),
-                  ),
-                ),
-
-                // 3B. Approved Stores Horizontal Cards (opens independent Store Page)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: _buildStoresStrip(),
                   ),
                 ),
 

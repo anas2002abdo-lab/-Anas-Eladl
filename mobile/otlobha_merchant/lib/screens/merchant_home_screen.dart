@@ -146,8 +146,31 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
       _refreshMenuItems();
     }
     _refreshStaffMembers();
+    _syncMerchantProfileFromServer();
     _connectWs();
     _startPollingTimer();
+  }
+
+  bool _isMerchantOpenFlag(Map<String, dynamic> m) {
+    final raw = m.containsKey('is_open_now') ? m['is_open_now'] : m['is_open'];
+    return raw == true || raw == 1 || raw == '1' || raw == 'true';
+  }
+
+  Future<void> _syncMerchantProfileFromServer() async {
+    if (_merchantId.isEmpty) return;
+    try {
+      final profile = await widget.api.fetchWorkspaceProfile();
+      final freshMer = profile['merchant'];
+      if (freshMer is Map && mounted) {
+        final merged = Map<String, dynamic>.from(widget.merchant)..addAll(Map<String, dynamic>.from(freshMer));
+        final openFlag = _isMerchantOpenFlag(merged);
+        merged['is_open_now'] = openFlag;
+        merged['is_open'] = openFlag;
+        widget.onMerchantUpdated(merged);
+      }
+    } catch (_) {
+      // ignore transient network errors
+    }
   }
 
   Future<void> _refreshMenuItems() async {
@@ -202,6 +225,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
           _connectWs();
           _refreshOrders(force: true);
           _refreshNotifications();
+          _syncMerchantProfileFromServer();
           if (_products.isEmpty) {
             _refreshProducts(page: 1);
           }
@@ -1937,7 +1961,7 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
   }
 
   Widget _buildStoreProfileTab() {
-    final isOpen = widget.merchant['is_open'] == true || widget.merchant['is_open'] == 1;
+    final isOpen = _isMerchantOpenFlag(widget.merchant);
     final verified = widget.merchant['verification_status']?.toString() == 'approved';
 
     return ListView(
@@ -1986,10 +2010,16 @@ class _MerchantHomeScreenState extends State<MerchantHomeScreen> with WidgetsBin
                   activeThumbColor: MerchantAppConfig.brandTeal,
                   onChanged: (val) async {
                     try {
-                      await widget.api.updateStoreOpenStatus(merchantId: _merchantId, isOpen: val);
-                      final updated = Map<String, dynamic>.from(widget.merchant)..['is_open'] = val;
+                      final serverMer = await widget.api.updateStoreOpenStatus(merchantId: _merchantId, isOpen: val);
+                      final updated = Map<String, dynamic>.from(widget.merchant);
+                      if (serverMer != null) {
+                        updated.addAll(serverMer);
+                      }
+                      final syncedOpen = serverMer != null ? _isMerchantOpenFlag(serverMer) : val;
+                      updated['is_open_now'] = syncedOpen;
+                      updated['is_open'] = syncedOpen;
                       widget.onMerchantUpdated(updated);
-                      _snack(val ? 'تم فتح المتجر لاستقبال الطلبات' : 'تم إغلاق المتجر مؤقتًا');
+                      _snack(syncedOpen ? 'تم فتح المتجر لاستقبال الطلبات' : 'تم إغلاق المتجر مؤقتًا');
                     } catch (e) {
                       _snack(e.toString(), isError: true);
                     }

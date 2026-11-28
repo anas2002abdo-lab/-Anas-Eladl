@@ -619,7 +619,7 @@ class MerchantApiClient {
     return [];
   }
 
-  Future<void> updateStoreOpenStatus({
+  Future<Map<String, dynamic>?> updateStoreOpenStatus({
     required String merchantId,
     required bool isOpen,
   }) async {
@@ -630,10 +630,14 @@ class MerchantApiClient {
         .patch(
           uri,
           headers: _headers(),
-          body: jsonEncode({'is_open': isOpen}),
+          body: jsonEncode({'is_open_now': isOpen, 'is_open': isOpen}),
         )
         .timeout(const Duration(seconds: 20)));
-    _decode(res);
+    final data = _decode(res);
+    if (data is Map && data['merchant'] is Map) {
+      return Map<String, dynamic>.from(data['merchant'] as Map);
+    }
+    return null;
   }
 
   Future<Map<String, dynamic>> fetchSwipeDeckProgress(String merchantId) async {

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   Car,
+  ChefHat,
   ChevronDown,
   ChevronLeft,
   LayoutGrid,
@@ -25,6 +26,7 @@ import type {
   StorefrontProductCard,
 } from '../../shared/types';
 import { OtlobhaProductCard } from './OtlobhaProductCard';
+import { useTypewriterPlaceholder } from '../../hooks/useTypewriterPlaceholder';
 
 interface Props {
   zones: ServiceZone[];
@@ -55,7 +57,7 @@ interface Props {
   onOpenSearch: () => void;
   onOpenProduct: (productId: string) => void;
   onOpenNotifications: () => void;
-  onOpenService: (service: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order' | 'stores' | 'hub') => void;
+  onOpenService: (service: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order' | 'stores' | 'recipes' | 'hub') => void;
   onAddProduct: (product: StorefrontProductCard) => void;
   onDecrementProduct: (productId: string) => void;
 }
@@ -123,6 +125,9 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
   const [isSearchPinned, setIsSearchPinned] = useState(false);
   const heroSectionRef = useRef<HTMLElement | null>(null);
   const initialHeroTopRef = useRef<number | null>(null);
+  const { text: searchPlaceholder, isAnimating: isSearchPlaceholderAnimating } = useTypewriterPlaceholder({
+    active: true,
+  });
 
   const activeZone = zones.find((z) => z.id === selectedZoneId) || zones[0];
   const heroSlides = useMemo(() => {
@@ -203,6 +208,7 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
         serviceKey === 'market' ||
         serviceKey === 'free_order' ||
         serviceKey === 'stores' ||
+        serviceKey === 'recipes' ||
         serviceKey === 'hub'
       ) {
         onOpenService(serviceKey);
@@ -229,13 +235,21 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
   const currentHero = heroSlides[activeSlideIdx % heroSlides.length] || heroSlides[0];
 
   const otlobhaServices: Array<{
-    id: 'free_order' | 'pharmacy' | 'rides' | 'parcels' | 'market' | 'stores';
+    id: 'free_order' | 'pharmacy' | 'rides' | 'parcels' | 'market' | 'stores' | 'recipes';
     label: string;
     subtitle: string;
     icon: React.ComponentType<{ className?: string }>;
     accentBg: string;
     accentText: string;
   }> = [
+    {
+      id: 'recipes',
+      label: 'الوصفات الذكية',
+      subtitle: 'تسوق واطبخ',
+      icon: ChefHat,
+      accentBg: 'bg-rose-50',
+      accentText: 'text-[#A92224]',
+    },
     {
       id: 'free_order',
       label: 'طلب نصي حر',
@@ -307,7 +321,7 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
                 : 'h-[64px] sm:h-[74px] lg:h-[84px] bg-white/92 border border-white/80 ring-4 ring-white/20 shadow-[0_22px_52px_rgba(0,0,0,0.34)] hover:bg-white'
             }`}
           >
-            <span className="flex items-center gap-3 min-w-0">
+            <span className="flex-1 flex items-center gap-3 min-w-0">
               <span
                 className={`rounded-full bg-[#A92224] text-white flex items-center justify-center shrink-0 shadow-sm transition-all duration-200 ${
                   isSearchPinned ? 'w-9 h-9' : 'w-10 h-10 sm:w-11 sm:h-11'
@@ -315,8 +329,17 @@ export const OtlobhaStorefrontHome: React.FC<Props> = ({
               >
                 <Search className={isSearchPinned ? 'w-4 h-4 stroke-[2.5]' : 'w-5 h-5 stroke-[2.3]'} />
               </span>
-              <span className="text-sm sm:text-base font-bold text-slate-700 truncate">
-                ابحث عن منتج، ماركة، أو قارن الأسعار...
+              <span
+                dir="rtl"
+                className="flex-1 min-w-0 text-right text-sm sm:text-base font-bold text-slate-700 truncate leading-6"
+              >
+                {searchPlaceholder || '\u200B'}
+                {isSearchPlaceholderAnimating && (
+                  <span
+                    aria-hidden="true"
+                    className="inline-block w-[1.5px] h-[1em] align-[-0.15em] mr-0.5 bg-[#A92224]/75 animate-pulse"
+                  />
+                )}
               </span>
             </span>
             <span className="hidden sm:inline text-xs font-black text-[#A92224] shrink-0">

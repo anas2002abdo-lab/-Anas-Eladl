@@ -921,3 +921,129 @@ export interface AdminUserRecord {
   last_login_at?: string | null;
   created_at?: string;
 }
+
+export interface RecipeLinkedProduct {
+  link_id: string | null;
+  product_id: string;
+  id: string;
+  merchant_id: string;
+  merchant_name: string;
+  merchant_is_open: boolean;
+  category_id: string;
+  name_ar: string;
+  name_en: string;
+  image_url: string;
+  base_price: number;
+  sale_price: number | null;
+  effective_price: number;
+  is_offer: boolean;
+  stock_quantity: number;
+  is_available: boolean;
+  is_weighted: boolean;
+  weight_step: number;
+  weight_unit: string;
+  size_label: string;
+  brand: string;
+  requires_prescription: boolean;
+  is_recommended: boolean;
+  is_alternative: boolean;
+  is_suggested_alternative: boolean;
+  suggestion_source: 'admin' | 'auto_match' | null;
+  default_qty: number;
+  sort_order: number;
+}
+
+export interface RecipeIngredient {
+  id: string;
+  group_id: string;
+  name_ar: string;
+  quantity: number;
+  unit_ar: string;
+  notes_ar: string;
+  is_optional: boolean;
+  sort_order: number;
+  primary_unavailable: boolean;
+  default_product_id: string | null;
+  products: RecipeLinkedProduct[];
+  suggested_alternatives: RecipeLinkedProduct[];
+}
+
+export interface RecipeIngredientGroup {
+  id: string;
+  title_ar: string;
+  sort_order: number;
+  ingredients: RecipeIngredient[];
+}
+
+export interface RecipeStep {
+  id: string;
+  step_number: number;
+  title_ar: string;
+  instruction_ar: string;
+  timer_seconds: number;
+  tip_ar: string;
+}
+
+export interface RecipeSummary {
+  id: string;
+  title_ar: string;
+  description_ar: string;
+  source_name: string;
+  category_ar: string;
+  image_url: string;
+  video_url: string;
+  prep_time_minutes: number;
+  servings: number;
+  difficulty_ar: string;
+  is_active: boolean;
+  sort_order: number;
+  ingredients_count: number;
+  products_count: number;
+  stores_count: number;
+  steps_count: number;
+  estimated_total: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecipeDetail extends RecipeSummary {
+  groups: RecipeIngredientGroup[];
+  steps: RecipeStep[];
+}
+
+export interface RecipeUpsertPayload {
+  title_ar: string;
+  description_ar: string;
+  source_name: string;
+  category_ar: string;
+  image_url: string;
+  video_url: string;
+  prep_time_minutes: number;
+  servings: number;
+  difficulty_ar: string;
+  is_active: boolean;
+  sort_order?: number;
+  groups: Array<{
+    title_ar: string;
+    ingredients: Array<{
+      name_ar: string;
+      quantity: number;
+      unit_ar: string;
+      notes_ar?: string;
+      is_optional?: boolean;
+      products: Array<{
+        product_id: string;
+        is_recommended?: boolean;
+        is_alternative?: boolean;
+        default_qty?: number;
+      }>;
+    }>;
+  }>;
+  steps: Array<{
+    title_ar: string;
+    instruction_ar: string;
+    timer_seconds: number;
+    tip_ar?: string;
+  }>;
+}
+

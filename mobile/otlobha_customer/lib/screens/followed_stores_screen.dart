@@ -136,7 +136,8 @@ class _FollowedStoresScreenState extends State<FollowedStoresScreen> {
                                 final logo = OtlobhaCustomerApi.resolveMediaUrl(s['image_url']);
                                 final ratingAvg = (s['rating_avg'] as num?)?.toDouble() ?? 0.0;
                                 final ratingCnt = (s['rating_count'] as num?)?.toInt() ?? 0;
-                                final isOpen = s['is_open_now'] != false;
+                                final rawOpen = s.containsKey('is_open_now') ? s['is_open_now'] : s['is_open'];
+                                final isOpen = rawOpen == true || rawOpen == 1 || rawOpen == '1' || rawOpen == 'true';
                                 final offersCnt = (s['offers_count'] as num?)?.toInt() ?? 0;
 
                                 return Container(

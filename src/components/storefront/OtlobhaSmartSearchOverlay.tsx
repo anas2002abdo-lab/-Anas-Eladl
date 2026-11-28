@@ -14,6 +14,7 @@ import {
 import { api } from '../../lib/api';
 import type { StorefrontProductCard } from '../../shared/types';
 import { OtlobhaProductCard } from './OtlobhaProductCard';
+import { useTypewriterPlaceholder } from '../../hooks/useTypewriterPlaceholder';
 
 type MatchedStoreRecord = {
   id: string;
@@ -28,6 +29,7 @@ type MatchedStoreRecord = {
   rating_avg?: number;
   rating_count?: number;
   is_open?: boolean;
+  is_open_now?: boolean;
   products_count: number;
   offers_count?: number;
 };
@@ -55,6 +57,7 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
 }) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [query, setQuery] = useState(initialQuery);
+  const [isInputFocused, setIsInputFocused] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [sort, setSort] = useState<'relevance' | 'price_asc' | 'price_desc' | 'discount'>('relevance');
   const [selectedBrand, setSelectedBrand] = useState('');
@@ -70,10 +73,19 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
   const [brands, setBrands] = useState<string[]>([]);
   const [stores, setStores] = useState<Array<{ id: string; business_name_ar: string; products_count: number }>>([]);
 
+  const shouldAnimatePlaceholder = open && !isInputFocused && query.length === 0;
+  const { text: animatedPlaceholder, isAnimating: isPlaceholderAnimating } = useTypewriterPlaceholder({
+    active: shouldAnimatePlaceholder,
+    pausedText: 'ابحث عن...',
+  });
+
   useEffect(() => {
     if (open) {
       setQuery(initialQuery);
-      setTimeout(() => inputRef.current?.focus(), 60);
+      const focusTimer = setTimeout(() => inputRef.current?.focus(), 60);
+      return () => clearTimeout(focusTimer);
+    } else {
+      setIsInputFocused(false);
     }
   }, [open, initialQuery]);
 
@@ -125,15 +137,33 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
             <ArrowRight className="w-5 h-5" />
           </button>
 
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-[#A92224] absolute right-3.5 top-1/2 -translate-y-1/2" />
+          <div className="relative flex-1 min-w-0">
+            <Search className="w-4 h-4 text-[#A92224] absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none z-10" />
             <input
               ref={inputRef}
+              dir="rtl"
               value={query}
+              onFocus={() => setIsInputFocused(true)}
+              onBlur={() => setIsInputFocused(false)}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="ابحث عن متجر معتمد، منتج، علامة تجارية، أو باركود..."
-              className="w-full h-11 pr-10 pl-9 rounded-2xl bg-[#F6F7F9] border border-slate-200 focus:border-[#A92224] focus:bg-white focus:outline-none text-sm font-semibold text-slate-900"
+              aria-label="ابحث عن منتج أو متجر"
+              placeholder={isInputFocused ? 'ابحث عن...' : ''}
+              className="w-full h-11 pr-10 pl-9 rounded-2xl bg-[#F6F7F9] border border-slate-200 focus:border-[#A92224] focus:bg-white focus:outline-none text-sm font-semibold text-slate-900 placeholder:text-slate-400"
             />
+            {!query && !isInputFocused && (
+              <span
+                dir="rtl"
+                aria-hidden="true"
+                className="pointer-events-none select-none absolute inset-y-0 right-10 left-9 flex items-center overflow-hidden text-sm font-semibold text-slate-400"
+              >
+                <span className="truncate w-full text-right">
+                  {animatedPlaceholder || '\u200B'}
+                  {isPlaceholderAnimating && (
+                    <span className="inline-block w-[1.5px] h-[1em] align-[-0.15em] mr-0.5 bg-[#A92224]/70 animate-pulse" />
+                  )}
+                </span>
+              </span>
+            )}
             {query && (
               <button
                 type="button"
@@ -246,7 +276,8 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
                   <div className="flex items-stretch gap-2.5 overflow-x-auto no-scrollbar pb-1">
                     {matchedStores.map((st) => {
                       const ratingVal = Number(st.rating_avg || 0);
-                      const isOpen = st.is_open !== false;
+                      const rawOpen = st.is_open_now !== undefined ? st.is_open_now : st.is_open;
+                      const isOpen = rawOpen === true || Number(rawOpen) === 1;
                       return (
                         <button
                           key={st.id}
@@ -394,7 +425,8 @@ export const OtlobhaSmartSearchOverlay: React.FC<Props> = ({
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                         {matchedStores.map((st) => {
                           const ratingVal = Number(st.rating_avg || 0);
-                          const isOpen = st.is_open !== false;
+                          const rawOpen = st.is_open_now !== undefined ? st.is_open_now : st.is_open;
+                          const isOpen = rawOpen === true || Number(rawOpen) === 1;
                           return (
                             <button
                               key={st.id}

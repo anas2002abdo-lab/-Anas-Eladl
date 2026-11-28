@@ -5,6 +5,7 @@ import {
   Camera,
   Car,
   CheckCircle2,
+  ChefHat,
   ClipboardList,
   Clock,
   Copy,
@@ -68,6 +69,9 @@ import {
 import { OtlobhaSmartAssistantModal } from './storefront/OtlobhaSmartAssistantModal.tsx';
 import { PublicStoreWebPage } from './PublicStoreWebPage.tsx';
 import { CustomerRidesView } from './rides/CustomerRidesView.tsx';
+import { OtlobhaRecipesView } from './storefront/OtlobhaRecipesView.tsx';
+import type { SelectedRecipeCartItem } from './storefront/OtlobhaRecipeDetailView.tsx';
+import { OtlobhaSplashScreen } from './storefront/OtlobhaSplashScreen.tsx';
 import type {
   CaptainRatingRecord,
   CategoryRecord,
@@ -97,7 +101,7 @@ interface Props {
 }
 
 type BottomTab = 'home' | 'categories' | 'services' | 'offers' | 'cart' | 'profile';
-type ServiceSubView = 'hub' | 'stores' | 'pharmacy' | 'rides_parcels' | 'market';
+type ServiceSubView = 'hub' | 'stores' | 'pharmacy' | 'rides_parcels' | 'market' | 'recipes';
 
 const CUSTOMER_SESSION_KEY = 'otlobha_customer_email_session';
 
@@ -767,6 +771,9 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
           } else if (payload.type === 'trip:cancelled') {
             loadBootstrap(true).catch(() => {});
             onRefreshCore().catch(() => {});
+          } else if (payload.type === 'merchant:status_changed') {
+            loadBootstrap(true).catch(() => {});
+            onRefreshCore().catch(() => {});
           }
         } catch {
           // ignore
@@ -1073,7 +1080,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
   };
 
   const handleOpenOtlobhaService = (
-    srv: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order' | 'stores' | 'hub'
+    srv: 'pharmacy' | 'rides' | 'parcels' | 'market' | 'free_order' | 'stores' | 'recipes' | 'hub'
   ) => {
     if (srv === 'free_order') {
       setOrderChannel('free_text');
@@ -1085,6 +1092,51 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
       return;
     }
     openServiceView(srv);
+  };
+
+  const handleAddRecipeIngredientsToCart = (items: SelectedRecipeCartItem[]) => {
+    if (!items || items.length === 0) return;
+    const storeIds = new Set<string>();
+    items.forEach(({ product }) => {
+      if (product.merchant_id) storeIds.add(product.merchant_id);
+      ensureProductInCatalogState({
+        id: product.product_id,
+        merchant_id: product.merchant_id,
+        merchant_name: product.merchant_name,
+        category_id: product.category_id || 'cat_grocery',
+        name_ar: product.name_ar,
+        name_en: product.name_en || product.name_ar,
+        image_url: product.image_url,
+        base_price: product.base_price,
+        sale_price: product.sale_price,
+        is_weighted: Boolean(product.is_weighted),
+        weight_step: Number(product.weight_step || 0.25),
+        weight_unit: product.weight_unit || 'كجم',
+      });
+    });
+
+    setCart((prev) => {
+      const next = { ...prev };
+      for (const { product, qty } of items) {
+        if (!product.product_id || qty <= 0) continue;
+        const updated = Math.round(((next[product.product_id] || 0) + qty) * 1000) / 1000;
+        next[product.product_id] = updated;
+      }
+      return next;
+    });
+
+    const firstMerchantId = items[0]?.product.merchant_id;
+    if (firstMerchantId) setSelectedMerchantId(firstMerchantId);
+    setOrderChannel('catalog');
+    const storeCount = storeIds.size;
+    onNotify(
+      isAr
+        ? storeCount > 1
+          ? `تمت إضافة ${items.length} منتجات من ${storeCount} متاجر إلى سلة اطلبها`
+          : `تمت إضافة ${items.length} منتجات من الوصفة إلى سلة اطلبها`
+        : `Added ${items.length} recipe ingredients to your cart`
+    );
+    setTab('cart');
   };
 
   const handleAddToCart = (prod: ProductRecord, delta: number) => {
@@ -1712,6 +1764,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
         setTab('cart');
       },
     },
+    {
+      key: 'recipes',
+      title: isAr ? 'الوصفات الذكية' : 'Smart Recipes',
+      sub: isAr ? 'تسوّق المكونات واطبخ خطوة بخطوة' : 'Shop ingredients & cook',
+      icon: ChefHat,
+      boxClass: 'bg-[#A92224] text-white',
+      onClick: () => openServiceView('recipes'),
+    },
   ];
 
   const bottomNavItems: Array<{
@@ -1751,13 +1811,16 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
   if (showAuthScreen || (!customerSession && !isGuest)) {
     return (
-      <CustomerAuthPortal
-        lang={lang}
-        openedFromGuest={isGuest}
-        onVerified={handleCustomerVerified}
-        onContinueAsGuest={handleContinueAsGuest}
-        onNotify={onNotify}
-      />
+      <>
+        <OtlobhaSplashScreen />
+        <CustomerAuthPortal
+          lang={lang}
+          openedFromGuest={isGuest}
+          onVerified={handleCustomerVerified}
+          onContinueAsGuest={handleContinueAsGuest}
+          onNotify={onNotify}
+        />
+      </>
     );
   }
 
@@ -1795,6 +1858,7 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
 
   return (
     <div className="flex flex-col min-h-[calc(100vh-140px)]">
+      <OtlobhaSplashScreen />
       {/* Main Scrollable Content Area */}
       <div className="flex-1 space-y-5 pb-32">
         {/* Top Brand Strip (Shown on secondary tabs; on Home tab the Hero Banner extends behind the floating overlay header) */}
@@ -2908,6 +2972,14 @@ export const CustomerMobilePreview: React.FC<Props> = ({ lang, onNotify, onRefre
                   );
                 })}
               </div>
+            )}
+
+            {serviceView === 'recipes' && (
+              <OtlobhaRecipesView
+                onBack={() => setTab('home')}
+                onAddIngredientsToCart={handleAddRecipeIngredientsToCart}
+                onNotify={onNotify}
+              />
             )}
 
             {serviceView === 'stores' && (

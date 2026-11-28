@@ -1758,7 +1758,68 @@ export const api = {
     request<{ ok: boolean }>(`/api/merchant/staff/${encodeURIComponent(staffId)}`, {
       method: 'DELETE',
     }),
+
+  // =========================================================================
+  // Smart Recipes & Shop-by-Ingredients System APIs
+  // =========================================================================
+  getRecipes: (params?: { q?: string; category?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.category && params.category !== 'all') qs.set('category', params.category);
+    const qstr = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ recipes: import('../shared/types').RecipeSummary[]; categories: string[] }>(
+      `/api/recipes${qstr}`,
+      { cache: 'no-store' }
+    );
+  },
+  getRecipeDetail: (id: string) =>
+    request<{ recipe: import('../shared/types').RecipeDetail }>(
+      `/api/recipes/${encodeURIComponent(id)}`,
+      { cache: 'no-store' }
+    ),
+  adminGetRecipes: () =>
+    request<{ recipes: import('../shared/types').RecipeSummary[] }>('/api/admin/recipes', { cache: 'no-store' }),
+  adminGetRecipeDetail: (id: string) =>
+    request<{ recipe: import('../shared/types').RecipeDetail }>(
+      `/api/admin/recipes/${encodeURIComponent(id)}`,
+      { cache: 'no-store' }
+    ),
+  adminCreateRecipe: (body: import('../shared/types').RecipeUpsertPayload) =>
+    request<{ ok: boolean; recipe: import('../shared/types').RecipeDetail }>('/api/admin/recipes', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  adminUpdateRecipe: (id: string, body: import('../shared/types').RecipeUpsertPayload) =>
+    request<{ ok: boolean; recipe: import('../shared/types').RecipeDetail }>(
+      `/api/admin/recipes/${encodeURIComponent(id)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }
+    ),
+  adminToggleRecipe: (id: string, is_active: boolean) =>
+    request<{ ok: boolean; id: string; is_active: boolean }>(
+      `/api/admin/recipes/${encodeURIComponent(id)}/toggle`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active }),
+      }
+    ),
+  adminDeleteRecipe: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/admin/recipes/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+  adminSearchRecipeProducts: (q: string, merchantId?: string) => {
+    const qs = new URLSearchParams();
+    if (q.trim()) qs.set('q', q.trim());
+    if (merchantId) qs.set('merchant_id', merchantId);
+    return request<{ products: import('../shared/types').RecipeLinkedProduct[] }>(
+      `/api/admin/recipes/catalog/search?${qs.toString()}`,
+      { cache: 'no-store' }
+    );
+  },
 };
+
 
 
 

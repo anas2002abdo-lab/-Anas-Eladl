@@ -26,6 +26,7 @@ import {
 import { api } from '../../lib/api';
 import type { MerchantRecord, StorefrontCategoryRecord, StorefrontProductCard } from '../../shared/types';
 import { OtlobhaProductCard } from './OtlobhaProductCard';
+import { useTypewriterPlaceholder } from '../../hooks/useTypewriterPlaceholder';
 
 interface Props {
   categories: StorefrontCategoryRecord[];
@@ -136,6 +137,9 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
   // Deepest selected category whose products are displayed inline below the horizontal strips
   const activeCategory = selectedL3 || selectedL2 || selectedL1;
   const activeCategoryId = activeCategory?.id || null;
+  const { text: searchPlaceholder, isAnimating: isSearchPlaceholderAnimating } = useTypewriterPlaceholder({
+    active: !selectedL1,
+  });
 
   // Group root categories when browsing Level 1 squares
   const grouped = useMemo(() => {
@@ -429,10 +433,18 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
             <button
               type="button"
               onClick={onOpenSearch}
-              className="w-full h-11 rounded-2xl bg-white border border-slate-200/90 px-3.5 flex items-center gap-2.5 text-slate-400 text-sm shadow-xs hover:border-[#A92224]/40 transition cursor-pointer"
+              className="w-full h-11 rounded-2xl bg-white border border-slate-200/90 px-3.5 flex items-center gap-2.5 text-slate-500 text-sm shadow-xs hover:border-[#A92224]/40 transition cursor-pointer"
             >
               <Search className="w-4 h-4 text-[#A92224] shrink-0" />
-              <span className="truncate">ابحث عن متجر معتمد، قسم، أو منتج...</span>
+              <span dir="rtl" className="flex-1 min-w-0 text-right font-semibold truncate leading-5">
+                {searchPlaceholder || '\u200B'}
+                {isSearchPlaceholderAnimating && (
+                  <span
+                    aria-hidden="true"
+                    className="inline-block w-[1.5px] h-[1em] align-[-0.15em] mr-0.5 bg-[#A92224]/75 animate-pulse"
+                  />
+                )}
+              </span>
             </button>
           </div>
         )}
@@ -588,7 +600,8 @@ export const OtlobhaCategoriesView: React.FC<Props> = ({
               <div className="flex items-stretch gap-2.5 overflow-x-auto no-scrollbar pb-1 px-0.5">
                 {merchants.map((store) => {
                   const ratingVal = Number(store.rating_avg ?? 0);
-                  const isOpen = store.is_open !== false;
+                  const rawOpen = store.is_open_now !== undefined ? store.is_open_now : store.is_open;
+                  const isOpen = rawOpen === true || Number(rawOpen) === 1;
                   return (
                     <button
                       key={store.id}

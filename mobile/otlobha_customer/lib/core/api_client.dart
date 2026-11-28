@@ -1950,6 +1950,32 @@ class OtlobhaCustomerApi {
     );
     return _decode(res, endpointHint: '/api/customer/followed-stores');
   }
+
+  Future<Map<String, dynamic>> getRecipes({String? q, String? category}) async {
+    final qp = <String, String>{};
+    if (q != null && q.trim().isNotEmpty) qp['q'] = q.trim();
+    if (category != null && category.trim().isNotEmpty && category != 'all') {
+      qp['category'] = category.trim();
+    }
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/recipes', qp.isEmpty ? null : qp),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/recipes');
+  }
+
+  Future<Map<String, dynamic>> getRecipeDetail(String recipeId) async {
+    final enc = Uri.encodeComponent(recipeId);
+    final res = await _execute(
+      () => http.get(
+        _apiUri('/api/recipes/$enc'),
+        headers: _headers(includeAuth: false),
+      ),
+    );
+    return _decode(res, endpointHint: '/api/recipes/$recipeId');
+  }
 }
 
 

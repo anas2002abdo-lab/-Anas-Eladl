@@ -317,6 +317,7 @@ export function loadLiveActor(userId: string, userRole: string): LoadedActor | n
       terms_accepted: Boolean(row.terms_accepted),
       supports_free_order: Boolean(row.supports_free_order),
       is_open_now: Boolean(row.is_open_now),
+      is_open: Boolean(row.is_open_now),
       actorType: 'merchant' as const,
       role: 'merchant',
     };

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ui';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -30,6 +31,8 @@ import 'screens/storefront_smart_search_screen.dart';
 import 'screens/storefront_assistant_sheet.dart';
 import 'screens/store_page_screen.dart';
 import 'screens/followed_stores_screen.dart';
+import 'screens/recipes_screen.dart';
+import 'screens/splash_screen.dart';
 
 class _OtlobhaHttpOverrides extends HttpOverrides {
   @override
@@ -95,12 +98,20 @@ class OtlobhaCustomerApp extends StatelessWidget {
 class CustomerShell extends StatefulWidget {
   const CustomerShell({super.key});
 
+  @visibleForTesting
+  static void resetColdSplashForTest() {
+    _CustomerShellState._coldStartSplashShown = false;
+  }
+
   @override
   State<CustomerShell> createState() => _CustomerShellState();
 }
 
 class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserver {
+  static bool _coldStartSplashShown = false;
   final OtlobhaCustomerApi api = OtlobhaCustomerApi();
+  bool _sessionRestored = false;
+  late bool _splashFinished = _coldStartSplashShown;
   bool _isAuthenticated = false;
   bool _isGuest = false;
   bool _showAuthScreen = true;
@@ -637,6 +648,10 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
       }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+    } finally {
+      if (mounted) {
+        setState(() => _sessionRestored = true);
+      }
     }
   }
 
@@ -857,6 +872,17 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
             _silentSync();
             return;
           }
+          if (type == 'merchant:status_changed') {
+            final merId = (payload['merchant_id'] ?? '').toString();
+            final rawOpen = payload.containsKey('is_open_now') ? payload['is_open_now'] : payload['is_open'];
+            final isOpen = rawOpen == true || rawOpen == 1 || rawOpen == '1' || rawOpen == 'true';
+            if (merId.isNotEmpty) {
+              _applyMerchantOpenStates([
+                {'id': merId, 'is_open_now': isOpen, 'is_open': isOpen}
+              ]);
+            }
+            return;
+          }
           if (type == 'trip:accepted' ||
               type == 'trip:completed' ||
               type == 'trip:cancelled' ||
@@ -868,6 +894,47 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         } catch (_) {}
       });
     } catch (_) {}
+  }
+
+  void _applyMerchantOpenStates(List<dynamic> openStates) {
+    if (openStates.isEmpty || !mounted) return;
+    final currentMerchants = _bootstrap['merchants'];
+    if (currentMerchants is! List || currentMerchants.isEmpty) return;
+    final stateMap = <String, bool>{};
+    for (final raw in openStates) {
+      if (raw is Map) {
+        final id = (raw['id'] ?? '').toString().trim();
+        if (id.isNotEmpty) {
+          final v = raw.containsKey('is_open_now') ? raw['is_open_now'] : raw['is_open'];
+          stateMap[id] = v == true || v == 1 || v == '1' || v == 'true';
+        }
+      }
+    }
+    if (stateMap.isEmpty) return;
+    bool changed = false;
+    final updatedMerchants = currentMerchants.map((raw) {
+      if (raw is Map) {
+        final m = Map<String, dynamic>.from(raw);
+        final id = (m['id'] ?? '').toString().trim();
+        if (stateMap.containsKey(id)) {
+          final nextOpen = stateMap[id]!;
+          final prevRaw = m.containsKey('is_open_now') ? m['is_open_now'] : m['is_open'];
+          final prevOpen = prevRaw == true || prevRaw == 1 || prevRaw == '1' || prevRaw == 'true';
+          if (prevOpen != nextOpen || m['is_open_now'] != nextOpen || m['is_open'] != nextOpen) {
+            m['is_open_now'] = nextOpen;
+            m['is_open'] = nextOpen;
+            changed = true;
+          }
+        }
+        return m;
+      }
+      return raw;
+    }).toList();
+    if (changed && mounted) {
+      setState(() {
+        _bootstrap = <String, dynamic>{..._bootstrap, 'merchants': updatedMerchants};
+      });
+    }
   }
 
   Future<void> _showCaptainRatingDialog(Map<String, dynamic> target) async {
@@ -1028,6 +1095,39 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               if (data.containsKey('notifications')) 'notifications': data['notifications'],
             };
           }
+          if (data['merchant_open_states'] is List) {
+            final openStates = data['merchant_open_states'] as List;
+            final currentMerchants = _bootstrap['merchants'];
+            if (currentMerchants is List && currentMerchants.isNotEmpty) {
+              final stateMap = <String, bool>{};
+              for (final raw in openStates) {
+                if (raw is Map) {
+                  final id = (raw['id'] ?? '').toString().trim();
+                  if (id.isNotEmpty) {
+                    final v = raw.containsKey('is_open_now') ? raw['is_open_now'] : raw['is_open'];
+                    stateMap[id] = v == true || v == 1 || v == '1' || v == 'true';
+                  }
+                }
+              }
+              if (stateMap.isNotEmpty) {
+                _bootstrap = {
+                  ..._bootstrap,
+                  'merchants': currentMerchants.map((raw) {
+                    if (raw is Map) {
+                      final m = Map<String, dynamic>.from(raw);
+                      final id = (m['id'] ?? '').toString().trim();
+                      if (stateMap.containsKey(id)) {
+                        m['is_open_now'] = stateMap[id]!;
+                        m['is_open'] = stateMap[id]!;
+                      }
+                      return m;
+                    }
+                    return raw;
+                  }).toList(),
+                };
+              }
+            }
+          }
           _applyCustomerFromBootstrap(data);
           if (_loading) _loading = false;
         });
@@ -1111,6 +1211,63 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         _cartProductsCache[prodId] = Map<String, dynamic>.from(product);
       }
     });
+  }
+
+  void _openRecipes() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RecipesHubScreen(
+          api: api,
+          onAddItemsToCart: (selectedItems) {
+            if (selectedItems.isEmpty) return;
+            final storeIds = <String>{};
+            for (final item in selectedItems) {
+              final rawProd = item['product'];
+              if (rawProd is! Map) continue;
+              final prod = Map<String, dynamic>.from(rawProd);
+              final qty = (item['qty'] is int)
+                  ? item['qty'] as int
+                  : (int.tryParse('${item['qty'] ?? 1}') ?? 1);
+              final pid = (prod['product_id'] ?? prod['id'] ?? '').toString().trim();
+              if (pid.isEmpty || qty <= 0) continue;
+              final mid = (prod['merchant_id'] ?? '').toString().trim();
+              if (mid.isNotEmpty) storeIds.add(mid);
+              _onQuickAdd(
+                {
+                  'id': pid,
+                  'merchant_id': mid,
+                  'merchant_name': (prod['merchant_name'] ?? '').toString(),
+                  'category_id': (prod['category_id'] ?? 'cat_grocery').toString(),
+                  'name_ar': (prod['name_ar'] ?? '').toString(),
+                  'name_en': (prod['name_en'] ?? prod['name_ar'] ?? '').toString(),
+                  'image_url': (prod['image_url'] ?? '').toString(),
+                  'base_price': prod['base_price'] ?? prod['effective_price'] ?? 0,
+                  'sale_price': prod['sale_price'],
+                  'is_offer': prod['is_offer'] == true,
+                  'is_weighted': prod['is_weighted'] == true,
+                  'weight_step': prod['weight_step'] ?? 0.25,
+                  'weight_unit': (prod['weight_unit'] ?? 'كجم').toString(),
+                  'is_available': true,
+                },
+                qty,
+              );
+            }
+            if (mounted) {
+              final storesMsg = storeIds.length > 1
+                  ? 'تمت إضافة ${selectedItems.length} منتجات من ${storeIds.length} متاجر إلى السلة'
+                  : 'تمت إضافة ${selectedItems.length} منتجات من الوصفة إلى السلة';
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(storesMsg),
+                  backgroundColor: const Color(0xFF059669),
+                ),
+              );
+              _switchTab(3);
+            }
+          },
+        ),
+      ),
+    );
   }
 
   String _currentZoneName() {
@@ -1692,6 +1849,34 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
 
   @override
   Widget build(BuildContext context) {
+    final showSplashOverlay = !_splashFinished || !_sessionRestored;
+    if (!showSplashOverlay) {
+      return _buildActiveDestination(context);
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_sessionRestored)
+          _buildActiveDestination(context)
+        else
+          const ColoredBox(color: Colors.white),
+        if (!_splashFinished)
+          Positioned.fill(
+            child: OtlobhaSplashScreen(
+              onFinished: () {
+                _coldStartSplashShown = true;
+                if (mounted) {
+                  setState(() => _splashFinished = true);
+                }
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildActiveDestination(BuildContext context) {
     if (_showAuthScreen || (!_isAuthenticated && !_isGuest)) {
       return PopScope(
         canPop: !_isGuest,
@@ -1831,6 +2016,7 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
         onOpenLiveTracking: _showLiveTrackingSheet,
         onOpenNotifications: _openNotifications,
         onOpenDrawer: () => _scaffoldKey.currentState?.openDrawer(),
+        onOpenRecipes: _openRecipes,
       ),
       StorefrontCategoriesScreen(
         key: _categoriesKey,
@@ -2251,6 +2437,15 @@ class _CustomerShellState extends State<CustomerShell> with WidgetsBindingObserv
               onTap: () {
                 Navigator.pop(context);
                 _switchTab(5);
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.restaurant_menu_rounded, color: Color(0xFFA92224)),
+              title: const Text('الوصفات الذكية', style: TextStyle(fontWeight: FontWeight.w700)),
+              onTap: () {
+                Navigator.pop(context);
+                _openRecipes();
               },
             ),
             ListTile(
